@@ -1,9 +1,15 @@
 /**
- * Musixmatch, through the token its desktop web player issues itself.
+ * Musixmatch, through the token its **mobile** client issues itself.
  *
  * `richsync` is the prize here: word-by-word timing for most Western music, with no account
- * needed — the anonymous token is minted on demand and cached. A token of the user's own
- * reaches more of the catalogue and goes in the admin page if they have one.
+ * needed — the anonymous token is minted on demand and cached.
+ *
+ * Note the host and client id, which changed. The desktop app is discontinued and
+ * `apic-desktop.musixmatch.com` with `web-desktop-app-v1.0` now answers `200` with a token of
+ * fifty-six zeros; a request carrying that is *accepted* and returns lyrics for an unrelated
+ * song — asking for Kenshi Yonezu's "Lemon" came back with Drake. Verified against the live
+ * service: `apic.musixmatch.com` with `android-player-v1.0` issues real tokens, matches the
+ * right track, and still reaches richsync.
  *
  * Undocumented in every respect, so each step reports what actually happened rather than
  * collapsing to "not found": when this breaks, the useful question is *which* call broke.
@@ -15,8 +21,37 @@ import { parseRichSync } from '../format/musixmatch.ts';
 import { parseLrc } from '../format/lrc.ts';
 import type { Provider, ProviderAnswer, ProviderContext } from './types.ts';
 
-const API = 'https://apic-desktop.musixmatch.com/ws/1.1';
-const APP_ID = 'web-desktop-app-v1.0';
+const API = 'https://apic.musixmatch.com/ws/1.1';
+const APP_ID = 'android-player-v1.0';
+
+/**
+ * Which client id to take from a pasted `musixmatchUserToken` cookie, in order.
+ *
+ * A signed-in musixmatch.com session carries one token per Musixmatch client, and a token only
+ * works with the client it was issued for. Tested against the live endpoint: on this host all
+ * of these work, `web-desktop-app-v1.0` is refused outright, and the `-dev` and `-pp` variants
+ * are staging clients that have no business being pointed at the live API.
+ */
+const COOKIE_APP_IDS = [
+  'android-player-v1.0',
+  'mxm-pro-web-v1.0',
+  'mxm-pro-android-v1.0',
+  'mxm-pro-ios-v1.0',
+  'mxm-com-v1.0',
+  'mxm-account-v1.0',
+  'community-app-v1.0',
+  'mxm-studio-v1.0',
+  'mxm-experiments-v1.0',
+  'musixmatch-podcasts-v2.0',
+  'musixmatch-publishers-v2.0',
+  'mxm-backoffice-v1.0',
+] as const;
+
+/** A token and the client id it was issued for. Neither works without the other. */
+interface Credential {
+  token: string;
+  appId: string;
+}
 
 /** The anonymous token, kept for the process's lifetime — minting one per lookup is rude. */
 let guestToken: { value: string; mintedAt: number } | null = null;
@@ -46,26 +81,26 @@ interface MatcherBody {
 export const musixmatch: Provider = {
   id: 'musixmatch',
   label: 'Musixmatch',
-  description: 'Word-by-word for most Western music. Works with no account; a token widens it.',
+  description: 'Word-by-word for most Western music. Works with no account; a token lifts the rate limit.',
   requires: [],
   wordLevel: true,
   isConfigured: () => true,
 
   async fetch(track: TrackQuery, ctx: ProviderContext): Promise<ProviderAnswer | null> {
-    const token = await resolveToken(ctx);
-    if (!token) return null;
+    const credential = await resolveCredential(ctx);
+    if (!credential) return null;
 
     const matched = await json<Envelope<MatcherBody>>(
       `${API}/matcher.track.get?${query({
         format: 'json',
-        app_id: APP_ID,
-        usertoken: token,
+        app_id: credential.appId,
+        usertoken: credential.token,
         q_track: cleanTitleOf(track),
         q_artist: primaryArtistOf(track),
         q_album: track.album,
         q_duration: track.durationMs > 0 ? Math.round(track.durationMs / 1000) : undefined,
       })}`,
-      { headers: desktopHeaders() },
+      { headers: clientHeaders() },
     );
 
     if (isUnavailable(matched.result)) ctx.unreachable(`matcher: ${matched.result.error}`);
@@ -94,11 +129,11 @@ export const musixmatch: Provider = {
       const rich = await json<Envelope<{ richsync?: { richsync_body?: string } }>>(
         `${API}/track.richsync.get?${query({
           format: 'json',
-          app_id: APP_ID,
-          usertoken: token,
+          app_id: credential.appId,
+          usertoken: credential.token,
           track_id: found.track_id,
         })}`,
-        { headers: desktopHeaders() },
+        { headers: clientHeaders() },
       );
       const body = rich.value?.message?.body?.richsync?.richsync_body;
       if (body) {
@@ -118,11 +153,11 @@ export const musixmatch: Provider = {
       const subtitle = await json<Envelope<{ subtitle?: { subtitle_body?: string } }>>(
         `${API}/track.subtitle.get?${query({
           format: 'json',
-          app_id: APP_ID,
-          usertoken: token,
+          app_id: credential.appId,
+          usertoken: credential.token,
           track_id: found.track_id,
         })}`,
-        { headers: desktopHeaders() },
+        { headers: clientHeaders() },
       );
       const body = subtitle.value?.message?.body?.subtitle?.subtitle_body;
       if (body) {
@@ -143,8 +178,8 @@ export const musixmatch: Provider = {
 
   async test(ctx: ProviderContext) {
     const started = performance.now();
-    const token = await resolveToken(ctx);
-    if (!token) {
+    const credential = await resolveCredential(ctx);
+    if (!credential) {
       return {
         ok: false,
         ms: Math.round(performance.now() - started),
@@ -154,12 +189,12 @@ export const musixmatch: Provider = {
     const matched = await json<Envelope<MatcherBody>>(
       `${API}/matcher.track.get?${query({
         format: 'json',
-        app_id: APP_ID,
-        usertoken: token,
+        app_id: credential.appId,
+        usertoken: credential.token,
         q_track: 'Bohemian Rhapsody',
         q_artist: 'Queen',
       })}`,
-      { headers: desktopHeaders() },
+      { headers: clientHeaders() },
     );
     const status = matched.value?.message?.header?.status_code;
     const name = matched.value?.message?.body?.track?.track_name;
@@ -179,41 +214,116 @@ export const musixmatch: Provider = {
     contentType.includes('json') ? parseRichSync(body) : parseLrc(body),
 };
 
-async function resolveToken(ctx: ProviderContext): Promise<string | null> {
-  const own = ctx.config.secrets.musixmatchUserToken.trim();
+async function resolveCredential(ctx: ProviderContext): Promise<Credential | null> {
+  const own = parseUserToken(ctx.config.secrets.musixmatchUserToken);
   if (own) return own;
 
   if (guestToken && Date.now() - guestToken.mintedAt < GUEST_TOKEN_TTL_MS) {
-    return guestToken.value;
+    return { token: guestToken.value, appId: APP_ID };
   }
 
   const minted = await json<Envelope<{ user_token?: string }>>(
     `${API}/token.get?${query({ format: 'json', app_id: APP_ID })}`,
-    { headers: desktopHeaders() },
+    { headers: clientHeaders() },
   );
+
+  // The response is a 200 whose body carries the real status. `401 captcha` means the mint is
+  // rate-limiting this address — a wait rather than a refusal, so it must not be reported as
+  // this track having no lyrics.
+  const status = minted.value?.message?.header?.status_code;
+  if (status === 401) {
+    ctx.unreachable(`token mint is throttling (${minted.value?.message?.header?.hint ?? '401'})`);
+    return null;
+  }
+
   const value = minted.value?.message?.body?.user_token;
-  if (!value || value === 'UpgradeOnlyUpgradeOnlyUpgradeOnlyUpgradeOnly') {
+  if (!value || !isUsableToken(value)) {
     // Without a token nothing can be asked at all, so this is an outage rather than a miss.
     ctx.unreachable('no usable anonymous token');
     return null;
   }
   guestToken = { value, mintedAt: Date.now() };
-  return value;
+  return { token: value, appId: APP_ID };
+}
+
+/**
+ * Read whatever was pasted into the Musixmatch secret.
+ *
+ * Accepts a bare token or the whole `musixmatchUserToken` cookie from a signed-in
+ * musixmatch.com session — percent-encoded or not, on its own or inside a full cookie header.
+ * That cookie is the form a person actually has to hand, and it carries one token per client;
+ * picking a client the endpoint accepts is this function's job rather than theirs.
+ */
+export function parseUserToken(raw: string | undefined): Credential | null {
+  const value = raw?.trim();
+  if (!value) return null;
+
+  // Decode before deciding what this is: a cookie copied out of a browser arrives
+  // percent-encoded, and `%7B%22tokens%22…` contains neither a brace nor an equals sign.
+  let decoded = value;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    // Not encoded, or not validly — either way the raw string is what we have.
+  }
+
+  const afterName = decoded.includes('musixmatchUserToken=')
+    ? decoded.slice(decoded.indexOf('musixmatchUserToken=') + 'musixmatchUserToken='.length)
+    : decoded;
+  const jsonPart = afterName.split(';')[0].trim();
+
+  if (jsonPart.startsWith('{')) {
+    let tokens: Record<string, unknown> | undefined;
+    try {
+      tokens = (JSON.parse(jsonPart) as { tokens?: Record<string, unknown> }).tokens;
+    } catch {
+      return null;
+    }
+    if (!tokens) return null;
+    for (const appId of COOKIE_APP_IDS) {
+      const token = tokens[appId];
+      if (typeof token === 'string' && isUsableToken(token)) return { token, appId };
+    }
+    return null;
+  }
+
+  // A bare token says nothing about its client, so it is paired with the one used for the
+  // anonymous mint and allowed to fail. Pasting the cookie is better because it says.
+  return looksLikeToken(decoded) ? { token: decoded, appId: APP_ID } : null;
+}
+
+/**
+ * Whether a token is worth sending.
+ *
+ * The discontinued desktop endpoint answers with fifty-six zeros, and a request carrying that
+ * returns lyrics for an unrelated song — worse than no token at all. Any token made of a single
+ * repeated character is refused: the zeros, the older `UpgradeOnly…` placeholder, and whatever
+ * comes next.
+ */
+function isUsableToken(token: string): boolean {
+  const value = token.trim();
+  if (value.length < 8) return false;
+  if (value.startsWith('UpgradeOnly')) return false;
+  return new Set(value).size > 1;
+}
+
+/** Long, and hex. Without this, any stray line of text was sent as a credential. */
+function looksLikeToken(token: string): boolean {
+  const value = token.trim();
+  return value.length >= 32 && /^[0-9a-fA-F]+$/.test(value) && isUsableToken(value);
 }
 
 /**
  * The headers the endpoint expects.
  *
- * It is the desktop app's API and it checks: without a desktop-shaped user agent and an
- * origin it recognises, the token mint returns an upgrade placeholder instead of a token.
+ * Tested against the live service: a plain browser user agent is enough on this host, and the
+ * `musixmatch://` origin the desktop app sent is not required.
  */
-function desktopHeaders(): Record<string, string> {
+function clientHeaders(): Record<string, string> {
   return {
     Accept: 'application/json',
     'User-Agent':
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ' +
-      'Chrome/120.0.0.0 Safari/537.36',
-    Origin: 'musixmatch://',
-    Referer: 'musixmatch://',
+      'Chrome/124.0.0.0 Safari/537.36',
   };
 }

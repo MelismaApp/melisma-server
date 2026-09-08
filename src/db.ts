@@ -43,6 +43,49 @@ export interface RawResponse {
   note: string | null;
 }
 
+/** A JSON column read back, or null if it was empty or unreadable. */
+function parseJson(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'string' || !value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Everything about a track that is not its words, as some token once reported it.
+ *
+ * All of it optional and all of it merged rather than replaced, because the sources know
+ * different things: Spotify has the tempo and the beat grid, Apple has the songwriter and a
+ * colour palette, and neither has everything.
+ */
+export interface ExtrasEntry {
+  key: string;
+  title: string;
+  artist: string;
+  coverUrl: string | null;
+  artistImageUrl: string | null;
+  tempo: number | null;
+  /** Extracted colours: Apple's `bgColor` and `textColor1..4`, Spotify's accent. */
+  palette: Record<string, unknown> | null;
+  /**
+   * The rest of Spotify's audio analysis: key, mode, time signature, loudness, energy,
+   * danceability, and the beats, bars and sections grids.
+   *
+   * Worth holding above all the others because this is the endpoint the public Web API
+   * deprecated in November 2024 — a cached copy is the only durable one there is. The beat grid
+   * in particular is a capability rather than a decoration: a background can pulse on the beat
+   * instead of drifting at a rate derived from the tempo.
+   */
+  analysis: Record<string, unknown> | null;
+  /** Album name, release date, track and disc numbers, composer, genres, content rating. */
+  metadata: Record<string, unknown> | null;
+  source: string;
+  updatedAt: number;
+}
+
 export interface LogEvent {
   id: number;
   at: number;
@@ -115,6 +158,38 @@ export class Store {
         PRIMARY KEY (key, provider)
       );
 
+      -- Artwork and tempo, which outlive the tokens that found them.
+      --
+      -- A Spotify access token is good for an hour and an Apple developer token for a few
+      -- months; a cover URL and a tempo, once known, are true forever. The app contributes
+      -- what its tokens turn up and this is where it lands, so a phone with no token — or the
+      -- same phone an hour later — can still be asked.
+      CREATE TABLE IF NOT EXISTS extras (
+        key              TEXT PRIMARY KEY,
+        title            TEXT NOT NULL DEFAULT '',
+        artist           TEXT NOT NULL DEFAULT '',
+        cover_url        TEXT,
+        artist_image_url TEXT,
+        tempo            REAL,
+        -- Three JSON blobs rather than thirty columns. What is worth keeping here has grown
+        -- twice already and will again; a schema change per field would mean a migration per
+        -- field, for data whose only consumer reads it back whole.
+        --
+        -- palette:    bgColor and textColor1..4 from Apple's artwork, Spotify's accent.
+        -- analysis:   key, mode, timeSignature, loudness, energy, danceability, and the
+        --             beats/bars/sections grids — the endpoint the public API deprecated, so a
+        --             cached copy is the only durable one there is.
+        -- metadata:   albumName, releaseDate, trackNumber, discNumber, composerName,
+        --             genreNames, contentRating.
+        palette          TEXT,
+        analysis         TEXT,
+        metadata         TEXT,
+        source           TEXT NOT NULL DEFAULT '',
+        created_at       INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL,
+        hits             INTEGER NOT NULL DEFAULT 0
+      );
+
       CREATE TABLE IF NOT EXISTS events (
         id       INTEGER PRIMARY KEY AUTOINCREMENT,
         at       INTEGER NOT NULL,
@@ -125,6 +200,118 @@ export class Store {
 
       CREATE INDEX IF NOT EXISTS events_at ON events (at DESC);
     `);
+  }
+
+  // ---- extras ------------------------------------------------------------
+
+  extras(key: string): ExtrasEntry | null {
+    const row = this.db.prepare('SELECT * FROM extras WHERE key = ?').get(key) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+    this.db.prepare('UPDATE extras SET hits = hits + 1 WHERE key = ?').run(key);
+    return {
+      key,
+      title: String(row.title ?? ''),
+      artist: String(row.artist ?? ''),
+      coverUrl: (row.cover_url as string | null) ?? null,
+      artistImageUrl: (row.artist_image_url as string | null) ?? null,
+      tempo: (row.tempo as number | null) ?? null,
+      palette: parseJson(row.palette),
+      analysis: parseJson(row.analysis),
+      metadata: parseJson(row.metadata),
+      source: String(row.source ?? ''),
+      updatedAt: Number(row.updated_at ?? 0),
+    };
+  }
+
+  /**
+   * Remember what a token turned up.
+   *
+   * Merged rather than replaced: Spotify has the tempo and Apple does not, so a later Apple
+   * contribution must not blank a tempo an earlier Spotify one supplied. A field is only
+   * overwritten when the new value is actually there.
+   */
+  saveExtras(entry: Omit<ExtrasEntry, 'updatedAt'>): void {
+    const now = Date.now();
+    const blob = (value: unknown): string | null => {
+      if (!value || typeof value !== 'object') return null;
+      const keys = Object.keys(value as Record<string, unknown>);
+      return keys.length ? JSON.stringify(value) : null;
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO extras
+           (key, title, artist, cover_url, artist_image_url, tempo,
+            palette, analysis, metadata, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           cover_url        = COALESCE(excluded.cover_url, extras.cover_url),
+           artist_image_url = COALESCE(excluded.artist_image_url, extras.artist_image_url),
+           tempo            = COALESCE(excluded.tempo, extras.tempo),
+           palette          = COALESCE(excluded.palette, extras.palette),
+           analysis         = COALESCE(excluded.analysis, extras.analysis),
+           metadata         = COALESCE(excluded.metadata, extras.metadata),
+           source           = excluded.source,
+           updated_at       = excluded.updated_at`,
+      )
+      .run(
+        entry.key,
+        entry.title,
+        entry.artist,
+        entry.coverUrl,
+        entry.artistImageUrl,
+        entry.tempo,
+        blob(entry.palette),
+        blob(entry.analysis),
+        blob(entry.metadata),
+        entry.source,
+        now,
+        now,
+      );
+  }
+
+  /**
+   * Record what a track *is*, as opposed to what it looks like.
+   *
+   * An ISRC identifies a recording globally, and an authoritative duration in milliseconds
+   * turns the duration term in the matcher from a neutral 0.5 into a decision. Both belong on
+   * the cache entry rather than in the extras, because the code that needs them is the matcher,
+   * not the renderer — and because they never go stale, where a URL eventually does.
+   *
+   * Only ever fills a gap: a value already recorded is left alone. The first source to identify
+   * a recording is as good as the second, and overwriting invites a worse answer to replace a
+   * better one.
+   */
+  noteIdentity(key: string, identity: { isrc?: string | null; durationMs?: number | null }): void {
+    const isrc = identity.isrc?.trim() || null;
+    const durationMs = identity.durationMs && identity.durationMs > 0 ? identity.durationMs : null;
+    if (!isrc && !durationMs) return;
+
+    this.db
+      .prepare(
+        `UPDATE entries
+            SET isrc        = COALESCE(isrc, ?),
+                duration_ms = CASE WHEN duration_ms > 0 THEN duration_ms ELSE COALESCE(?, 0) END
+          WHERE key = ?`,
+      )
+      .run(isrc, durationMs, key);
+  }
+
+  /** Every ISRC known, for looking a recording up by identity rather than by name. */
+  isrcFor(key: string): string | null {
+    const row = this.db.prepare('SELECT isrc FROM entries WHERE key = ?').get(key) as
+      | { isrc: string | null }
+      | undefined;
+    return row?.isrc?.trim() || null;
+  }
+
+  extrasCount(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM extras').get() as
+      | { n: number }
+      | undefined;
+    return row?.n ?? 0;
   }
 
   // ---- settings ----------------------------------------------------------

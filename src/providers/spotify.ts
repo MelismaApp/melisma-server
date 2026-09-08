@@ -1,5 +1,5 @@
 /**
- * Spotify's `color-lyrics`, via an `sp_dc` cookie.
+ * Spotify's `color-lyrics`, via a web access token.
  *
  * Line-timed only — the `syllables` array in the response is always empty, whatever its
  * presence implies — so this is never the timing backbone. It earns its place for a different
@@ -8,6 +8,17 @@
  *
  * Requires a track id. There is no search here on purpose: guessing the id would throw away
  * the only property that makes this source worth consulting.
+ *
+ * **The cookie route is closed.** `open.spotify.com/get_access_token` answers `403 URL Blocked`
+ * and `open.spotify.com/api/token` answers 400 with "usage of this endpoint is not permitted
+ * under the Spotify Developer Terms" — identically with and without a cookie, so it is the
+ * endpoint rather than anybody's session. The endpoints that token opens are untouched:
+ * `color-lyrics` still answers `401`, meaning bring a token, rather than `403`.
+ *
+ * So bring the token. `spotifyWebToken` takes one copied out of the web player's own network
+ * traffic, and the mint is only attempted if that is empty — which currently means never
+ * succeeding. Reproducing the time-based signature the player uses to get its own token would
+ * be working around an access control whose owner has explicitly said not to, so this does not.
  */
 
 import { json, query, request } from '../http.ts';
@@ -20,15 +31,30 @@ const LYRICS_BASE = 'https://spclient.wg.spotify.com/color-lyrics/v2/track';
 /** The web token is short-lived; caching it saves a round trip per lookup. */
 let webToken: { value: string; expiresAt: number } | null = null;
 
+/**
+ * The pasted token, cleaned up.
+ *
+ * Accepts the whole `Authorization` header as well as the bare value, because copying the
+ * header is what a browser's developer tools make easy.
+ */
+export function pastedToken(raw: string | undefined): string | null {
+  const value = raw
+    ?.trim()
+    .replace(/^Authorization:\s*/i, '')
+    .replace(/^Bearer\s+/i, '')
+    .trim();
+  return value ? value : null;
+}
+
 export const spotify: Provider = {
   id: 'spotify',
   label: 'Spotify',
   description: 'The lyrics the Spotify app shows, matched to the exact track. Line-timed.',
-  requires: ['spDcCookie'],
+  requires: ['spotifyWebToken'],
   wordLevel: false,
 
   isConfigured(config) {
-    return Boolean(config.secrets.spDcCookie);
+    return Boolean(pastedToken(config.secrets.spotifyWebToken) || config.secrets.spDcCookie);
   },
 
   async fetch(track: TrackQuery, ctx: ProviderContext): Promise<ProviderAnswer | null> {
@@ -79,20 +105,44 @@ export const spotify: Provider = {
 
   async test(ctx: ProviderContext) {
     const started = performance.now();
-    if (!ctx.config.secrets.spDcCookie) return { ok: false, detail: 'no sp_dc cookie set' };
+    const pasted = pastedToken(ctx.config.secrets.spotifyWebToken);
+    if (!pasted && !ctx.config.secrets.spDcCookie) {
+      return { ok: false, detail: 'no access token set — copy one from the web player' };
+    }
 
-    const token = await accessToken(ctx, { force: true });
-    const ms = Math.round(performance.now() - started);
+    // A real request rather than a mint: with a pasted token there is nothing to mint, and
+    // whether the token is still alive is the only question worth asking.
+    const token = pasted ?? (await accessToken(ctx, { force: true }));
     if (!token) {
       return {
         ok: false,
-        ms,
+        ms: Math.round(performance.now() - started),
         detail:
-          'could not mint a web token from the cookie — sp_dc expires when the browser ' +
-          'session does, so sign in again and re-copy it',
+          'the cookie cannot be exchanged for a token any more — Spotify closed that ' +
+          'endpoint. Paste an access token from the web player instead.',
       };
     }
-    return { ok: true, ms, detail: 'cookie accepted, web token minted' };
+
+    const probe = await request(`${LYRICS_BASE}/4uLU6hMCjMI75M1A2tKUQC?format=json`, {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+        'App-Platform': 'WebPlayer',
+      },
+    });
+    const ms = Math.round(performance.now() - started);
+    if (probe.status === 401 || probe.status === 403) {
+      return { ok: false, ms, detail: 'the token has expired — copy a fresh one' };
+    }
+    // A 404 means the token was accepted and that particular track has no lyrics, which is
+    // exactly what this test needs to know.
+    return {
+      ok: probe.ok || probe.status === 404,
+      ms,
+      detail: probe.ok || probe.status === 404
+        ? 'token accepted'
+        : `color-lyrics returned HTTP ${probe.status}`,
+    };
   },
 
   reparse: (body) => parseColorLyrics(body),
@@ -109,6 +159,11 @@ async function accessToken(
   ctx: ProviderContext,
   options: { force?: boolean } = {},
 ): Promise<string | null> {
+  // A token the operator pasted in wins outright: there is nothing to mint, and the mint no
+  // longer works anyway.
+  const pasted = pastedToken(ctx.config.secrets.spotifyWebToken);
+  if (pasted) return pasted;
+
   if (!options.force && webToken && webToken.expiresAt > Date.now() + 30_000) {
     return webToken.value;
   }

@@ -131,7 +131,7 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
   }
 
   // ---- authenticated -----------------------------------------------------
-  if (!isAuthorised(app, request, path)) {
+  if (!isAuthorised(app, request, `${method} ${path}`)) {
     return send(response, 401, { error: 'unauthorised' });
   }
 
@@ -152,6 +152,12 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
 
     case 'POST /v1/contribute':
       return contribute(app, request, response);
+
+    case 'GET /v1/extras':
+      return readExtras(app, url, response);
+
+    case 'POST /v1/extras':
+      return writeExtras(app, request, response);
 
     case 'POST /admin/api/logout': {
       const token = cookie(request, 'bls_session');
@@ -522,6 +528,124 @@ function trackFromParams(params: URLSearchParams): TrackQuery | null {
   };
 }
 
+/**
+ * Artwork and tempo for a track, if some token has ever reported them here.
+ *
+ * The point of holding these: a Spotify access token lasts an hour and an Apple developer token
+ * a few months, but a cover URL and a tempo, once known, are true forever. A phone with no
+ * token can still be told what one found.
+ */
+function readExtras(app: App, url: URL, response: ServerResponse): void {
+  const track = trackFromParams(url.searchParams);
+  if (!track) return void send(response, 400, { error: 'need at least a title' });
+
+  const found = app.store.extras(cacheKey(track));
+  if (!found) return void send(response, 404, { error: 'nothing held for this track' });
+
+  send(response, 200, {
+    coverUrl: found.coverUrl ?? undefined,
+    artistImageUrl: found.artistImageUrl ?? undefined,
+    tempo: found.tempo ?? undefined,
+    palette: found.palette ?? undefined,
+    analysis: found.analysis ?? undefined,
+    metadata: found.metadata ?? undefined,
+    // Identity lives on the cache entry rather than here, because the matcher is what needs
+    // it — but a caller asking about a track may as well be told.
+    isrc: app.store.isrcFor(cacheKey(track)) ?? undefined,
+    source: found.source || undefined,
+  });
+}
+
+/**
+ * Take what a token turned up.
+ *
+ * URLs rather than images: the payload stays small, and nothing here needs a credential. The
+ * fields are merged, so an Apple contribution — which has no tempo — cannot blank a tempo an
+ * earlier Spotify one supplied.
+ */
+async function writeExtras(
+  app: App,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const track = trackFromJson(body);
+  if (!track) return void send(response, 400, { error: 'need at least a title' });
+
+  const url = (field: string): string | null => {
+    const value = body?.[field];
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    // Only http(s). A `file:` or `data:` URL here would be the server being asked to fetch
+    // something on the caller's behalf that has nothing to do with cover art.
+    if (!/^https?:\/\//i.test(trimmed)) return null;
+    return trimmed;
+  };
+
+  const tempo = Number(body?.tempo ?? 0);
+  const coverUrl = url('coverUrl');
+  const artistImageUrl = url('artistImageUrl');
+  const usableTempo = Number.isFinite(tempo) && tempo > 0 ? tempo : null;
+  const palette = record(body?.palette);
+  const analysis = record(body?.analysis);
+  const metadata = record(body?.metadata);
+
+  // Identity rather than presentation, so it goes on the cache entry where the matcher can
+  // see it. An ISRC turns a fuzzy name match into an exact lookup for every later caller, and
+  // an authoritative duration turns the matcher's duration term from a neutral 0.5 into a
+  // decision — which is exactly what is missing for the AMLL corpus, whose entries carry none.
+  // Keyed without the contributed ISRC, deliberately. `cacheKey` prefers an ISRC over the
+  // name-and-duration form, so keying on one that arrived *in this request* would file the
+  // extras under an identity no reader has yet — a phone with no token knows a title and an
+  // artist, which is exactly why it is asking. The ISRC is what is being learned here, not how
+  // to find it.
+  const key = cacheKey({ ...track, isrc: undefined });
+  const isrc = typeof body?.isrc === 'string' ? body.isrc.trim().slice(0, 32) : null;
+  const authoritativeDuration = Number(body?.durationMs ?? 0);
+  app.store.noteIdentity(key, {
+    isrc,
+    durationMs: Number.isFinite(authoritativeDuration) ? authoritativeDuration : null,
+  });
+
+  const hasPresentation =
+    coverUrl || artistImageUrl || usableTempo !== null || palette || analysis || metadata;
+  if (!hasPresentation) {
+    // The identity above may still have been recorded, which is worth saying so a caller
+    // sending only an ISRC does not read a 400 as "nothing happened".
+    if (isrc) return void send(response, 202, { ok: true, stored: 'identity' });
+    return void send(response, 400, { error: 'nothing usable in the contribution' });
+  }
+
+  app.store.saveExtras({
+    key,
+    title: track.title,
+    artist: track.artist,
+    coverUrl,
+    artistImageUrl,
+    tempo: usableTempo,
+    palette,
+    analysis,
+    metadata,
+    source: typeof body?.source === 'string' ? body.source.slice(0, 40) : '',
+  });
+  app.store.log('info', null, `extras stored for "${track.title}" from ${body?.source ?? '?'}`);
+  send(response, 202, { ok: true });
+}
+
+/**
+ * A nested object from a contribution, or null.
+ *
+ * Size-capped: these are held whole and served whole, and Spotify's `sections` array for a long
+ * track is already tens of kilobytes. A cache is not a place for an unbounded upload.
+ */
+function record(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const keys = Object.keys(value as Record<string, unknown>);
+  if (!keys.length) return null;
+  if (JSON.stringify(value).length > 256_000) return null;
+  return value as Record<string, unknown>;
+}
+
 function trackFromJson(body: unknown): TrackQuery | null {
   if (!body || typeof body !== 'object') return null;
   const record = body as Record<string, unknown>;
@@ -546,7 +670,7 @@ function trackFromJson(body: unknown): TrackQuery | null {
  * allowed through, which is what makes the app work as written without leaving the tokens or a
  * public deployment open. See `allowLocalNetwork` for the reverse-proxy caveat.
  */
-function isAuthorised(app: App, request: IncomingMessage, path: string): boolean {
+function isAuthorised(app: App, request: IncomingMessage, route: string): boolean {
   const header = request.headers.authorization ?? '';
   if (header.toLowerCase().startsWith('bearer ')) {
     return matchesApiKey(app, header.slice(7).trim());
@@ -559,7 +683,7 @@ function isAuthorised(app: App, request: IncomingMessage, path: string): boolean
     if (expiry) sessions.delete(token);
   }
 
-  if (LOCAL_ROUTES.has(path) && app.settings.read().allowLocalNetwork) {
+  if (LOCAL_ROUTES.has(route) && app.settings.read().allowLocalNetwork) {
     // A forwarded request's socket belongs to whatever forwarded it, not to the client. Behind
     // kamal-proxy, nginx or a Cloudflare tunnel that socket is on the Docker bridge or
     // loopback — so without this check the "local network" exception would let the entire
@@ -574,15 +698,21 @@ function isAuthorised(app: App, request: IncomingMessage, path: string): boolean
 /**
  * The routes the local network may use without a key.
  *
- * An allowlist rather than a `/v1/` prefix, because the two things under that prefix are not
- * alike: a lookup reads, and `POST /v1/contribute` writes to the archive permanently. A blanket
- * exception let anything on the Wi-Fi persist arbitrary lyrics into the merge, which is both
- * more than the app needs and more than the documentation promised.
+ * An allowlist rather than a `/v1/` prefix, and by method rather than by path, because the
+ * things under that prefix are not alike: a lookup reads, and a `POST` writes something other
+ * clients will later be served. A blanket exception let anything on the Wi-Fi persist arbitrary
+ * lyrics into the merge — or, once extras existed, name any URL on the internet as a track's
+ * cover art. Both are more than the app needs and more than the documentation promised.
  *
- * `/v1/warm` is a read that happens to populate the cache — it accepts no content — so it
- * belongs on this side of the line.
+ * `POST /v1/warm` is the exception that proves the rule: it accepts no content, only a track to
+ * go and look up, so it is a read that happens to populate the cache.
  */
-const LOCAL_ROUTES = new Set(['/v1/lyrics', '/v1/health', '/v1/warm']);
+const LOCAL_ROUTES = new Set([
+  'GET /v1/lyrics',
+  'GET /v1/health',
+  'GET /v1/extras',
+  'POST /v1/warm',
+]);
 
 /**
  * Whether the connecting socket is this machine or the private network.

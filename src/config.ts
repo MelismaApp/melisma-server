@@ -56,6 +56,14 @@ export interface Config {
 }
 
 export const SECRET_NAMES = [
+  /**
+   * A Spotify web access token, copied out of the player.
+   *
+   * Replaces `spDcCookie` in practice: Spotify closed the endpoint that turned the cookie into
+   * a token. Good for about an hour, which is why the cache matters — what it fetches outlives
+   * it.
+   */
+  'spotifyWebToken',
   'spDcCookie',
   'musixmatchUserToken',
   'neteaseCookie',

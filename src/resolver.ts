@@ -21,6 +21,7 @@ import type { Store } from './db.ts';
 import { document, line, type LyricsDocument, type MergedDocument } from './model.ts';
 import { parseTtml } from './format/ttml.ts';
 import { parseLrc } from './format/lrc.ts';
+import { harvest } from './harvest.ts';
 
 export interface ResolveOptions {
   /** Ignore the cache and ask every source again. */
@@ -166,6 +167,11 @@ export class Resolver {
     config: Config,
     started: number,
   ): Promise<Resolution> {
+    // Collect everything else about the track while the tokens are alive, whether or not
+    // anything reads it yet. Detached on purpose: the caller asked for words, and none of this
+    // is allowed to make them slower or to fail in a way they can see.
+    void harvest(this.store, config, key, track).catch(() => undefined);
+
     const providers = activeProviders(config);
     if (providers.length === 0) {
       this.store.log('warn', null, 'no sources are both enabled and configured');

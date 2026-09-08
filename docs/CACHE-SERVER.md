@@ -130,6 +130,41 @@ the client says it is.
 look local no matter who is really on the other end. Turn off **Settings → Allow the local
 network to look lyrics up without the key** for that, and give the app the key.
 
+## Everything that is not the words
+
+`GET /v1/extras` and `POST /v1/extras`, both documented on the app's side. Two things are worth
+saying here about *why* the server holds what it holds.
+
+**It collects more than anything reads.** After every lookup, `harvest.ts` asks whatever tokens
+are configured for the rest of what they know and files it. The reason is that the tokens are the
+scarce resource, not the storage: a Spotify access token is good for about an hour, an Apple
+developer token for a few months, and `audio-attributes` — which carries the tempo, the key, the
+loudness and the beat, bar and section grids — was withdrawn from the public Web API in November
+2024, so a cached copy is the only durable one that exists. A field nobody reads today costs a
+few hundred bytes. A field nobody collected today is gone.
+
+What is kept, and what is not: `segments` is dropped. It is one entry per note-level event with a
+twelve-value timbre vector each, megabytes for a long track, and nothing a lyrics renderer will
+ever read. `beats`, `bars` and `sections` are two orders of magnitude smaller and are the part
+that could actually change the rendering — a background can pulse on the beat grid rather than
+drift at a rate derived from the tempo.
+
+**Identity is not presentation.** An ISRC and an authoritative duration go on the `entries` row,
+not into the extras payload, because the code that needs them is the matcher rather than the
+renderer. An ISRC identifies a recording globally and never goes stale, which turns a fuzzy name
+match into an exact lookup for every later caller — and the community TTML database indexes on it
+directly. An authoritative duration in milliseconds turns the matcher's duration term from a
+neutral 0.5 into a decision, which is precisely what is missing for AMLL results, since that
+corpus carries no durations at all.
+
+Both are only ever filled in, never overwritten. The first source to identify a recording is as
+good as the second, and overwriting invites a worse answer to replace a better one.
+
+One consequence worth knowing: a contribution carrying an ISRC is filed under the *name* key, not
+the ISRC key. `cacheKey` prefers an ISRC when it has one, so keying on an ISRC that arrived in
+this very request would file the extras under an identity no reader has yet — a phone with no
+token knows a title and an artist, which is why it is asking in the first place.
+
 ## What the server deliberately does not do
 
 - **Interludes.** The app inserts its own three-dot lines from the gaps between lines. The
