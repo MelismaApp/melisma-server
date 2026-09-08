@@ -350,6 +350,11 @@ export function formatTime(ms: number): string {
  * hand to the community database if any of this is ever contributed back — which is the
  * only legitimate way for lyrics assembled here to help anybody else.
  */
+/** The sung lines: leads, without the interludes a renderer generates for itself. */
+function leadsOf(doc: LyricsDocument): LyricLine[] {
+  return doc.lines.filter((l) => l.role === 'lead');
+}
+
 export function writeTtml(doc: LyricsDocument | MergedDocument, indent = '  '): string {
   const agents = new Set<string>();
   for (const l of doc.lines) if (l.agent) agents.add(l.agent);
@@ -361,7 +366,10 @@ export function writeTtml(doc: LyricsDocument | MergedDocument, indent = '  '): 
     '<tt xmlns="http://www.w3.org/ns/ttml"' +
       ' xmlns:ttm="http://www.w3.org/ns/ttml#metadata"' +
       ' xmlns:itunes="http://music.apple.com/lyric-ttml-internal"' +
-      ` itunes:timing="${doc.kind === 'syllable' ? 'Word' : 'Line'}"` +
+      // Only claimed when it is true. A document with no timing gets no timing attribute and
+      // no begin/end, rather than a mode it cannot honour — though for that case the caller
+      // should be sending plain text instead, since TTML has no way to say "unsynced".
+      (doc.kind === 'static' ? '' : ` itunes:timing="${doc.kind === 'syllable' ? 'Word' : 'Line'}"`) +
       (doc.language ? ` xml:lang="${escapeAttr(doc.language)}"` : '') +
       '>',
   );
@@ -387,6 +395,38 @@ export function writeTtml(doc: LyricsDocument | MergedDocument, indent = '  '): 
         ' -->',
     );
   }
+  // Per-syllable readings live in a metadata block keyed by line and span, which is where
+  // Apple puts them and where this parser and the app's both look. Emitting only the timed
+  // text would drop them silently — and they are the good kind of reading, the kind the
+  // karaoke sweep can run across rather than a line printed underneath.
+  const keyed = leadsOf(doc).map((l, index) => ({ line: l, key: l.key ?? `L${index + 1}` }));
+  const withSyllableReadings = keyed.filter(({ line: l }) =>
+    l.syllables.some((syllable) => syllable.romanized),
+  );
+
+  if (withSyllableReadings.length > 0) {
+    out.push(`${indent.repeat(3)}<iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal">`);
+    out.push(`${indent.repeat(4)}<transliterations>`);
+    out.push(
+      `${indent.repeat(5)}<transliteration` +
+        (doc.language ? ` xml:lang="${escapeAttr(`${doc.language}-Latn`)}"` : '') +
+        '>',
+    );
+    for (const { line: l, key } of withSyllableReadings) {
+      const spans = l.syllables
+        .map((syllable, index) =>
+          syllable.romanized
+            ? `<span for="${escapeAttr(`${key}.${index + 1}`)}">${escapeText(syllable.romanized)}</span>`
+            : '',
+        )
+        .join('');
+      out.push(`${indent.repeat(6)}<text for="${escapeAttr(key)}">${spans}</text>`);
+    }
+    out.push(`${indent.repeat(5)}</transliteration>`);
+    out.push(`${indent.repeat(4)}</transliterations>`);
+    out.push(`${indent.repeat(3)}</iTunesMetadata>`);
+  }
+
   out.push(`${indent}${indent}</metadata>`);
   out.push(`${indent}</head>`);
 
@@ -395,15 +435,15 @@ export function writeTtml(doc: LyricsDocument | MergedDocument, indent = '  '): 
 
   // Background lines are written inside the lead `<p>` they belong to, which is where the
   // format puts them and where a reader expects to find them.
-  const leads = doc.lines.filter((l) => l.role !== 'background');
   const backgrounds = doc.lines.filter((l) => l.role === 'background');
 
-  for (const [index, l] of leads.entries()) {
-    if (l.role === 'interlude') continue;
-    const key = l.key ?? `L${index + 1}`;
+  for (const { line: l, key } of keyed) {
+    const timing =
+      doc.kind === 'static'
+        ? ''
+        : `begin="${formatTime(l.startMs)}" end="${formatTime(l.endMs)}" `;
     const attrs =
-      `begin="${formatTime(l.startMs)}" end="${formatTime(l.endMs)}"` +
-      ` itunes:key="${escapeAttr(key)}"` +
+      `${timing}itunes:key="${escapeAttr(key)}"` +
       (l.agent ? ` ttm:agent="${escapeAttr(l.agent)}"` : ' ttm:agent="v1"');
 
     const body: string[] = [];

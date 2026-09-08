@@ -18,7 +18,9 @@ import { cacheKey, type TrackQuery } from './match.ts';
 import { redact } from './http.ts';
 import type { Config, Settings } from './config.ts';
 import type { Store } from './db.ts';
-import type { MergedDocument } from './model.ts';
+import { document, line, type LyricsDocument, type MergedDocument } from './model.ts';
+import { parseTtml } from './format/ttml.ts';
+import { parseLrc } from './format/lrc.ts';
 
 export interface ResolveOptions {
   /** Ignore the cache and ask every source again. */
@@ -34,6 +36,56 @@ export interface Resolution {
   /** Present when this lookup actually asked the providers. */
   candidates?: MergeResult['summaries'];
   ms: number;
+}
+
+/**
+ * Reads a body by the format it declares, rather than by who sent it.
+ *
+ * Used for anything the app contributed: it says `lrc`, `ttml` or `json` and the content type
+ * recorded alongside it is the only thing that knows which.
+ */
+export function reparseByFormat(body: string, contentType: string): LyricsDocument | null {
+  if (contentType.includes('ttml') || contentType.includes('xml')) return parseTtml(body);
+  if (contentType.includes('json')) {
+    // The app's own document model. Normalised rather than trusted, so a field it happens not
+    // to send cannot produce a document the invariants would later choke on.
+    try {
+      const parsed = JSON.parse(body) as Partial<LyricsDocument>;
+      const lines = Array.isArray(parsed.lines) ? parsed.lines : [];
+      if (lines.length === 0) return null;
+      return document(
+        lines.map((l) =>
+          line({
+            ...l,
+            text: String(l.text ?? ''),
+            syllables: Array.isArray(l.syllables) ? l.syllables : [],
+          }),
+        ),
+        { language: parsed.language, songWriters: parsed.songWriters ?? [] },
+      );
+    } catch {
+      return null;
+    }
+  }
+  return parseLrc(body) ?? plainTextDocument(body);
+}
+
+/**
+ * Unsynced lyrics, one line per line. Still worth keeping: they align other sources.
+ *
+ * Markup is refused rather than read as text. The realistic accident is an error page arriving
+ * where lyrics were expected, and a permanent archive entry reading `502 Bad Gateway` is worse
+ * than refusing the contribution — the same rule the app applies to a server's reply.
+ */
+function plainTextDocument(body: string): LyricsDocument | null {
+  if (body.trimStart().startsWith('<')) return null;
+
+  const lines = body
+    .split(/\r?\n/)
+    .map((text) => text.trim())
+    .filter((text) => text.length > 0)
+    .map((text) => line({ text }));
+  return lines.length > 0 ? document(lines, { kind: 'static' }) : null;
 }
 
 export class Resolver {
@@ -121,6 +173,7 @@ export class Resolver {
     }
 
     const candidates: Candidate[] = [];
+    const unreachable: string[] = [];
 
     await Promise.all(
       providers.map(async (provider) => {
@@ -128,6 +181,10 @@ export class Resolver {
           config,
           log: (level: 'info' | 'warn' | 'error', message: string) =>
             this.store.log(level, provider.id, redact(message)),
+          unreachable: (detail: string) => {
+            unreachable.push(provider.id);
+            this.store.log('warn', provider.id, redact(detail));
+          },
         };
         try {
           const answer = await provider.fetch(track, ctx);
@@ -150,10 +207,40 @@ export class Resolver {
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
+          // A thrown error is never an answer about the track.
+          unreachable.push(provider.id);
           this.store.log('error', provider.id, redact(message));
         }
       }),
     );
+
+    // Nothing found *and* something broke is not the same as nothing found. Writing it down as
+    // "this track has no lyrics" would hide the track for as long as the negative cache lasts,
+    // and on a stale refresh it would replace a document that was perfectly good. An outage
+    // leaves the cache exactly as it was, and serves whatever was already there.
+    if (candidates.length === 0 && unreachable.length > 0) {
+      const existing = this.store.getEntry(key);
+      const ms = Math.round(performance.now() - started);
+      this.store.log(
+        'warn',
+        null,
+        `${track.artist} — ${track.title}: nothing found, but ` +
+          `${[...new Set(unreachable)].join(', ')} could not be reached — not caching that`,
+      );
+      if (existing?.merged) {
+        try {
+          return {
+            document: JSON.parse(existing.merged) as MergedDocument,
+            key,
+            source: 'cache',
+            ms,
+          };
+        } catch {
+          /* Unreadable; fall through to the empty answer below. */
+        }
+      }
+      return { document: null, key, source: 'absent', candidates: [], ms };
+    }
 
     const result = merge(candidates, {
       durationMs: track.durationMs,
@@ -205,14 +292,18 @@ export class Resolver {
     const candidates: Candidate[] = [];
 
     for (const raw of raws) {
-      // A contribution from the app is archived as `app:<provider>`. It is the same format
-      // the provider itself returns, so the provider's own reader handles it — without this
-      // a contribution would be stored and then never used, which is worse than refusing it.
-      const baseId = raw.provider.replace(/^app:/, '');
-      const provider = providerById(baseId);
-      if (!provider) continue;
-      const doc = provider.reparse(raw.body, raw.contentType);
+      const contributed = raw.provider.startsWith('app:');
+      const baseId = contributed ? raw.provider.slice(4) : raw.provider;
+
+      // A contribution arrives in whatever format the app declared, which is not the shape the
+      // named provider's own reader expects — LRCLIB's reparse wants its JSON record, not an
+      // LRC file. Dispatching on the provider would archive a contribution and then silently
+      // never merge it, which is worse than refusing it outright.
+      const doc = contributed
+        ? reparseByFormat(raw.body, raw.contentType)
+        : providerById(baseId)?.reparse(raw.body, raw.contentType) ?? null;
       if (!doc) continue;
+
       candidates.push({
         provider: raw.provider,
         doc,

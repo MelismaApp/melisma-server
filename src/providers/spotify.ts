@@ -55,8 +55,12 @@ export const spotify: Provider = {
         // The cached token went stale mid-flight; drop it so the next lookup re-mints.
         webToken = null;
       }
-      if (response.status !== 404) {
-        ctx.log('warn', `spotify: color-lyrics -> HTTP ${response.status}`);
+      // A 404 here is an answer: Spotify has no lyrics for this track. Anything else means the
+      // question never got through.
+      if (response.status === 404) {
+        ctx.log('info', 'spotify: no lyrics for this track');
+      } else {
+        ctx.unreachable(`color-lyrics: HTTP ${response.status}`);
       }
       return null;
     }
@@ -139,6 +143,6 @@ async function accessToken(
     return value;
   }
 
-  ctx.log('warn', 'spotify: no usable web token from the sp_dc cookie');
+  ctx.unreachable('no usable web token from the sp_dc cookie');
   return null;
 }

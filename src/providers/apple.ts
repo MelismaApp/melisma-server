@@ -79,9 +79,14 @@ export const apple: Provider = {
       const response = await json<LyricsResponse>(url, { headers: headers(ctx) });
 
       if (!response.result.ok) {
-        ctx.log('warn', `apple: ${kind} for ${song.id} -> ${explain(response.result.status)}`);
+        const status = response.result.status;
+        if (status === 404) {
+          ctx.log('info', `apple: no ${kind} for ${song.id}`);
+        } else {
+          ctx.unreachable(`${kind}: ${explain(status)}`);
+        }
         // A 401 or 403 is about the credentials, not this track: stop rather than repeat it.
-        if (response.result.status === 401 || response.result.status === 403) return null;
+        if (status === 401 || status === 403) return null;
         continue;
       }
 
@@ -204,7 +209,7 @@ async function identify(
     { headers: headers(ctx) },
   );
   if (!search.result.ok) {
-    ctx.log('warn', `apple: search -> ${explain(search.result.status)}`);
+    ctx.unreachable(`search: ${explain(search.result.status)}`);
     return null;
   }
 

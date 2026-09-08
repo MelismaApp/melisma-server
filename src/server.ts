@@ -11,20 +11,23 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 
 import { Settings, jwtExpiry, randomKey, SECRET_NAMES, type SecretName } from './config.ts';
 import { Store } from './db.ts';
-import { Resolver } from './resolver.ts';
+import { Resolver, reparseByFormat } from './resolver.ts';
 import { MERGE_VERSION } from './merge.ts';
 import { PROVIDERS, providerById } from './providers/index.ts';
 import { parseTtml, writeTtml } from './format/ttml.ts';
-import { parseLrc } from './format/lrc.ts';
+import { parseLrc, writePlainText } from './format/lrc.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
 import type { LyricsDocument, MergedDocument } from './model.ts';
 
-const ADMIN_DIR = new URL('./admin/', import.meta.url).pathname;
+// `URL.pathname` stays percent-encoded, so a checkout under a path with a space in it would
+// look for a directory literally called `%20`. fileURLToPath is the one that decodes.
+const ADMIN_DIR = fileURLToPath(new URL('./admin/', import.meta.url));
 
 /** Browser sessions, in memory: a restart signing everybody out is the safe default. */
 const sessions = new Map<string, number>();
@@ -330,11 +333,16 @@ async function lyrics(app: App, url: URL, response: ServerResponse): Promise<voi
   // renders — syllables, agents, background vocals, readings, translations with their
   // language — and unlike a bespoke JSON shape it is a format other things already speak, so
   // the app can point at any lyrics server rather than only at this one.
+  //
+  // Except for a document with no timing at all, which TTML cannot express without inventing
+  // some: it would go out as line-synced with every line at 0 ms, and the app would believe
+  // it. Plain text says what is actually known.
+  const unsynced = resolution.document.kind === 'static';
   return send(response, 200, {
     status: 200,
     data: {
-      format: 'ttml',
-      lyrics: writeTtml(resolution.document),
+      format: unsynced ? 'lrc' : 'ttml',
+      lyrics: unsynced ? writePlainText(resolution.document) : writeTtml(resolution.document),
       source: resolution.document.provenance.timing,
       providerName: credit,
       // Not part of the contract; useful when watching what the server is doing.
@@ -407,16 +415,17 @@ async function contribute(
   if (!track || !body?.body) return send(response, 400, { error: 'need a track and a body' });
 
   const format = (body.format ?? '').toLowerCase();
-  let doc: LyricsDocument | null = null;
-  if (format === 'ttml') doc = parseTtml(body.body);
-  else if (format === 'lrc') doc = parseLrc(body.body);
-  else if (format === 'json') {
-    try {
-      doc = JSON.parse(body.body) as LyricsDocument;
-    } catch {
-      doc = null;
-    }
-  }
+  const contentType =
+    format === 'ttml'
+      ? 'application/ttml+xml'
+      : format === 'json'
+        ? 'application/json'
+        : 'text/plain';
+
+  // Validated with the very reader that will re-merge it later, so "accepted" and "usable"
+  // cannot drift apart — the alternative is a 200 for something that is then quietly ignored
+  // forever.
+  const doc = reparseByFormat(body.body, contentType);
   if (!doc || doc.lines.length === 0) {
     return send(response, 400, { error: 'could not read that as lyrics' });
   }
@@ -429,14 +438,12 @@ async function contribute(
     key,
     provider,
     body: body.body,
-    contentType: format === 'ttml' ? 'application/ttml+xml' : format === 'json' ? 'application/json' : 'text/plain',
+    contentType,
     ok: true,
     note: 'contributed by the app',
   });
   app.store.log('info', null, `contribution for ${track.artist} — ${track.title} via ${provider}`);
 
-  // Only re-merge what the server itself can reparse; a contributed body from an unknown
-  // provider is archived but cannot take part until there is a reader for it.
   const document = app.resolver.remerge(key);
   return send(response, 200, { ok: true, key, merged: Boolean(document) });
 }
@@ -552,11 +559,24 @@ function isAuthorised(app: App, request: IncomingMessage, path: string): boolean
     if (expiry) sessions.delete(token);
   }
 
-  if (path.startsWith('/v1/') && app.settings.read().allowLocalNetwork) {
+  if (LOCAL_ROUTES.has(path) && app.settings.read().allowLocalNetwork) {
     return isLocalAddress(request.socket.remoteAddress);
   }
   return false;
 }
+
+/**
+ * The routes the local network may use without a key.
+ *
+ * An allowlist rather than a `/v1/` prefix, because the two things under that prefix are not
+ * alike: a lookup reads, and `POST /v1/contribute` writes to the archive permanently. A blanket
+ * exception let anything on the Wi-Fi persist arbitrary lyrics into the merge, which is both
+ * more than the app needs and more than the documentation promised.
+ *
+ * `/v1/warm` is a read that happens to populate the cache — it accepts no content — so it
+ * belongs on this side of the line.
+ */
+const LOCAL_ROUTES = new Set(['/v1/lyrics', '/v1/health', '/v1/warm']);
 
 /**
  * Whether the connecting socket is this machine or the private network.

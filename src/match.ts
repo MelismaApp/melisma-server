@@ -27,6 +27,9 @@ export interface TrackQuery {
 
 export const MATCH_THRESHOLD = 0.62;
 
+/** Below this, two comparable artist names are describing different people. */
+const ARTIST_CONTRADICTION = 0.35;
+
 export function cleanTitleOf(query: TrackQuery): string {
   return cleanTrackTitle(query.title);
 }
@@ -54,6 +57,7 @@ export function score(
   );
 
   let artistScore: number;
+  let artistContradicts = false;
   if (!query.artist.trim() || !candidateArtist.trim()) {
     artistScore = 0.5;
   } else if (!comparableScripts(query.artist, candidateArtist)) {
@@ -68,7 +72,18 @@ export function score(
       // on a collaboration.
       ...splitArtists(query.artist).map((one) => similarity(one, candidateArtist)),
     );
+    artistContradicts = artistScore < ARTIST_CONTRADICTION;
   }
+
+  // Two comparable names that share almost nothing are not a weak signal, they are a
+  // different artist. Weighted at 30% a flat contradiction still scored 0.7 on an exact title
+  // and a matching duration — over the threshold — so a title-only search could return an
+  // unrelated song that happens to share a common name and a runtime. `Alone` and `Stay` have
+  // dozens of those.
+  //
+  // Note what this does *not* catch: an absent artist, or one in another script. Both come out
+  // as 0.5 above, because they are an absence of evidence rather than evidence against.
+  if (artistContradicts) return 0;
 
   let durationScore: number;
   if (query.durationMs <= 0 || candidateDurationMs <= 0) {

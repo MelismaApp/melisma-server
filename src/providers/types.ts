@@ -15,6 +15,15 @@ import type { TrackQuery } from '../match.ts';
 export interface ProviderContext {
   config: Config;
   log(level: 'info' | 'warn' | 'error', message: string): void;
+
+  /**
+   * The service could not be reached, or refused the credentials.
+   *
+   * Distinct from returning null, which means "asked, and this track has no lyrics here". Only
+   * the second is worth caching: a lookup during an outage that wrote down "no lyrics" would
+   * hide the track until the negative cache expired.
+   */
+  unreachable(detail: string): void;
 }
 
 export interface ProviderAnswer {

@@ -108,6 +108,13 @@ rebuilt on the next boot, offline.
 It is also good manners. LRCLIB asks people not to hammer it, and the AMLL endpoint is one
 volunteer's server. A cache turns one query per track *ever* into the steady state.
 
+**An outage is never written down as an answer.** A 404 means this track has no lyrics here and
+is worth remembering; a timeout, a 429, a 5xx or an expired token means the question never got
+through. Recording the second as the first would hide the track for the whole negative TTL, and
+on a refresh it would replace a document that was perfectly good — so when nothing is found and
+something was unreachable, the cache is left exactly as it was and whatever was already there is
+served.
+
 ## API
 
 ```
@@ -126,14 +133,16 @@ the structured model with its provenance and candidate list instead; `format=ttm
 bare file. `404` means nothing was found, with every candidate and why it lost in the body.
 `X-Cache` is `cache`, `remerge`, `network` or `absent`.
 
-**Authentication is split by what a route can reach.** `/admin/*` always needs the API key, or
-a session cookie obtained by presenting it — it is the only surface that can read a credential.
-`/v1/*` can only cause a lyric lookup, so a request from this machine or the private network is
-allowed through without one; that is what lets the app work while sending no authentication at
-all. A wrong key is still an error rather than a fallback. If anything public proxies to this
-server, turn off **Allow the local network to look lyrics up without the key** in Settings and
-give the app the key — the check reads the connecting socket, and a proxy on the same host looks
-local whoever is really behind it.
+**Authentication is split by what a route can reach.** `/admin/*` always needs the API key, or a
+session cookie obtained by presenting it — it is the only surface that can read a credential. A
+*lookup* (`/v1/lyrics`, `/v1/health`, `/v1/warm`) can only cause a lyric fetch, so a request from
+this machine or the private network is allowed through without one; that is what lets the app
+work while sending no authentication at all. `POST /v1/contribute` writes to the archive
+permanently, so it sits on the admin side and always wants the key. A wrong key is still an error
+rather than a fallback. If anything public proxies to this server, turn off **Allow the local
+network to look lyrics up without the key** in Settings and give the app the key — the check
+reads the connecting socket, and a proxy on the same host looks local whoever is really behind
+it.
 
 `POST /v1/contribute` accepts lyrics the app found and the server could not: the phone can
 reach a region-locked endpoint or a provider whose rate limit the server hit. Archived under

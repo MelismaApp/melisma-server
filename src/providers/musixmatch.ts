@@ -9,7 +9,7 @@
  * collapsing to "not found": when this breaks, the useful question is *which* call broke.
  */
 
-import { json, query, request } from '../http.ts';
+import { isUnavailable, json, query, request } from '../http.ts';
 import { MATCH_THRESHOLD, cleanTitleOf, primaryArtistOf, score, type TrackQuery } from '../match.ts';
 import { parseRichSync } from '../format/musixmatch.ts';
 import { parseLrc } from '../format/lrc.ts';
@@ -68,6 +68,7 @@ export const musixmatch: Provider = {
       { headers: desktopHeaders() },
     );
 
+    if (isUnavailable(matched.result)) ctx.unreachable(`matcher: ${matched.result.error}`);
     const found = matched.value?.message?.body?.track;
     if (!found?.track_id) {
       const hint = matched.value?.message?.header?.status_code;
@@ -192,7 +193,8 @@ async function resolveToken(ctx: ProviderContext): Promise<string | null> {
   );
   const value = minted.value?.message?.body?.user_token;
   if (!value || value === 'UpgradeOnlyUpgradeOnlyUpgradeOnlyUpgradeOnly') {
-    ctx.log('warn', 'musixmatch: no usable anonymous token');
+    // Without a token nothing can be asked at all, so this is an outage rather than a miss.
+    ctx.unreachable('no usable anonymous token');
     return null;
   }
   guestToken = { value, mintedAt: Date.now() };

@@ -182,22 +182,6 @@ export function merge(candidates: Candidate[], options: MergeOptions = {}): Merg
     provenance.romanization = spine.provider;
   }
 
-  // ---- background vocals -------------------------------------------------
-  if (!lines.some((l) => l.role === 'background')) {
-    for (const other of others) {
-      const extra = other.doc.lines.filter((l) => l.role === 'background');
-      if (extra.length === 0) continue;
-      const next = tryGraft(lines, durationMs, (current) =>
-        insertBackground(current, extra.map(cloneLine)),
-      );
-      if (next !== lines) {
-        lines = next;
-        provenance.background = other.provider;
-        break;
-      }
-    }
-  }
-
   // ---- duet parts --------------------------------------------------------
   const spineAgents = new Set(lines.map((l) => l.agent).filter(Boolean));
   if (spineAgents.size < 2) {
@@ -214,6 +198,26 @@ export function merge(candidates: Candidate[], options: MergeOptions = {}): Merg
       );
       if (next !== lines) {
         lines = next;
+        break;
+      }
+    }
+  }
+
+  // ---- background vocals -------------------------------------------------
+  //
+  // Last, and deliberately so: this is the only borrow that inserts lines rather than filling
+  // fields in, and every step above indexes `aligned` by position in the spine. Doing it any
+  // earlier silently shifts those indices and hands the wrong lines each other's data.
+  if (!lines.some((l) => l.role === 'background')) {
+    for (const other of others) {
+      const extra = other.doc.lines.filter((l) => l.role === 'background');
+      if (extra.length === 0) continue;
+      const next = tryGraft(lines, durationMs, (current) =>
+        insertBackground(current, extra.map(cloneLine)),
+      );
+      if (next !== lines) {
+        lines = next;
+        provenance.background = other.provider;
         break;
       }
     }

@@ -305,6 +305,38 @@ test('background vocals are borrowed and slotted in by their timing', () => {
   assert.deepEqual(validate(document_), []);
 });
 
+test('duet parts land on the right lines even when backing vocals were added', () => {
+  // Both borrows read the same alignment, which is indexed by position in the backbone. The
+  // background borrow is the only one that inserts lines, so if it ran first every duet part
+  // after the insertion point would be assigned to the wrong line — or to a backing line.
+  const duet = fourLines(lineOnly).map((l, index) => ({
+    ...l,
+    agent: index % 2 === 0 ? 'v1' : 'v2',
+    oppositeAligned: index % 2 === 1,
+  }));
+  const backing = [
+    ...fourLines(lineOnly),
+    line({ text: 'ooh', startMs: 5200, endMs: 6000, role: 'background' }),
+  ];
+
+  const result = merge([
+    candidate('musixmatch', fourLines(timed), { priority: 0 }),
+    candidate('apple', backing, { priority: 1 }),
+    candidate('amll', duet, { priority: 2 }),
+  ]);
+
+  const document_ = result.document!;
+  assert.equal(document_.provenance.background, 'apple');
+  const leads = document_.lines.filter((l) => l.role !== 'background');
+  assert.deepEqual(
+    leads.map((l) => l.agent),
+    ['v1', 'v2', 'v1', 'v2'],
+  );
+  // And the inserted backing line did not pick up a voice of its own.
+  assert.equal(document_.lines.find((l) => l.role === 'background')?.agent, undefined);
+  assert.deepEqual(validate(document_), []);
+});
+
 test('duet parts are borrowed when the backbone has only one voice', () => {
   const duet = fourLines(lineOnly).map((l, index) => ({
     ...l,

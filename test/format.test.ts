@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { parseLrc, attachLrcTranslation } from '../src/format/lrc.ts';
+import { attachLrcTranslation, parseLrc, writePlainText } from '../src/format/lrc.ts';
 import { parseNeteasePayload, parseYrc } from '../src/format/netease.ts';
 import { parseRichSync } from '../src/format/musixmatch.ts';
 import { parseColorLyrics } from '../src/format/spotify.ts';
 import { formatTime, parseTime, parseTtml, writeTtml } from '../src/format/ttml.ts';
-import { validate } from '../src/model.ts';
+import { document, line, validate } from '../src/model.ts';
 
 const fixture = (name: string) =>
   readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
@@ -184,6 +184,23 @@ test('a repeated timestamp means the line is sung twice', () => {
   assert.equal(doc.lines[1].startMs, 40_000);
 });
 
+test('a repeated timestamp carries its word timings with it', () => {
+  // The `<..>` stamps are absolute and line up with the first occurrence. Left alone, the
+  // second copy would have syllables forty seconds outside its own window — which the document
+  // invariants reject, even though every word is right.
+  const doc = parseLrc('[00:10.00][00:50.00]<00:10.00>one <00:11.00>two')!;
+  assert.equal(doc.lines.length, 2);
+  assert.deepEqual(
+    doc.lines[0].syllables.map((s) => s.startMs),
+    [10_000, 11_000],
+  );
+  assert.deepEqual(
+    doc.lines[1].syllables.map((s) => s.startMs),
+    [50_000, 51_000],
+  );
+  assert.deepEqual(validate(doc, 300_000), []);
+});
+
 test('two entries on one timestamp are a bilingual file', () => {
   const doc = parseLrc('[00:01.00]Yume naraba\n[00:01.00]どれほど\n[00:05.00]next')!;
   assert.equal(doc.lines.length, 2);
@@ -311,6 +328,46 @@ test('an unsynced Spotify response is static, not line-timed at zero', () => {
 });
 
 // ---- invariants -----------------------------------------------------------
+
+test('per-syllable readings survive a TTML round trip', () => {
+  // Apple keeps them in a metadata block rather than on the spans. Writing only the timed text
+  // would drop them silently — and they are the good kind of reading, the kind the sweep can
+  // run across rather than a line printed underneath.
+  const original = parseTtml(`
+    <tt xmlns:ttm="http://www.w3.org/ns/ttml#metadata" itunes:timing="Word" xml:lang="ja">
+      <head><metadata><iTunesMetadata>
+        <transliterations><transliteration xml:lang="ja-Latn">
+          <text for="L1"><span for="L1.1">yume</span><span for="L1.2">naraba</span></text>
+        </transliteration></transliterations>
+      </iTunesMetadata></metadata></head>
+      <body><div>
+        <p begin="1.0" end="3.0" itunes:key="L1"
+          ><span begin="1.0" end="2.0">夢</span><span begin="2.0" end="3.0">ならば</span></p>
+      </div></body></tt>`)!;
+  assert.deepEqual(
+    original.lines[0].syllables.map((s) => s.romanized),
+    ['yume', 'naraba'],
+  );
+
+  const again = parseTtml(writeTtml(original))!;
+  assert.deepEqual(
+    again.lines[0].syllables.map((s) => s.romanized),
+    ['yume', 'naraba'],
+  );
+});
+
+test('a document with no timing does not pretend to have some', () => {
+  // TTML has no way to say "unsynced", so the only honest thing is to omit the timing rather
+  // than emit `itunes:timing="Line"` with every line at zero and let a reader believe it.
+  const staticDoc = document(
+    [line({ text: 'first' }), line({ text: 'second' })],
+    { kind: 'static' },
+  );
+  const xml = writeTtml(staticDoc);
+  assert.ok(!xml.includes('itunes:timing'));
+  assert.ok(!xml.includes('begin='));
+  assert.equal(writePlainText(staticDoc), 'first\nsecond');
+});
 
 test('everything the parsers produce satisfies the document invariants', () => {
   const documents = [

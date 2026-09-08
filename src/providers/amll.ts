@@ -10,7 +10,7 @@
  * setting — anybody using this heavily should run their own copy of `amll-ttml-api`.
  */
 
-import { json, query, request } from '../http.ts';
+import { isUnavailable, json, query, request } from '../http.ts';
 import { MATCH_THRESHOLD, bestScore, cleanTitleOf, primaryArtistOf, type TrackQuery } from '../match.ts';
 import { parseTtml } from '../format/ttml.ts';
 import type { Provider, ProviderAnswer, ProviderContext } from './types.ts';
@@ -53,7 +53,7 @@ export const amll: Provider = {
     if (track.isrc) direct.push(query({ isrc: track.isrc }));
 
     for (const params of direct) {
-      const entry = await get(base, params);
+      const entry = await get(base, params, ctx);
       if (entry?.lyrics) {
         const answer = toAnswer(entry, 1);
         if (answer) return answer;
@@ -69,6 +69,7 @@ export const amll: Provider = {
       const found = await json<AmllEnvelope<{ items?: AmllEntry[] }>>(
         `${base}/v1/lyrics/search?${params}`,
       );
+      if (isUnavailable(found.result)) ctx.unreachable(`search: ${found.result.error}`);
       const items = found.value?.data?.items ?? [];
       if (items.length === 0) continue;
 
@@ -84,7 +85,7 @@ export const amll: Provider = {
       if (!best) continue;
 
       // Search results carry no lyrics; the winner has to be fetched by id.
-      const full = best.entry.id ? await get(base, query({ id: best.entry.id })) : null;
+      const full = best.entry.id ? await get(base, query({ id: best.entry.id }), ctx) : null;
       const answer = toAnswer(full ?? best.entry, best.match);
       if (answer) return answer;
     }
@@ -112,8 +113,13 @@ export const amll: Provider = {
   reparse: (body) => parseTtml(body),
 };
 
-async function get(base: string, params: string): Promise<AmllEntry | null> {
+async function get(
+  base: string,
+  params: string,
+  ctx: ProviderContext,
+): Promise<AmllEntry | null> {
   const response = await json<AmllEnvelope<AmllEntry>>(`${base}/v1/lyrics/get?${params}`);
+  if (isUnavailable(response.result)) ctx.unreachable(`get: ${response.result.error}`);
   return response.value?.data ?? null;
 }
 

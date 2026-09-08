@@ -10,7 +10,7 @@
  * cache, so each track costs them one request ever — which is the point.
  */
 
-import { json, query, request } from '../http.ts';
+import { isUnavailable, json, query, request } from '../http.ts';
 import { MATCH_THRESHOLD, cleanTitleOf, primaryArtistOf, score, type TrackQuery } from '../match.ts';
 import { parseLrc } from '../format/lrc.ts';
 import { document, line, type LyricsDocument } from '../model.ts';
@@ -46,6 +46,7 @@ export const lrclib: Provider = {
         duration: track.durationMs > 0 ? Math.round(track.durationMs / 1000) : undefined,
       })}`,
     );
+    if (isUnavailable(exact.result)) ctx.unreachable(`get: ${exact.result.error}`);
     if (exact.value) {
       const answer = toAnswer(exact.value, 1, exact.result.contentType);
       if (answer) return answer;
@@ -57,6 +58,7 @@ export const lrclib: Provider = {
         artist_name: primaryArtistOf(track),
       })}`,
     );
+    if (isUnavailable(search.result)) ctx.unreachable(`search: ${search.result.error}`);
     const records = Array.isArray(search.value) ? search.value : [];
     if (records.length === 0) return null;
 

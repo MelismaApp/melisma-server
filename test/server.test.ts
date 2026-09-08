@@ -236,6 +236,104 @@ test('warming is accepted and answered immediately', async () => {
   assert.equal(response.status, 202);
 });
 
+// ---- outages --------------------------------------------------------------
+
+/** Runs a block with one source enabled and pointed at a port nothing is listening on. */
+async function withDeadSource<T>(run: () => Promise<T>): Promise<T> {
+  app.settings.update({
+    'provider.lrclib.enabled': '1',
+    'endpoint.lrclib': 'http://127.0.0.1:9',
+  });
+  try {
+    return await run();
+  } finally {
+    app.settings.update({ 'provider.lrclib.enabled': '0', 'endpoint.lrclib': null });
+  }
+}
+
+test('an outage is not written down as "this track has no lyrics"', async () => {
+  // The distinction the negative cache depends on. A timeout is not an answer, and recording it
+  // as one hides the track for the whole negative TTL — two days, for a blip.
+  await withDeadSource(async () => {
+    const response = await authed(
+      '/v1/lyrics?title=During%20An%20Outage&artist=Someone&durationMs=200000',
+    );
+    assert.equal(response.status, 404);
+    const body = await response.json();
+    assert.equal(body.source, 'absent');
+    assert.equal(app.store.getEntry(body.key), null);
+  });
+});
+
+test('an outage does not overwrite a document that was already good', async () => {
+  const track = { title: 'Already Cached', artist: 'Someone', durationMs: 200_000 };
+  const { cacheKey } = await import('../src/match.ts');
+  const key = cacheKey(track);
+  const good = {
+    kind: 'line',
+    lines: [{ role: 'lead', startMs: 1000, endMs: 4000, text: 'kept', syllables: [], oppositeAligned: false, rtl: false }],
+    songWriters: [],
+    hasRomanization: false,
+    hasTranslation: false,
+    provenance: { timing: 'lrclib', syllables: [], songWriters: [] },
+    candidates: [],
+    algorithmVersion: MERGE_VERSION,
+  };
+  app.store.putEntry({
+    key,
+    title: track.title,
+    artist: track.artist,
+    album: '',
+    durationMs: track.durationMs,
+    spotifyId: null,
+    isrc: null,
+    merged: JSON.stringify(good),
+    mergeVersion: MERGE_VERSION,
+  });
+
+  await withDeadSource(async () => {
+    // `force=1` is the case that used to destroy the entry: it skips the cache, finds nothing
+    // because the source is down, and wrote the empty result over the top.
+    const response = await authed(
+      `/v1/lyrics?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(
+        track.artist,
+      )}&durationMs=${track.durationMs}&force=1`,
+    );
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.match(body.data.lyrics, /kept/);
+  });
+
+  const after = app.store.getEntry(key);
+  assert.ok(after?.merged?.includes('kept'), 'the good document was overwritten');
+});
+
+test('a genuine miss is still cached', async () => {
+  // The other half: when a source answers and simply has nothing, remembering that is the whole
+  // point of the cache. Verified through the store, since no source here reaches the network.
+  const track = { title: 'Genuinely Absent', artist: 'Nobody', durationMs: 190_000 };
+  const { cacheKey } = await import('../src/match.ts');
+  const key = cacheKey(track);
+  app.store.putEntry({
+    key,
+    title: track.title,
+    artist: track.artist,
+    album: '',
+    durationMs: track.durationMs,
+    spotifyId: null,
+    isrc: null,
+    merged: null,
+    mergeVersion: MERGE_VERSION,
+  });
+  const response = await authed(
+    `/v1/lyrics?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(
+      track.artist,
+    )}&durationMs=${track.durationMs}`,
+  );
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).source, 'cache');
+});
+
 // ---- contributions --------------------------------------------------------
 
 test('the app can contribute lyrics the server could not reach', async () => {
@@ -261,16 +359,83 @@ test('the app can contribute lyrics the server could not reach', async () => {
 });
 
 test('a contribution that is not lyrics is refused', async () => {
-  const response = await authed('/v1/contribute', {
+  const cases = [
+    // Markup where lyrics were expected: an error page reaching a permanent archive.
+    { format: 'lrc', body: '<!doctype html><html>502 Bad Gateway</html>' },
+    // A body that does not parse as the format it claims.
+    { format: 'ttml', body: '[00:01.00]this is LRC, not TTML' },
+    { format: 'json', body: '{"lines":[]}' },
+    { format: 'lrc', body: '   \n  ' },
+  ];
+  for (const { format, body } of cases) {
+    const response = await authed('/v1/contribute', {
+      method: 'POST',
+      body: JSON.stringify({
+        track: { title: `Junk ${format} ${body.length}`, artist: 'X', durationMs: 1000 },
+        provider: 'lrclib',
+        format,
+        body,
+      }),
+    });
+    assert.equal(response.status, 400, `${format}: ${body.slice(0, 30)}`);
+  }
+});
+
+test('a contribution is validated with the reader that will re-merge it', async () => {
+  // The failure this rules out: a 200 for something the archive then quietly never uses. Every
+  // accepted format has to come back out of `remerge`.
+  const formats = [
+    { format: 'lrc', body: '[00:01.00]<00:01.00>one <00:02.00>two\n[00:05.00]three\n[00:09.00]four' },
+    {
+      format: 'ttml',
+      body:
+        '<tt itunes:timing="Word"><body><div>' +
+        '<p begin="1.0" end="3.0" itunes:key="L1"><span begin="1.0" end="3.0">alpha</span></p>' +
+        '<p begin="4.0" end="6.0" itunes:key="L2"><span begin="4.0" end="6.0">beta</span></p>' +
+        '<p begin="7.0" end="9.0" itunes:key="L3"><span begin="7.0" end="9.0">gamma</span></p>' +
+        '</div></body></tt>',
+    },
+    {
+      format: 'json',
+      body: JSON.stringify({
+        kind: 'line',
+        lines: [
+          { text: 'one', startMs: 1000, endMs: 4000 },
+          { text: 'two', startMs: 4000, endMs: 8000 },
+          { text: 'three', startMs: 8000, endMs: 12_000 },
+        ],
+      }),
+    },
+    // Unsynced text is a real answer, and still useful: it aligns other sources.
+    { format: 'lrc', body: 'plain one\nplain two\nplain three' },
+  ];
+
+  for (const { format, body } of formats) {
+    const track = { title: `Contributed ${format}`, artist: 'Someone', durationMs: 210_000 };
+    const response = await authed('/v1/contribute', {
+      method: 'POST',
+      body: JSON.stringify({ track, provider: 'lrclib', format, body }),
+    });
+    assert.equal(response.status, 200, format);
+    const result = await response.json();
+    assert.equal(result.merged, true, `${format} was accepted but never merged`);
+  }
+});
+
+test('a contribution needs the key even from the local network', async () => {
+  // It writes to the archive permanently. Reading lyrics is what the local exception is for.
+  const response = await fetch(`${base}/v1/contribute`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      track: { title: 'Junk', artist: 'X', durationMs: 1000 },
+      track: { title: 'Unauthorised', artist: 'X', durationMs: 1000 },
       provider: 'lrclib',
       format: 'lrc',
-      body: 'this has no timestamps at all',
+      body: '[00:01.00]nope',
     }),
   });
-  assert.equal(response.status, 400);
+  assert.equal(response.status, 401);
+  assert.equal(app.store.getRaw('q:unauthorised|x|0').length, 0);
 });
 
 // ---- the shape the app expects --------------------------------------------

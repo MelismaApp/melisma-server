@@ -48,6 +48,12 @@ is the whole job.
 `key`, `cache` and `ms` are not part of the contract; they are there for whoever is watching
 what the server is doing.
 
+**A document with no timing goes out as `format: "lrc"`** — plain text, one line per line —
+because TTML has no way to say "unsynced". Serialising it anyway would mean
+`itunes:timing="Line"` with every paragraph at 0 ms, and the app would believe it: ordinary
+unsynced lyrics would render as line-synced and stuck at the start of the song. The app already
+accepts LRC, so this costs nothing.
+
 `404` means nothing was found. The body still carries the key and the full candidate list — the
 app treats any non-2xx as "this source contributed nothing", so that detail is for a human
 debugging it rather than for the client.
@@ -105,8 +111,12 @@ But the two concerns are not actually in tension, because they are about differe
 
 - **`/admin/*` can read a credential.** It always requires the API key, or a session cookie
   obtained by presenting it. No exceptions.
-- **`/v1/*` can only cause a lyric lookup.** Nothing there returns a token. So a request from
-  this machine or from a private network address is allowed through without a key.
+- **A lookup can only cause a lyric lookup.** Nothing in `/v1/lyrics`, `/v1/health` or
+  `/v1/warm` returns a token or stores anything a caller chose. So a request from this machine
+  or from a private network address is allowed through without a key.
+- **`/v1/contribute` writes to the archive permanently**, so it is on the admin side of the
+  line and always wants the key. An allowlist of routes rather than a `/v1/` prefix, because the
+  prefix would have let anything on the Wi-Fi persist arbitrary lyrics into the merge.
 
 The result: the app works exactly as written, the credentials are never reachable without the
 key, and a server exposed to the internet is not open by default. An explicit `Authorization:
@@ -150,4 +160,11 @@ endpoint, or a provider whose rate limit the server's address has hit. Archived 
 `app:<provider>` so it can never overwrite a real fetch, and merged in immediately — a
 contributed translation can end up attached to timings the server found itself.
 
-Requires the API key, since it writes to the archive permanently.
+Requires the API key, since it writes to the archive permanently — the local-network exception
+does not cover it.
+
+Validated with the same reader that will re-merge it later, so a body cannot be accepted and
+then silently never used. Markup that is not TTML is refused: the realistic accident is an error
+page arriving where lyrics were expected, and a permanent archive entry reading `502 Bad Gateway`
+is worse than a rejection. Plain text with no timestamps is accepted, because unsynced lyrics
+are a real answer.

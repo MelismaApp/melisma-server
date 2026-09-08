@@ -5,10 +5,12 @@
  * answer; `BL_DATA` moves it.
  */
 
+import { fileURLToPath } from 'node:url';
+
 import { createApp, start } from './server.ts';
 
 const databasePath =
-  process.env.BL_DATA ?? new URL('../data/better-lyrics.db', import.meta.url).pathname;
+  process.env.BL_DATA ?? fileURLToPath(new URL('../data/better-lyrics.db', import.meta.url));
 
 const app = createApp(databasePath);
 const server = start(app);

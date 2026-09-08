@@ -35,6 +35,21 @@ test('the cross-script allowance is not a way in for the wrong track', () => {
   assert.ok(score(lemon, '残酷な天使のように', '高橋洋子', 88_000) < MATCH_THRESHOLD);
 });
 
+test('an artist that contradicts is disqualifying, not a 30% penalty', () => {
+  // Weighted at 30%, an exact title and a matching duration still scored 0.70 with a flatly
+  // wrong artist — over the threshold. Titles like `Alone` and `Stay` have dozens of unrelated
+  // songs at a similar length, and a title-only search would have picked one.
+  assert.equal(score(lemon, 'Lemon', 'Some Other Band', 255_000), 0);
+
+  // What it must not catch: an absent artist, or one in another script. Both are an absence of
+  // evidence rather than evidence against.
+  assert.ok(score(lemon, 'Lemon', '', 255_000) >= MATCH_THRESHOLD);
+  assert.ok(score(lemon, 'Lemon', '米津玄師', 255_000) >= MATCH_THRESHOLD);
+  // Nor a spelling difference, nor an extra credit on the same recording.
+  assert.ok(score(lemon, 'Lemon', 'Kenshi Yonezu', 255_000) >= MATCH_THRESHOLD);
+  assert.ok(score(lemon, 'Lemon', 'Kenshi Yonezu & DAOKO', 255_000) >= MATCH_THRESHOLD);
+});
+
 test('a wildly different duration drags the score down', () => {
   assert.ok(
     score(lemon, 'Lemon', 'Kenshi Yonezu', 400_000) < score(lemon, 'Lemon', 'Kenshi Yonezu', 255_000),

@@ -10,7 +10,7 @@
  * optional and raises the per-IP limits.
  */
 
-import { json, query, request } from '../http.ts';
+import { isUnavailable, json, query, request } from '../http.ts';
 import { MATCH_THRESHOLD, cleanTitleOf, primaryArtistOf, score, type TrackQuery } from '../match.ts';
 import { parseNeteasePayload, type NeteaseLyricPayload } from '../format/netease.ts';
 import type { Provider, ProviderAnswer, ProviderContext } from './types.ts';
@@ -50,6 +50,7 @@ export const netease: Provider = {
         `${base}/api/search/get?${query({ s: term, type: 1, limit: 20, offset: 0 })}`,
         { cookie, headers: { Referer: base } },
       );
+      if (isUnavailable(found.result)) ctx.unreachable(`search: ${found.result.error}`);
       const songs = found.value?.result?.songs ?? [];
       if (songs.length === 0) continue;
 

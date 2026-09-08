@@ -67,14 +67,19 @@ export function parseLrc(raw: string): LyricsDocument | null {
     const { text, syllables } = readWords(body);
     if (!text && syllables.length === 0) continue;
 
+    // The `<..>` word stamps are absolute, and they line up with the *first* of the line
+    // stamps. A repeat has to carry them along by the same distance, or the second occurrence
+    // ends up with syllables tens of seconds outside its own window — which the document
+    // invariants would reject even though the words are right.
     for (const stamp of stamps) {
+      const shift = stamp - stamps[0] + offsetMs;
       entries.push({
         startMs: stamp + offsetMs,
         text,
         syllables: syllables.map((s) => ({
           ...s,
-          startMs: s.startMs + offsetMs,
-          endMs: s.endMs + offsetMs,
+          startMs: s.startMs + shift,
+          endMs: s.endMs + shift,
         })),
       });
     }
@@ -196,6 +201,21 @@ function clock(minutes: string, seconds: string, fraction: string | undefined): 
   // `.5` is five hundred milliseconds, `.50` is also five hundred, `.500` likewise.
   const millis = Number.parseInt(frac.padEnd(3, '0').slice(0, 3), 10);
   return Number.parseInt(minutes, 10) * 60_000 + Number.parseInt(seconds, 10) * 1000 + millis;
+}
+
+/**
+ * Plain text, one line per line.
+ *
+ * The right shape for lyrics with no timing at all. TTML would have to claim *some* timing —
+ * `itunes:timing="Line"` with every paragraph at 0 ms — and a reader would then believe it,
+ * showing an unsynced lyric as a line-synced one stuck at the start of the song. Text is
+ * honest about knowing nothing.
+ */
+export function writePlainText(doc: LyricsDocument): string {
+  return doc.lines
+    .filter((l) => l.role !== 'interlude' && l.text.trim().length > 0)
+    .map((l) => l.text)
+    .join('\n');
 }
 
 /**

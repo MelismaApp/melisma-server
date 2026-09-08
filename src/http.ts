@@ -149,6 +149,27 @@ export async function json<T>(url: string, options: FetchOptions = {}): Promise<
   }
 }
 
+/**
+ * Whether a response means "I could not ask" rather than "I asked, and no".
+ *
+ * The distinction decides whether a miss is worth remembering. A 404 is an answer: this track
+ * has no lyrics here, and caching that saves everybody a request. A timeout, a 429, a 5xx or an
+ * expired token is not an answer at all, and writing it down as one hides the track for as long
+ * as the negative cache lasts.
+ *
+ * 401 and 403 count as unavailable on purpose: a token that has expired is a configuration
+ * problem the user is about to fix, not a fact about the song.
+ */
+export function isUnavailable(result: FetchResult): boolean {
+  return (
+    result.status === 0 ||
+    result.status === 401 ||
+    result.status === 403 ||
+    result.status === 429 ||
+    result.status >= 500
+  );
+}
+
 export function query(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
