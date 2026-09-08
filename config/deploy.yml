@@ -69,6 +69,22 @@ env:
     # The language to prefer when a source ships translations in several.
     BL_TRANSLATION_LANG: en
 
+    # How often to run the token refresh, if one is configured below. A Spotify web token lasts
+    # about an hour, so fifty minutes leaves slack without overlapping runs.
+    BL_TOKEN_REFRESH_MINUTES: "50"
+
+    # Renewing the hour-long Spotify token needs a browser, and this image has none — it is
+    # node:24-alpine plus source, and a bundled Chromium would be several hundred megabytes on
+    # every deploy. Two ways round it, both in the README:
+    #
+    #   1. Add a Playwright accessory and point this at it:
+    #        BL_TOKEN_REFRESH_COMMAND: "curl -fsS http://token-refresher:8080/"
+    #   2. Leave this unset and push a fresh token from a machine that already has a browser, with
+    #      POST /admin/api/config. Nothing extra is needed on the server, and a home IP is
+    #      challenged far less often than a datacenter one.
+    #
+    # BL_TOKEN_REFRESH_COMMAND: "curl -fsS http://token-refresher:8080/"
+
   secret:
     # A fixed key, so it survives a rebuilt volume and is known before the first boot. Leave it
     # out and the server generates one on first run — which works, but then it lives only in the
@@ -83,6 +99,7 @@ env:
     - BL_APPLE_MEDIA_USER_TOKEN
 
     # Optional; every source works without them.
+    - BL_SPOTIFY_WEB_TOKEN
     - BL_SP_DC_COOKIE
     - BL_MUSIXMATCH_USER_TOKEN
     - BL_NETEASE_COOKIE

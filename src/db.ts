@@ -68,6 +68,9 @@ export interface ExtrasEntry {
   coverUrl: string | null;
   artistImageUrl: string | null;
   tempo: number | null;
+  /** Mirrored from the cache entry, so that write order cannot lose it. See `noteIdentity`. */
+  isrc: string | null;
+  durationMs: number | null;
   /** Extracted colours: Apple's `bgColor` and `textColor1..4`, Spotify's accent. */
   palette: Record<string, unknown> | null;
   /**
@@ -84,6 +87,59 @@ export interface ExtrasEntry {
   metadata: Record<string, unknown> | null;
   source: string;
   updatedAt: number;
+}
+
+/**
+ * One song, and everything the server holds about it.
+ *
+ * Assembled per page rather than stored: the lyric shape has to come out of the merged JSON, and
+ * the provider list out of the archive. Cheap at fifty rows, and it means adding a thing worth
+ * showing never needs a migration.
+ */
+export interface LibraryRow {
+  key: string;
+  title: string;
+  artist: string;
+  album: string;
+  durationMs: number;
+  spotifyId: string | null;
+  isrc: string | null;
+
+  // ---- the words ----
+  hasLyrics: boolean;
+  kind: string | null;
+  lines: number;
+  syllableLines: number;
+  hasTranslation: boolean;
+  hasRomanization: boolean;
+  /** Which source's timings the merge kept. */
+  timing: string | null;
+  mergeVersion: number;
+
+  // ---- the archive ----
+  /** Every provider with a stored response, contributions included. */
+  providers: string[];
+  archivedBytes: number;
+
+  // ---- everything that is not the words ----
+  hasExtras: boolean;
+  /** Which of the extras are actually populated, for the "what is cached" column. */
+  extrasFields: string[];
+  extrasSource: string | null;
+
+  hits: number;
+  updatedAt: number;
+}
+
+export interface LibraryQuery {
+  search?: string;
+  /** Search the lyric text as well as the title, artist and album. */
+  inLyrics?: boolean;
+  sort?: 'song' | 'recent' | 'hits' | 'lines';
+  /** Only songs missing something, for finding the gaps. */
+  missing?: 'lyrics' | 'extras' | 'syllables' | 'translation';
+  limit?: number;
+  offset?: number;
 }
 
 export interface LogEvent {
@@ -171,6 +227,16 @@ export class Store {
         cover_url        TEXT,
         artist_image_url TEXT,
         tempo            REAL,
+        -- Identity is mirrored here as well as on the entries table, and the reason is ordering.
+        -- A provider reports an ISRC while it is being asked for lyrics, and the harvest reports
+        -- one of its own; both can happen before the entry row exists. Writing identity only to
+        -- entries meant an UPDATE that matched nothing and silently threw the field away -- and an
+        -- ISRC is the single most valuable thing collected here, because it turns every later
+        -- fuzzy match into an exact lookup. Creating a bare entries row instead is not an option:
+        -- one with no merged document *means* "asked, and there are no lyrics", which the negative
+        -- cache would then serve.
+        isrc             TEXT,
+        duration_ms      INTEGER,
         -- Three JSON blobs rather than thirty columns. What is worth keeping here has grown
         -- twice already and will again; a schema change per field would mean a migration per
         -- field, for data whose only consumer reads it back whole.
@@ -200,6 +266,16 @@ export class Store {
 
       CREATE INDEX IF NOT EXISTS events_at ON events (at DESC);
     `);
+
+    // Columns added after the table first shipped. SQLite has no `ADD COLUMN IF NOT EXISTS`, and
+    // a duplicate-column error is the expected outcome on an already-migrated database.
+    for (const column of ['isrc TEXT', 'duration_ms INTEGER']) {
+      try {
+        this.db.exec(`ALTER TABLE extras ADD COLUMN ${column}`);
+      } catch {
+        // Already there.
+      }
+    }
   }
 
   // ---- extras ------------------------------------------------------------
@@ -217,6 +293,8 @@ export class Store {
       coverUrl: (row.cover_url as string | null) ?? null,
       artistImageUrl: (row.artist_image_url as string | null) ?? null,
       tempo: (row.tempo as number | null) ?? null,
+      isrc: (row.isrc as string | null) ?? null,
+      durationMs: (row.duration_ms as number | null) ?? null,
       palette: parseJson(row.palette),
       analysis: parseJson(row.analysis),
       metadata: parseJson(row.metadata),
@@ -243,13 +321,15 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO extras
-           (key, title, artist, cover_url, artist_image_url, tempo,
+           (key, title, artist, cover_url, artist_image_url, tempo, isrc, duration_ms,
             palette, analysis, metadata, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET
            cover_url        = COALESCE(excluded.cover_url, extras.cover_url),
            artist_image_url = COALESCE(excluded.artist_image_url, extras.artist_image_url),
            tempo            = COALESCE(excluded.tempo, extras.tempo),
+           isrc             = COALESCE(extras.isrc, excluded.isrc),
+           duration_ms      = COALESCE(extras.duration_ms, excluded.duration_ms),
            palette          = COALESCE(excluded.palette, extras.palette),
            analysis         = COALESCE(excluded.analysis, extras.analysis),
            metadata         = COALESCE(excluded.metadata, extras.metadata),
@@ -263,6 +343,8 @@ export class Store {
         entry.coverUrl,
         entry.artistImageUrl,
         entry.tempo,
+        entry.isrc,
+        entry.durationMs,
         blob(entry.palette),
         blob(entry.analysis),
         blob(entry.metadata),
@@ -289,6 +371,7 @@ export class Store {
     const durationMs = identity.durationMs && identity.durationMs > 0 ? identity.durationMs : null;
     if (!isrc && !durationMs) return;
 
+    // On the cache entry, where the lookup path can see it — if there is one yet.
     this.db
       .prepare(
         `UPDATE entries
@@ -297,14 +380,39 @@ export class Store {
           WHERE key = ?`,
       )
       .run(isrc, durationMs, key);
+
+    // And on the extras row, which can be created from nothing. This is what makes the write
+    // order irrelevant: a provider reporting an ISRC mid-lookup, and a harvest reporting one
+    // afterwards, both land somewhere either way.
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO extras (key, isrc, duration_ms, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           isrc        = COALESCE(extras.isrc, excluded.isrc),
+           duration_ms = COALESCE(extras.duration_ms, excluded.duration_ms),
+           updated_at  = excluded.updated_at`,
+      )
+      .run(key, isrc, durationMs, now, now);
   }
 
-  /** Every ISRC known, for looking a recording up by identity rather than by name. */
+  /**
+   * The ISRC known for a track, from wherever it was recorded.
+   *
+   * The entry first, because that is where the lookup path keeps it, then the extras row, which
+   * is where one learned before the entry existed ends up.
+   */
   isrcFor(key: string): string | null {
-    const row = this.db.prepare('SELECT isrc FROM entries WHERE key = ?').get(key) as
+    const entry = this.db.prepare('SELECT isrc FROM entries WHERE key = ?').get(key) as
       | { isrc: string | null }
       | undefined;
-    return row?.isrc?.trim() || null;
+    if (entry?.isrc?.trim()) return entry.isrc.trim();
+
+    const extras = this.db.prepare('SELECT isrc FROM extras WHERE key = ?').get(key) as
+      | { isrc: string | null }
+      | undefined;
+    return extras?.isrc?.trim() || null;
   }
 
   extrasCount(): number {
@@ -410,6 +518,97 @@ export class Store {
     return rows.map(toEntry);
   }
 
+  /**
+   * The library: one row per song, with what is held about each.
+   *
+   * A union of both tables rather than a join from `entries`, because the two can exist
+   * independently — a track can have artwork and a tempo and no lyrics anybody has written down.
+   * Listing only the ones with lyrics would hide exactly the songs worth knowing about.
+   */
+  library(query: LibraryQuery = {}): { rows: LibraryRow[]; total: number } {
+    const limit = Math.min(query.limit ?? 50, 500);
+    const offset = Math.max(query.offset ?? 0, 0);
+    const search = query.search?.trim();
+
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (search) {
+      const like = `%${search}%`;
+      const fields = ['title', 'artist', 'album'];
+      // Searching the lyric text is a LIKE over the merged JSON. Not an index, but a personal
+      // cache is thousands of rows rather than millions, and the alternative is an FTS table to
+      // keep in step for a feature used by one person occasionally.
+      if (query.inLyrics) fields.push('lyrics');
+      where.push(`(${fields.map((f) => `${f} LIKE ?`).join(' OR ')})`);
+      params.push(...fields.map(() => like));
+    }
+
+    switch (query.missing) {
+      case 'lyrics':
+        where.push('lyrics IS NULL');
+        break;
+      case 'extras':
+        where.push('extras_updated_at IS NULL');
+        break;
+      case 'syllables':
+        where.push("(lyrics IS NULL OR lyrics NOT LIKE '%\"syllables\":[{%')");
+        break;
+      case 'translation':
+        where.push('(lyrics IS NULL OR hasTranslationFlag = 0)');
+        break;
+      default:
+        break;
+    }
+
+    const order = {
+      song: 'artist COLLATE NOCASE ASC, title COLLATE NOCASE ASC',
+      recent: 'updated_at DESC',
+      hits: 'hits DESC, updated_at DESC',
+      lines: 'LENGTH(COALESCE(lyrics, \'\')) DESC',
+    }[query.sort ?? 'song'];
+
+    // One expression for the row shape, used by both the count and the page, so a filter can
+    // never mean two different things depending on which one applied it.
+    const base = `
+      WITH song AS (
+        SELECT
+          k.key                                                   AS key,
+          COALESCE(NULLIF(e.title, ''),  x.title,  '')            AS title,
+          COALESCE(NULLIF(e.artist, ''), x.artist, '')            AS artist,
+          COALESCE(e.album, '')                                   AS album,
+          COALESCE(e.duration_ms, 0)                              AS duration_ms,
+          e.spotify_id                                            AS spotify_id,
+          e.isrc                                                  AS isrc,
+          e.merged                                                AS lyrics,
+          COALESCE(e.merge_version, 0)                            AS merge_version,
+          COALESCE(e.hits, 0) + COALESCE(x.hits, 0)               AS hits,
+          MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0)) AS updated_at,
+          x.updated_at                                            AS extras_updated_at,
+          x.cover_url, x.artist_image_url, x.tempo,
+          x.palette, x.analysis, x.metadata, x.source             AS extras_source,
+          CASE WHEN e.merged LIKE '%\"hasTranslation\":true%' THEN 1 ELSE 0 END AS hasTranslationFlag,
+          (SELECT GROUP_CONCAT(provider) FROM raw WHERE raw.key = k.key) AS providers,
+          (SELECT COALESCE(SUM(LENGTH(body)), 0) FROM raw WHERE raw.key = k.key) AS archived_bytes
+        FROM (SELECT key FROM entries UNION SELECT key FROM extras) k
+        LEFT JOIN entries e ON e.key = k.key
+        LEFT JOIN extras  x ON x.key = k.key
+      )
+      SELECT * FROM song
+      ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+    `;
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM (${base})`)
+      .get(...params) as { n: number } | undefined;
+
+    const rows = this.db
+      .prepare(`${base} ORDER BY ${order} LIMIT ? OFFSET ?`)
+      .all(...params, limit, offset) as Record<string, unknown>[];
+
+    return { rows: rows.map(toLibraryRow), total: Number(totalRow?.n ?? 0) };
+  }
+
   /** Every key whose merged document predates the current algorithm. */
   keysBelowVersion(version: number): string[] {
     const rows = this.db
@@ -425,6 +624,7 @@ export class Store {
     hits: number;
     rawBodies: number;
     bytes: number;
+    extras: number;
   } {
     const count = (sql: string): number => {
       const row = this.db.prepare(sql).get() as { n: number } | undefined;
@@ -440,6 +640,7 @@ export class Store {
       misses: entries - found,
       hits: count('SELECT COALESCE(SUM(hits), 0) AS n FROM entries'),
       rawBodies: count('SELECT COUNT(*) AS n FROM raw'),
+      extras: count('SELECT COUNT(*) AS n FROM extras'),
       bytes:
         count('SELECT COALESCE(SUM(LENGTH(merged)), 0) AS n FROM entries') +
         count('SELECT COALESCE(SUM(LENGTH(body)), 0) AS n FROM raw'),
@@ -515,6 +716,54 @@ export class Store {
   close(): void {
     this.db.close();
   }
+}
+
+function toLibraryRow(row: Record<string, unknown>): LibraryRow {
+  const merged = parseJson(row.lyrics);
+  const lines = Array.isArray(merged?.lines) ? (merged!.lines as Record<string, unknown>[]) : [];
+  const provenance = (merged?.provenance ?? null) as Record<string, unknown> | null;
+
+  const extrasFields: string[] = [];
+  if (row.cover_url) extrasFields.push('cover');
+  if (row.artist_image_url) extrasFields.push('artist image');
+  if (row.tempo != null) extrasFields.push('tempo');
+  if (parseJson(row.palette)) extrasFields.push('palette');
+  if (parseJson(row.analysis)) extrasFields.push('analysis');
+  if (parseJson(row.metadata)) extrasFields.push('metadata');
+
+  return {
+    key: String(row.key),
+    title: String(row.title ?? ''),
+    artist: String(row.artist ?? ''),
+    album: String(row.album ?? ''),
+    durationMs: Number(row.duration_ms ?? 0),
+    spotifyId: (row.spotify_id as string | null) ?? null,
+    isrc: (row.isrc as string | null) ?? null,
+
+    hasLyrics: Boolean(merged),
+    kind: typeof merged?.kind === 'string' ? merged.kind : null,
+    lines: lines.length,
+    syllableLines: lines.filter(
+      (l) => Array.isArray(l.syllables) && (l.syllables as unknown[]).length > 0,
+    ).length,
+    hasTranslation: merged?.hasTranslation === true,
+    hasRomanization: merged?.hasRomanization === true,
+    timing: typeof provenance?.timing === 'string' ? provenance.timing : null,
+    mergeVersion: Number(row.merge_version ?? 0),
+
+    providers: String(row.providers ?? '')
+      .split(',')
+      .filter((value) => value.length > 0)
+      .sort(),
+    archivedBytes: Number(row.archived_bytes ?? 0),
+
+    hasExtras: row.extras_updated_at != null,
+    extrasFields,
+    extrasSource: (row.extras_source as string | null) || null,
+
+    hits: Number(row.hits ?? 0),
+    updatedAt: Number(row.updated_at ?? 0),
+  };
 }
 
 function toEntry(row: Record<string, unknown>): CacheEntry {

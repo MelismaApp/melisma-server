@@ -22,7 +22,7 @@ interface SearchResponse {
       name?: string;
       duration?: number;
       artists?: { name?: string }[];
-      album?: { name?: string };
+      album?: { id?: number; name?: string; publishTime?: number };
     }[];
   };
 }
@@ -54,15 +54,29 @@ export const netease: Provider = {
       const songs = found.value?.result?.songs ?? [];
       if (songs.length === 0) continue;
 
-      let best: { id: number; match: number } | null = null;
+      let best: { id: number; match: number; song: (typeof songs)[number] } | null = null;
       for (const song of songs) {
         if (!song.id) continue;
         const artists = (song.artists ?? []).map((a) => a.name ?? '').filter(Boolean);
         const match = score(track, song.name ?? '', artists.join(', '), song.duration ?? 0);
         if (match < MATCH_THRESHOLD) continue;
-        if (!best || match > best.match) best = { id: song.id, match };
+        if (!best || match > best.match) best = { id: song.id, match, song };
       }
       if (!best) continue;
+
+      // Free, already in hand, and an authoritative duration is worth more than it looks: the
+      // matcher treats an unknown one as neutral, which is the position it is in for every AMLL
+      // result. No cover art here — the search returns a `picId` rather than a URL, and turning
+      // one into the other is another request for something iTunes already gives away.
+      ctx.learn({
+        durationMs: best.song.duration && best.song.duration > 0 ? best.song.duration : null,
+        metadata: {
+          neteaseId: best.id,
+          albumName: best.song.album?.name || undefined,
+          neteaseAlbumId: best.song.album?.id || undefined,
+          publishTime: best.song.album?.publishTime || undefined,
+        },
+      });
 
       const payload = await lyricsFor(base, best.id, cookie);
       if (!payload) continue;

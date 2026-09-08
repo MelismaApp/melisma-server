@@ -475,6 +475,8 @@ test('extras the server harvested are served', async () => {
     coverUrl: 'https://i.scdn.co/image/cover.jpg',
     artistImageUrl: 'https://i.scdn.co/image/artist.jpg',
     tempo: 87.5,
+    isrc: null,
+    durationMs: null,
     palette: { bgColor: '1f1f24', spotifyBackground: '#1f1f24' },
     analysis: { timeSignature: 4, beats: [{ start: 0.5 }, { start: 1.0 }] },
     metadata: { composerName: 'Someone Else', albumName: 'The Album' },
@@ -503,6 +505,8 @@ test('a second source fills gaps without blanking the first', async () => {
     coverUrl: null,
     artistImageUrl: null,
     tempo: 120,
+    isrc: null,
+    durationMs: null,
     palette: null,
     analysis: { key: 5 },
     metadata: null,
@@ -513,6 +517,8 @@ test('a second source fills gaps without blanking the first', async () => {
     coverUrl: 'https://example.com/apple.jpg',
     artistImageUrl: null,
     tempo: null,
+    isrc: null,
+    durationMs: null,
     palette: { bgColor: 'abcdef' },
     analysis: null,
     metadata: { composerName: 'A Writer' },
@@ -547,6 +553,24 @@ test('an ISRC is identity, so it lands on the cache entry', () => {
   // second, and overwriting invites a worse answer to replace a better one.
   app.store.noteIdentity(key, { isrc: 'ZZZZZZZZZZZZ' });
   assert.equal(app.store.isrcFor(key), 'GBAYE0601498');
+});
+
+test('identity learned before the entry exists is not lost', async () => {
+  // The ordering trap. `noteIdentity` updates the cache entry, and providers report an ISRC while
+  // they are being asked for lyrics — before any entry exists. An UPDATE that matched nothing
+  // silently threw away the single most valuable field collected, so it is mirrored onto the
+  // extras row, which can be created from nothing.
+  const key = cacheKey({ title: 'Early ISRC', artist: 'Someone', album: '', durationMs: 190_000 });
+  assert.equal(app.store.getEntry(key), null, 'precondition: no entry yet');
+
+  app.store.noteIdentity(key, { isrc: 'GBUM71029604', durationMs: 190_000 });
+  assert.equal(app.store.isrcFor(key), 'GBUM71029604');
+
+  const read = await fetch(
+    `${base}/v1/extras?title=Early%20ISRC&artist=Someone&durationMs=190000`,
+  );
+  assert.equal(read.status, 200);
+  assert.equal(((await read.json()) as Record<string, unknown>).isrc, 'GBUM71029604');
 });
 
 test('a track nothing has been harvested for is a 404', async () => {
@@ -637,6 +661,160 @@ test('format=ttml gives the bare file', async () => {
   );
   assert.match(response.headers.get('content-type') ?? '', /ttml/);
   assert.match(await response.text(), /^<\?xml/);
+});
+
+// ---- the library ----------------------------------------------------------
+
+test('the library lists a song with everything held about it', async () => {
+  const key = 'sp:libraryTest';
+  app.store.putEntry({
+    key,
+    title: 'Library Test',
+    artist: 'Someone',
+    album: 'An Album',
+    durationMs: 240_000,
+    spotifyId: 'libraryTest',
+    isrc: null,
+    merged: JSON.stringify({
+      kind: 'syllable',
+      hasTranslation: true,
+      hasRomanization: true,
+      provenance: { timing: 'amll', syllables: ['musixmatch'] },
+      lines: [
+        { role: 'lead', text: 'one', syllables: [{ text: 'one', startMs: 1, endMs: 2 }] },
+        { role: 'lead', text: 'two', syllables: [] },
+      ],
+    }),
+    mergeVersion: MERGE_VERSION,
+  });
+  app.store.putRaw({
+    key,
+    provider: 'amll',
+    body: '<tt/>',
+    contentType: 'application/ttml+xml',
+    ok: true,
+    note: null,
+  });
+  app.store.saveExtras({
+    key,
+    title: 'Library Test',
+    artist: 'Someone',
+    coverUrl: 'https://example.invalid/cover.jpg',
+    artistImageUrl: null,
+    tempo: 120,
+    isrc: null,
+    durationMs: 240_000,
+    palette: { bgColor: '#101010' },
+    analysis: null,
+    metadata: { albumName: 'An Album' },
+    source: 'spotify',
+  });
+
+  const body = await (await authed('/admin/api/library?search=Library%20Test')).json();
+  const row = body.rows.find((r: { key: string }) => r.key === key);
+  assert.ok(row, 'the song is missing from the library');
+
+  // The point of the view: what is held, per song, without opening it.
+  assert.equal(row.kind, 'syllable');
+  assert.equal(row.lines, 2);
+  assert.equal(row.syllableLines, 1);
+  assert.equal(row.timing, 'amll');
+  assert.equal(row.hasTranslation, true);
+  assert.equal(row.hasRomanization, true);
+  assert.deepEqual(row.providers, ['amll']);
+  assert.deepEqual(row.extrasFields, ['cover', 'tempo', 'palette', 'metadata']);
+});
+
+test('the library searches the words, not only the titles', async () => {
+  const titled = await (await authed('/admin/api/library?search=one')).json();
+  const inWords = await (await authed('/admin/api/library?search=one&inLyrics=1')).json();
+  // "one" is a lyric in the song above and in no title, so the difference is the feature.
+  assert.ok(
+    inWords.total > titled.total,
+    `searching the words found ${inWords.total}, titles alone found ${titled.total}`,
+  );
+});
+
+test('the library can show only what is missing', async () => {
+  const key = 'q:nolyrics|nobody|95';
+  app.store.putEntry({
+    key,
+    title: 'No Lyrics At All',
+    artist: 'Nobody',
+    album: '',
+    durationMs: 190_000,
+    spotifyId: null,
+    isrc: null,
+    merged: null,
+    mergeVersion: MERGE_VERSION,
+  });
+
+  const missing = await (await authed('/admin/api/library?missing=lyrics')).json();
+  const keys = missing.rows.map((r: { key: string }) => r.key);
+  assert.ok(keys.includes(key));
+  // And the one with lyrics is not in it.
+  assert.ok(!keys.includes('sp:libraryTest'));
+});
+
+test('a song with artwork and no lyrics is still in the library, and still opens', async () => {
+  // The old view joined from the lyrics table, so these were invisible — which is exactly the
+  // set worth knowing about.
+  const key = 'q:artonly|aay|90';
+  app.store.saveExtras({
+    key,
+    title: 'Artwork Only',
+    artist: 'Aay',
+    coverUrl: 'https://example.invalid/d.jpg',
+    artistImageUrl: null,
+    tempo: 96,
+    isrc: null,
+    durationMs: 180_000,
+    palette: null,
+    analysis: null,
+    metadata: null,
+    source: 'apple',
+  });
+
+  const body = await (await authed('/admin/api/library?search=Artwork')).json();
+  const row = body.rows.find((r: { key: string }) => r.key === key);
+  assert.ok(row, 'a song known only by its artwork was not listed');
+  assert.equal(row.hasLyrics, false);
+  assert.equal(row.title, 'Artwork Only');
+
+  const detail = await (await authed(`/admin/api/entry?key=${encodeURIComponent(key)}`)).json();
+  assert.equal(detail.entry, null);
+  assert.equal(detail.extras.title, 'Artwork Only');
+});
+
+test('the library pages, and reports how many there are in total', async () => {
+  const first = await (await authed('/admin/api/library?limit=1&offset=0')).json();
+  const second = await (await authed('/admin/api/library?limit=1&offset=1')).json();
+  assert.equal(first.rows.length, 1);
+  assert.equal(second.rows.length, 1);
+  assert.notEqual(first.rows[0].key, second.rows[0].key);
+  assert.ok(first.total > 1);
+  assert.equal(first.total, second.total);
+});
+
+// ---- keeping the tokens alive ---------------------------------------------
+
+test('the refresh reports itself as unconfigured rather than pretending', async () => {
+  const status = await (await authed('/admin/api/refresh')).json();
+  assert.equal(status.configured, false);
+  assert.equal(status.command, null);
+  assert.ok(status.everyMinutes >= 5);
+});
+
+test('running an unconfigured refresh is a clear no, not a crash', async () => {
+  const result = await (await authed('/admin/api/refresh', { method: 'POST' })).json();
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /BL_TOKEN_REFRESH_COMMAND/);
+});
+
+test('the refresh needs the key, even from the local network', async () => {
+  // It executes a command on the host. Nothing about that belongs behind the lookup exception.
+  assert.equal((await fetch(`${base}/admin/api/refresh`)).status, 401);
+  assert.equal((await fetch(`${base}/admin/api/refresh`, { method: 'POST' })).status, 401);
 });
 
 // ---- admin ----------------------------------------------------------------

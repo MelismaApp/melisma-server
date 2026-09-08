@@ -32,6 +32,14 @@ export interface Config {
   refreshDays: number;
 
   /**
+   * How often to run `BL_TOKEN_REFRESH_COMMAND`, in minutes.
+   *
+   * Fifty by default: a Spotify web token is good for about an hour, so this leaves ten minutes of
+   * slack without running so often that a slow browser overlaps the next attempt.
+   */
+  tokenRefreshMinutes: number;
+
+  /**
    * Whether a lookup from this machine or the local network may skip the API key.
    *
    * On by default, because the app is designed to send no authentication and a phone on the
@@ -96,6 +104,7 @@ const DEFAULTS = {
   translationLang: 'en',
   negativeTtlHours: 48,
   refreshDays: 30,
+  tokenRefreshMinutes: 50,
   allowLocalNetwork: true,
   lrclibBaseUrl: 'https://lrclib.net',
   neteaseBaseUrl: 'https://music.163.com',
@@ -145,6 +154,10 @@ export class Settings {
       translationLang: value('merge.translationLang', 'BL_TRANSLATION_LANG') ?? DEFAULTS.translationLang,
       negativeTtlHours: int(raw['cache.negativeTtlHours'], DEFAULTS.negativeTtlHours),
       refreshDays: int(raw['cache.refreshDays'], DEFAULTS.refreshDays),
+      tokenRefreshMinutes: int(
+        value('refresh.everyMinutes', 'BL_TOKEN_REFRESH_MINUTES'),
+        DEFAULTS.tokenRefreshMinutes,
+      ),
       allowLocalNetwork: bool(
         value('server.allowLocalNetwork', 'BL_ALLOW_LOCAL_NETWORK'),
         DEFAULTS.allowLocalNetwork,
@@ -231,6 +244,7 @@ function isWritable(key: string): boolean {
     'merge.translationLang',
     'cache.negativeTtlHours',
     'cache.refreshDays',
+    'refresh.everyMinutes',
     'endpoint.lrclib',
     'endpoint.netease',
     'endpoint.amll',

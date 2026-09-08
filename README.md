@@ -33,6 +33,11 @@ api key: 41edb5cc…
 Open the admin page, paste the key, and paste tokens into the **Tokens** tab. Every source
 has a **Test** button that says what is actually wrong rather than just failing.
 
+The **Library** tab is every song the server has been asked about and everything it holds on each —
+the merged lyrics, every provider's raw response, and the artwork, palette, tempo and analysis the
+tokens turned up. Ordered by artist and title, searchable by name *or by the words themselves*, and
+filterable down to what is missing: no lyrics, no word timings, no translation, no artwork.
+
 `npm test` runs the suite. `npm run dev` restarts on change.
 
 ### The key
@@ -84,6 +89,63 @@ Two tokens, and a subscription only gets you one:
 
 Any of these can also come from the environment (`BL_APPLE_BEARER_TOKEN`,
 `BL_SP_DC_COOKIE`, …), in which case the admin page shows them as read-only.
+
+## Keeping the short-lived tokens alive
+
+Spotify closed the endpoint that turned an `sp_dc` cookie into an access token — it answers `400
+usage of this endpoint is not permitted under the Spotify Developer Terms`. What still works is a
+bearer copied out of the web player, and that lasts about an hour. Apple's `media-user-token` dies
+with a browser session. Neither can be renewed by asking.
+
+What does renew them is a browser being a browser: sign in, load the player, read the
+`Authorization` header off its own traffic. So the server runs an external command on a schedule
+and reads new token values off its stdout:
+
+```sh
+BL_TOKEN_REFRESH_COMMAND="node /path/to/examples/refresh-spotify-token.mjs"
+BL_TOKEN_REFRESH_MINUTES=50          # inside a one-hour token life
+```
+
+The command prints one line and the server stores whatever it recognises:
+
+```json
+{"spotifyWebToken": "BQD…"}
+```
+
+`examples/refresh-spotify-token.mjs` is a working Playwright script for exactly this. **Prefer
+giving it `SPOTIFY_SP_DC` over a password** — the cookie can no longer be traded for a token by
+request, but it still authenticates the *player*, which is all the script needs. No password
+anywhere, and nothing for two-factor auth or a CAPTCHA to interrupt.
+
+**The browser deliberately does not live in this server.** Playwright with a bundled Chromium is
+several hundred megabytes against an image that is otherwise `node:24-alpine` plus source, and a
+script that logs in needs credentials the server should never hold. Keeping it outside means a leak
+here is a leak of harvested tokens rather than of an account.
+
+**The command comes from the environment and cannot be set from the admin page.** An admin session
+should not get to choose what the host executes; that turns one stolen key into arbitrary code on
+the machine holding the credentials. The page shows the command, when it last ran, and a **Run
+now** button.
+
+### Under Kamal, where the container has no browser
+
+Two ways, and the second needs nothing installed:
+
+1. **A Playwright accessory.** Add a second container with the script and a browser in it, and set
+   `BL_TOKEN_REFRESH_COMMAND` to something that asks it — `curl -s http://token-refresher:8080/`.
+2. **Push from somewhere that already has a browser.** The admin API accepts a secret directly, so
+   a cron on your laptop is enough:
+
+   ```sh
+   TOKEN=$(node examples/refresh-spotify-token.mjs | tail -1 | node -e \
+     "process.stdin.once('data', d => console.log(JSON.parse(d).spotifyWebToken))")
+   curl -fsS -X POST https://lyrics.example.com/admin/api/config \
+     -H "Authorization: Bearer $BL_API_KEY" -H 'Content-Type: application/json' \
+     -d "{\"secret.spotifyWebToken\": \"$TOKEN\"}"
+   ```
+
+   Nothing new is required on the server for this, and the browser stays on a machine with a home
+   IP — which is challenged far less often than a datacenter one.
 
 ## How the merge works
 

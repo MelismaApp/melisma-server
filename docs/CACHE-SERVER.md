@@ -137,6 +137,16 @@ its own, so nothing needs one, and an endpoint nothing needs is surface nobody s
 
 Two things are worth saying here about *why* the server holds what it holds.
 
+**Every source contributes, including the keyless ones.** The community TTML database indexes
+each song against every service — ISRC, Spotify, Apple, NetEase and QQ ids — and hands the lot
+over with the lyrics, to anybody, with no token of any kind. That makes it the only *free* source
+of an ISRC here, which means a server with no credentials configured at all still accumulates
+identity simply by being used. LRCLIB, NetEase and Musixmatch each report the album name and a
+duration from the match they had already made.
+
+NetEase's cover art is the one thing deliberately left: its search returns a `picId` rather than a
+URL, and turning one into the other is another request for something iTunes gives away keylessly.
+
 **It collects more than anything reads, on its own, on every lookup** — not only on a cache
 miss, or a track whose words were cached before a token existed would never be harvested at all.
 `harvest.ts` asks whatever tokens are configured for the rest of what they know and files it;
@@ -164,7 +174,15 @@ neutral 0.5 into a decision, which is precisely what is missing for AMLL results
 corpus carries no durations at all.
 
 Both are only ever filled in, never overwritten. The first source to identify a recording is as
-good as the second, and overwriting invites a worse answer to replace a better one.
+good as the second, and overwriting invites a worse answer to replace a better one — LRCLIB's
+duration is in whole seconds where Spotify's is in milliseconds, and whichever arrives first
+should not shut the other out.
+
+Identity is also mirrored onto the extras row, and that is not redundancy. A provider reports an
+ISRC *while* it is being asked for lyrics, before any entry row exists, so writing it only to
+`entries` was an UPDATE that matched nothing and silently discarded the most valuable field
+collected. Creating a bare `entries` row instead is not an option: one with no merged document
+*means* "asked, and there are no lyrics", which the negative cache would then serve.
 
 One consequence worth knowing: extras are filed under the key the *asking* phone will have, which
 is the name-and-duration form. `cacheKey` prefers an ISRC when it has one, so filing under an ISRC

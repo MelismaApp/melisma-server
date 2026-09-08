@@ -123,6 +123,17 @@ export const musixmatch: Provider = {
       return null;
     }
 
+    // Free, and already in hand from the match that just succeeded.
+    ctx.learn({
+      durationMs: found.track_length && found.track_length > 0 ? found.track_length * 1000 : null,
+      metadata: {
+        musixmatchTrackId: found.track_id,
+        musixmatchCommontrackId: found.commontrack_id || undefined,
+        albumName: found.album_name || undefined,
+        hasRichsync: Boolean(found.has_richsync) || undefined,
+      },
+    });
+
     // Word-level first: a richsync makes this source worth having, a subtitle makes it
     // merely another line-timed opinion.
     if (found.has_richsync) {

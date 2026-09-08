@@ -23,7 +23,10 @@ interface AmllEntry {
   albumNames?: string[];
   spotifyIds?: string[];
   appleMusicIds?: string[];
+  ncmMusicIds?: string[];
+  qqMusicIds?: string[];
   isrcs?: string[];
+  authorIds?: string[];
   authorUsernames?: string[];
   lyrics?: string;
   format?: string;
@@ -55,6 +58,7 @@ export const amll: Provider = {
     for (const params of direct) {
       const entry = await get(base, params, ctx);
       if (entry?.lyrics) {
+        reportIdentity(entry, ctx);
         const answer = toAnswer(entry, 1);
         if (answer) return answer;
       }
@@ -86,6 +90,7 @@ export const amll: Provider = {
 
       // Search results carry no lyrics; the winner has to be fetched by id.
       const full = best.entry.id ? await get(base, query({ id: best.entry.id }), ctx) : null;
+      reportIdentity(full ?? best.entry, ctx);
       const answer = toAnswer(full ?? best.entry, best.match);
       if (answer) return answer;
     }
@@ -121,6 +126,40 @@ async function get(
   const response = await json<AmllEnvelope<AmllEntry>>(`${base}/v1/lyrics/get?${params}`);
   if (isUnavailable(response.result)) ctx.unreachable(`get: ${response.result.error}`);
   return response.value?.data ?? null;
+}
+
+/**
+ * Report the identity this entry carries, which costs nothing and is worth a great deal.
+ *
+ * The community database indexes every song against every service — ISRC, Spotify, Apple,
+ * NetEase and QQ ids — and hands the lot over with the lyrics, to anyone, with no token of any
+ * kind. That makes it the only *free* source of an ISRC here, and an ISRC turns every later
+ * lookup of the same recording from a fuzzy name match into an exact one.
+ *
+ * Which also means a server with no credentials configured at all still accumulates identity
+ * simply by being used.
+ */
+function reportIdentity(entry: AmllEntry, ctx: ProviderContext): void {
+  const first = (values: string[] | undefined): string | undefined =>
+    values?.find((value) => value.trim().length > 0)?.trim();
+
+  const metadata: Record<string, unknown> = {};
+  const put = (field: string, values: string[] | undefined): void => {
+    const cleaned = values?.filter((value) => value.trim().length > 0);
+    if (cleaned?.length) metadata[field] = cleaned;
+  };
+  put('spotifyIds', entry.spotifyIds);
+  put('appleMusicIds', entry.appleMusicIds);
+  put('neteaseIds', entry.ncmMusicIds);
+  put('qqMusicIds', entry.qqMusicIds);
+  put('albumNames', entry.albumNames);
+  put('amllContributors', entry.authorUsernames);
+  if (entry.id) metadata.amllId = entry.id;
+
+  ctx.learn({
+    isrc: first(entry.isrcs) ?? null,
+    metadata: Object.keys(metadata).length ? metadata : null,
+  });
 }
 
 function toAnswer(entry: AmllEntry, match: number): ProviderAnswer | null {

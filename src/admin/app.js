@@ -100,6 +100,7 @@ function selectTab(name) {
   });
   location.hash = name;
   if (name === 'cache') void loadCache();
+  if (name === 'tokens') void loadRefresh();
   if (name === 'log') startLog();
 }
 
@@ -113,6 +114,7 @@ async function loadConfig() {
   renderProviders();
   fillSettings(data.config);
   renderAppleExpiry(data.appleTokenExpiresAt);
+  renderSpotifyAge(await api('/admin/api/refresh').catch(() => null));
 }
 
 function renderProviders() {
@@ -193,6 +195,27 @@ function renderProviders() {
 
 // ---- tokens ---------------------------------------------------------------
 
+/**
+ * How old the Spotify token is.
+ *
+ * Not an expiry: the token is opaque, so there is nothing to decode. But it lasts about an hour,
+ * and "refreshed 8 minutes ago" versus "3 hours ago" is the whole diagnosis when Spotify starts
+ * returning 401.
+ */
+function renderSpotifyAge(status) {
+  const pill = $('#spotify-token-age');
+  if (!pill) return;
+  const last = status?.last;
+  if (!last?.ok || !last.updated?.includes('spotifyWebToken')) {
+    pill.textContent = 'age unknown';
+    pill.className = 'pill';
+    return;
+  }
+  const minutes = Math.round((Date.now() - last.at) / 60_000);
+  pill.textContent = `refreshed ${when(last.at)}`;
+  pill.className = `pill ${minutes < 55 ? 'good' : 'warn'}`;
+}
+
 function renderAppleExpiry(expiresAt) {
   const pill = $('#apple-expiry');
   if (!expiresAt) {
@@ -236,6 +259,62 @@ $$('[data-reveal]').forEach((button) => {
       input.type = 'password';
     }, 20_000);
   });
+});
+
+// ---- keeping the short-lived tokens alive ---------------------------------
+
+async function loadRefresh() {
+  const status = await api('/admin/api/refresh');
+  const state = $('#refresh-state');
+  const detail = $('#refresh-detail');
+
+  $('#refresh-minutes').value = status.everyMinutes;
+  $('#refresh-command').textContent = status.command
+    ? `$ ${status.command}`
+    : 'BL_TOKEN_REFRESH_COMMAND is not set, so nothing runs on a schedule.';
+  $('#refresh-run').disabled = !status.configured;
+
+  if (!status.configured) {
+    state.textContent = 'not configured';
+    state.className = 'pill';
+    detail.textContent = '';
+    return;
+  }
+
+  const last = status.last;
+  if (!last) {
+    state.textContent = 'never run';
+    state.className = 'pill warn';
+    detail.textContent = `Scheduled every ${status.everyMinutes} minutes.`;
+    return;
+  }
+
+  state.textContent = last.ok ? `ok ${when(last.at)}` : `failed ${when(last.at)}`;
+  state.className = `pill ${last.ok ? 'good' : 'bad'}`;
+  detail.textContent = last.detail;
+  detail.style.color = last.ok ? 'var(--muted)' : 'var(--bad)';
+}
+
+$('#refresh-run').addEventListener('click', async (event) => {
+  const button = event.target;
+  button.disabled = true;
+  button.textContent = 'Running…';
+  try {
+    const result = await api('/admin/api/refresh', { method: 'POST' });
+    toast(result.ok ? result.detail : `Failed: ${result.detail}`, !result.ok);
+    await loadRefresh();
+    // A refreshed token changes what the token fields show.
+    await loadConfig();
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Run now';
+  }
+});
+
+$('#refresh-save-minutes').addEventListener('click', async () => {
+  await save({ 'refresh.everyMinutes': $('#refresh-minutes').value });
+  toast('Saved. The new interval applies on the next restart.');
+  await loadRefresh();
 });
 
 // ---- settings -------------------------------------------------------------
@@ -289,47 +368,151 @@ async function save(patch) {
 
 // ---- cache ----------------------------------------------------------------
 
+let libraryOffset = 0;
+const LIBRARY_PAGE = 50;
+
+function libraryQuery() {
+  return new URLSearchParams({
+    search: $('#cache-search').value,
+    inLyrics: $('#library-in-lyrics').checked ? '1' : '0',
+    sort: $('#library-sort').value,
+    missing: $('#library-missing').value,
+    limit: String(LIBRARY_PAGE),
+    offset: String(libraryOffset),
+  }).toString();
+}
+
 async function loadCache() {
-  const [stats, list] = await Promise.all([
+  const [stats, page] = await Promise.all([
     api('/admin/api/stats'),
-    api(`/admin/api/entries?search=${encodeURIComponent($('#cache-search').value)}`),
+    api(`/admin/api/library?${libraryQuery()}`),
   ]);
 
   $('#cache-stats').replaceChildren(
     stat(stats.entries, 'tracks'),
     stat(stats.found, 'with lyrics'),
     stat(stats.misses, 'nothing found'),
+    stat(stats.extras ?? 0, 'with artwork etc'),
     stat(stats.hits, 'cache hits'),
     stat(stats.rawBodies, 'archived responses'),
     stat(`${(stats.bytes / 1_048_576).toFixed(1)} MB`, 'on disk'),
     stats.stale ? stat(stats.stale, `stale (merge v${stats.mergeVersion})`) : null,
   );
-  $('#header-stats').textContent = `${stats.entries} tracks · ${stats.found} with lyrics · merge v${stats.mergeVersion}`;
+  $('#header-stats').textContent =
+    `${stats.entries} tracks · ${stats.found} with lyrics · merge v${stats.mergeVersion}`;
 
   const body = $('#cache-table tbody');
   body.replaceChildren();
-  for (const entry of list.entries) {
-    const merged = entry.merged ? safeJson(entry.merged) : null;
+
+  for (const row of page.rows) {
     body.append(
-      el('tr', { class: 'clickable', onclick: () => showEntry(entry.key) }, [
+      el('tr', { class: 'clickable', onclick: () => showEntry(row.key) }, [
         el('td', {}, [
-          el('div', { text: entry.title || '(no title)' }),
-          el('div', { class: 'desc', text: entry.artist }),
+          el('div', { text: row.title || '(no title)' }),
+          el('div', { class: 'desc', text: [row.artist, row.album].filter(Boolean).join(' — ') }),
         ]),
-        el('td', { class: 'mono', text: merged?.provenance?.timing ?? '—' }),
-        el('td', { text: merged?.kind ?? 'none' }),
-        el('td', { class: 'num', text: merged ? String(merged.lines.length) : '0' }),
-        el('td', { class: 'num', text: String(entry.hits) }),
-        el('td', { class: 'desc', text: when(entry.updatedAt) }),
+        el('td', {}, lyricsPills(row)),
+        el('td', {}, cachedPills(row)),
+        el('td', { class: 'num', text: String(row.hits) }),
+        el('td', { class: 'desc', text: when(row.updatedAt) }),
       ]),
     );
   }
-  if (list.entries.length === 0) {
-    body.append(el('tr', {}, [el('td', { colspan: '6', class: 'desc', text: 'Nothing cached yet.' })]));
+
+  if (page.rows.length === 0) {
+    body.append(
+      el('tr', {}, [
+        el('td', { colspan: '5', class: 'desc', text: 'Nothing here yet — or nothing matches.' }),
+      ]),
+    );
   }
+
+  // Paging rather than an endless scroll: the point of this view is to answer "what do I have
+  // for X", and a count you can read beats a list you have to fall through.
+  const shown = page.rows.length;
+  const from = page.total === 0 ? 0 : libraryOffset + 1;
+  $('#library-pager').replaceChildren(
+    el('span', {
+      class: 'desc',
+      text: page.total === 0 ? '' : `${from}–${libraryOffset + shown} of ${page.total}`,
+    }),
+    el('span', { class: 'spacer' }),
+    libraryOffset > 0
+      ? el('button', {
+          class: 'action',
+          text: 'Previous',
+          onclick: () => {
+            libraryOffset = Math.max(0, libraryOffset - LIBRARY_PAGE);
+            void loadCache();
+          },
+        })
+      : null,
+    libraryOffset + shown < page.total
+      ? el('button', {
+          class: 'action',
+          text: 'Next',
+          onclick: () => {
+            libraryOffset += LIBRARY_PAGE;
+            void loadCache();
+          },
+        })
+      : null,
+  );
 }
 
-$('#cache-search').addEventListener('input', debounce(loadCache, 250));
+/** What kind of lyrics this song has, at a glance. */
+function lyricsPills(row) {
+  if (!row.hasLyrics) return [el('span', { class: 'pill warn', text: 'none' })];
+  const pills = [];
+  if (row.syllableLines > 0) {
+    pills.push(
+      el('span', {
+        class: 'pill word',
+        text: `word-by-word ${row.syllableLines}/${row.lines}`,
+        title: `${row.syllableLines} of ${row.lines} lines have syllable timings`,
+      }),
+    );
+  } else {
+    pills.push(el('span', { class: 'pill', text: `${row.kind ?? 'lyrics'} · ${row.lines}` }));
+  }
+  if (row.hasRomanization) pills.push(el('span', { class: 'pill', text: 'reading' }));
+  if (row.hasTranslation) pills.push(el('span', { class: 'pill', text: 'translation' }));
+  if (row.timing) pills.push(el('span', { class: 'pill', text: row.timing }));
+  return pills;
+}
+
+/** Everything held that is not the words: archived responses, artwork, analysis. */
+function cachedPills(row) {
+  const pills = [];
+  for (const provider of row.providers) {
+    pills.push(
+      el('span', { class: 'pill', text: provider, title: 'archived response' }),
+    );
+  }
+  for (const field of row.extrasFields) {
+    pills.push(el('span', { class: 'pill good', text: field }));
+  }
+  if (row.archivedBytes > 0) {
+    pills.push(
+      el('span', {
+        class: 'pill',
+        text: `${Math.max(1, Math.round(row.archivedBytes / 1024))} KB`,
+        title: 'total archived response size',
+      }),
+    );
+  }
+  return pills.length > 0 ? pills : [el('span', { class: 'desc', text: '—' })];
+}
+
+const reloadLibrary = () => {
+  libraryOffset = 0;
+  void loadCache();
+};
+
+$('#cache-search').addEventListener('input', debounce(reloadLibrary, 250));
+$('#library-in-lyrics').addEventListener('change', reloadLibrary);
+$('#library-sort').addEventListener('change', reloadLibrary);
+$('#library-missing').addEventListener('change', reloadLibrary);
 $('#cache-remerge').addEventListener('click', async () => {
   const result = await api('/admin/api/remerge', { method: 'POST', body: '{}' });
   toast(`Re-merged ${result.rebuilt}/${result.attempted}`);
@@ -341,8 +524,14 @@ async function showEntry(key) {
   const host = $('#entry-detail');
 
   const provenance = data.merged?.provenance;
+  // A song can be here for its artwork alone, with no lyrics anybody has written down, so the
+  // title has to come from whichever half exists.
+  const about = data.entry ?? data.extras ?? {};
+  const title = about.title || '(no title)';
+  const artist = about.artist || '';
+
   host.replaceChildren(
-    el('h2', { text: `${data.entry.artist} — ${data.entry.title}` }),
+    el('h2', { text: artist ? `${artist} — ${title}` : title }),
     el('div', { class: 'card' }, [
       el('div', { class: 'desc mono', text: key }),
       provenance
@@ -377,9 +566,9 @@ async function showEntry(key) {
         }),
         el('a', {
           class: 'action',
-          href: `/v1/lyrics?title=${encodeURIComponent(data.entry.title)}&artist=${encodeURIComponent(
-            data.entry.artist,
-          )}&durationMs=${data.entry.durationMs}&format=ttml`,
+          href: `/v1/lyrics?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(
+            artist,
+          )}&durationMs=${data.entry?.durationMs ?? 0}&format=ttml`,
           target: '_blank',
           rel: 'noreferrer',
           text: 'Download TTML',
@@ -437,9 +626,101 @@ async function showEntry(key) {
         ])
       : null,
 
+    data.extras ? extrasCard(data.extras) : null,
+
     data.merged ? el('div', { class: 'card lyric-preview' }, preview(data.merged)) : null,
   );
   host.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/**
+ * Everything held about a song that is not its words.
+ *
+ * The artwork is shown rather than described, because a broken cover URL is the sort of thing you
+ * only notice by looking. The palette likewise: hex codes tell you nothing, swatches tell you
+ * whether it will read on screen.
+ */
+function extrasCard(extras) {
+  const palette = extras.palette ?? null;
+  const analysis = extras.analysis ?? null;
+  const metadata = extras.metadata ?? null;
+
+  const facts = [];
+  if (extras.tempo != null) facts.push(['Tempo', `${Math.round(extras.tempo)} BPM`]);
+  if (extras.isrc) facts.push(['ISRC', extras.isrc]);
+  if (analysis?.key != null) facts.push(['Key', String(analysis.key)]);
+  if (analysis?.timeSignature != null) facts.push(['Time', `${analysis.timeSignature}/4`]);
+  if (analysis?.loudness != null) facts.push(['Loudness', `${analysis.loudness} dB`]);
+  for (const [label, field] of [
+    ['Album', 'albumName'],
+    ['Released', 'releaseDate'],
+    ['Writer', 'composerName'],
+    ['Genres', 'genreNames'],
+  ]) {
+    const value = metadata?.[field];
+    if (value) facts.push([label, Array.isArray(value) ? value.join(', ') : String(value)]);
+  }
+
+  return el('div', { class: 'card' }, [
+    el('div', { class: 'title' }, [
+      el('span', { text: 'Artwork, palette and analysis' }),
+      extras.source ? el('span', { class: 'pill', text: extras.source }) : null,
+      el('span', { class: 'pill', text: when(extras.updatedAt) }),
+    ]),
+
+    el('div', { class: 'inline', style: 'margin-top: 12px; align-items: flex-start; gap: 14px' }, [
+      ...[extras.coverUrl, extras.artistImageUrl].filter(Boolean).map((src) =>
+        el('img', {
+          src,
+          loading: 'lazy',
+          referrerpolicy: 'no-referrer',
+          style:
+            'width: 108px; height: 108px; object-fit: cover; border-radius: 8px; ' +
+            'border: 1px solid var(--line); flex: none; background: var(--bg)',
+        }),
+      ),
+      palette
+        ? el(
+            'div',
+            { style: 'display: flex; flex-wrap: wrap; gap: 6px; flex: none' },
+            Object.entries(palette)
+              .filter(([, value]) => typeof value === 'string' && value.startsWith('#'))
+              .map(([name, value]) =>
+                el('div', {
+                  title: `${name} ${value}`,
+                  style:
+                    `width: 34px; height: 34px; border-radius: 6px; background: ${value}; ` +
+                    'border: 1px solid var(--line)',
+                }),
+              ),
+          )
+        : null,
+      facts.length > 0
+        ? el(
+            'div',
+            { class: 'grow' },
+            facts.map(([label, value]) =>
+              el('div', { class: 'desc' }, [
+                el('span', { style: 'color: var(--muted)', text: `${label}: ` }),
+                el('span', { text: value }),
+              ]),
+            ),
+          )
+        : null,
+    ]),
+
+    // The grids and anything nobody has named yet. Collapsed, because it is long and the point of
+    // keeping it is that it cannot be re-fetched, not that it is readable.
+    analysis || palette || metadata
+      ? el('details', { style: 'margin-top: 12px' }, [
+          el('summary', { class: 'desc', text: 'Everything, as stored' }),
+          el('pre', {
+            style: 'margin-top: 8px',
+            text: JSON.stringify({ palette, analysis, metadata }, null, 2),
+          }),
+        ])
+      : null,
+  ]);
 }
 
 /** A readable rendering of a merged document: syllables underlined, extras indented. */

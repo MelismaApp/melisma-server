@@ -18,6 +18,7 @@ const server = start(app);
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     server.close(() => {
+      app.refresher.stop();
       app.store.close();
       process.exit(0);
     });

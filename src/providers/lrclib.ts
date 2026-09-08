@@ -78,6 +78,20 @@ export const lrclib: Provider = {
       return null;
     }
 
+    // Free, and already in hand. LRCLIB's duration is in whole seconds, so it is a weaker
+    // authority than Spotify's milliseconds — which is why identity is only ever filled in, never
+    // overwritten: a better answer that arrives later still wins.
+    ctx.learn({
+      durationMs: best.record.duration && best.record.duration > 0
+        ? Math.round(best.record.duration * 1000)
+        : null,
+      metadata: {
+        lrclibId: best.record.id || undefined,
+        albumName: best.record.albumName || undefined,
+        instrumental: best.record.instrumental || undefined,
+      },
+    });
+
     return toAnswer(best.record, best.match, search.result.contentType);
   },
 

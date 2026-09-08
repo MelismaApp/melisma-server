@@ -18,6 +18,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { Settings, jwtExpiry, randomKey, SECRET_NAMES, type SecretName } from './config.ts';
 import { Store } from './db.ts';
 import { Resolver, reparseByFormat } from './resolver.ts';
+import { Refresher } from './refresher.ts';
 import { MERGE_VERSION } from './merge.ts';
 import { PROVIDERS, providerById } from './providers/index.ts';
 import { parseTtml, writeTtml } from './format/ttml.ts';
@@ -37,6 +38,7 @@ export interface App {
   store: Store;
   settings: Settings;
   resolver: Resolver;
+  refresher: Refresher;
 }
 
 export function createApp(databasePath: string): App {
@@ -44,7 +46,8 @@ export function createApp(databasePath: string): App {
   const settings = new Settings(store);
   settings.ensureApiKey();
   const resolver = new Resolver(store, settings);
-  return { store, settings, resolver };
+  const refresher = new Refresher(store, settings);
+  return { store, settings, resolver, refresher };
 }
 
 /**
@@ -90,6 +93,13 @@ export function start(
         );
       }
       app.store.log('warn', null, `bound to ${config.host} — reachable off-host`);
+    }
+
+    // Tokens first: a container that has just started may have been down for a day, and every
+    // lookup below depends on them. It runs in the background either way.
+    app.refresher.start();
+    if (app.refresher.command) {
+      say(`token refresh: every ${app.settings.read().tokenRefreshMinutes} min`);
     }
 
     // A merge algorithm newer than the stored entries: bring them up to date at boot, from
@@ -207,12 +217,41 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       return send(response, 200, result);
     }
 
+    case 'GET /admin/api/refresh':
+      return send(response, 200, app.refresher.status());
+
+    case 'POST /admin/api/refresh':
+      // Deliberately no way to *set* the command here: an admin session should not be able to
+      // choose what the host executes. Only to run what the environment already chose.
+      return send(response, 200, await app.refresher.run('manual'));
+
     case 'GET /admin/api/stats':
       return send(response, 200, {
         ...app.store.stats(),
         mergeVersion: MERGE_VERSION,
         stale: app.store.keysBelowVersion(MERGE_VERSION).length,
       });
+
+    case 'GET /admin/api/library': {
+      const sort = url.searchParams.get('sort') ?? 'song';
+      const missing = url.searchParams.get('missing') ?? '';
+      return send(response, 200, {
+        ...app.store.library({
+          search: url.searchParams.get('search') ?? undefined,
+          inLyrics: url.searchParams.get('inLyrics') === '1',
+          sort: (['song', 'recent', 'hits', 'lines'] as const).includes(sort as never)
+            ? (sort as 'song' | 'recent' | 'hits' | 'lines')
+            : 'song',
+          missing: (['lyrics', 'extras', 'syllables', 'translation'] as const).includes(
+            missing as never,
+          )
+            ? (missing as 'lyrics' | 'extras' | 'syllables' | 'translation')
+            : undefined,
+          limit: Number(url.searchParams.get('limit') ?? 50),
+          offset: Number(url.searchParams.get('offset') ?? 0),
+        }),
+      });
+    }
 
     case 'GET /admin/api/entries':
       return send(response, 200, {
@@ -226,10 +265,15 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
     case 'GET /admin/api/entry': {
       const key = url.searchParams.get('key') ?? '';
       const entry = app.store.getEntry(key);
-      if (!entry) return send(response, 404, { error: 'no such entry' });
+      const extras = app.store.extras(key);
+      // A track can have artwork and a tempo and no lyrics anybody has written down, so either
+      // half is enough to have something to show.
+      if (!entry && !extras) return send(response, 404, { error: 'no such entry' });
       return send(response, 200, {
-        entry: { ...entry, merged: undefined },
-        merged: entry.merged ? JSON.parse(entry.merged) : null,
+        key,
+        entry: entry ? { ...entry, merged: undefined } : null,
+        merged: entry?.merged ? JSON.parse(entry.merged) : null,
+        extras,
         raw: app.store.getRaw(key).map((raw) => ({
           provider: raw.provider,
           contentType: raw.contentType,

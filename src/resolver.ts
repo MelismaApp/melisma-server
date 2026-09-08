@@ -109,17 +109,11 @@ export class Resolver {
     const started = performance.now();
     const config = this.settings.read();
 
-    // Collect everything else about the track while the tokens are alive, whether or not
-    // anything reads it yet — and on every request rather than only on a cache miss, because a
-    // track whose lyrics were cached before a token existed would otherwise never be harvested
-    // at all. Detached: the caller asked for words, and none of this may make them slower or
-    // fail where they can see it.
-    void this.harvestOnce(config, key, track);
-
     if (!options.force) {
       const cached = this.fromCache(key, config);
       if (cached) {
         this.store.recordHit(key);
+        this.harvestAfter(config, key, track);
         return { ...cached, ms: Math.round(performance.now() - started) };
       }
     }
@@ -133,6 +127,11 @@ export class Resolver {
 
     const work = this.fetchAndMerge(track, key, config, started).finally(() => {
       this.inFlight.delete(key);
+      // After, not before. The harvest records the ISRC and the authoritative duration onto the
+      // cache entry, and until the lookup has run there is no entry to record them on — so
+      // harvesting first threw away the two most valuable fields it collects. Every path through
+      // fetchAndMerge writes an entry, including the one that found nothing.
+      this.harvestAfter(config, key, track);
     });
     this.inFlight.set(key, work);
     return work;
@@ -145,6 +144,16 @@ export class Resolver {
    * lives, skipped when the extras and the identity are both already on record, and never
    * awaited.
    */
+  /**
+   * Kick off a harvest without waiting for it.
+   *
+   * Detached on purpose: the caller asked for words, and none of this may make them slower or
+   * fail anywhere they can see.
+   */
+  private harvestAfter(config: Config, key: string, track: TrackQuery): void {
+    void this.harvestOnce(config, key, track);
+  }
+
   private async harvestOnce(config: Config, key: string, track: TrackQuery): Promise<void> {
     if (this.harvested.has(key)) return;
     this.harvested.add(key);

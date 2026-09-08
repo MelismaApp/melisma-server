@@ -94,8 +94,59 @@
             </div>
           </div>
 
+          <h2>Keeping them alive</h2>
+          <p class="hint">
+            A Spotify web token lasts about an hour and Apple's user token dies with a browser
+            session, and neither can be renewed by asking. A browser signing in and reading the
+            header off its own traffic can — so the server runs one on a schedule, if you give it
+            one to run.
+          </p>
+          <div class="card" id="refresh-card">
+            <div class="title">
+              Automatic refresh
+              <span class="pill" id="refresh-state">checking…</span>
+            </div>
+            <div class="desc" id="refresh-detail" style="margin-top: 4px"></div>
+            <div class="desc mono" id="refresh-command" style="margin-top: 8px"></div>
+            <div class="inline" style="margin-top: 12px">
+              <button class="action" id="refresh-run">Run now</button>
+              <label class="inline" style="color: var(--muted); font-size: 13px">
+                every
+                <input type="number" id="refresh-minutes" style="width: 76px" />
+                minutes
+              </label>
+              <button class="action" id="refresh-save-minutes">Save</button>
+            </div>
+            <div class="desc" style="margin-top: 10px">
+              The command comes from <code>BL_TOKEN_REFRESH_COMMAND</code> in the environment and
+              cannot be set from this page — an admin session should not get to choose what the
+              host executes. <code>examples/refresh-spotify-token.mjs</code> is a working script
+              for Spotify; point the variable at it. Prefer giving it
+              <code>SPOTIFY_SP_DC</code> over a password: no password anywhere, and nothing for
+              two-factor auth to interrupt.
+            </div>
+          </div>
+
           <h2>Everything else</h2>
           <p class="hint">All optional. Each source that has no token stays quiet rather than failing.</p>
+
+          <div class="card">
+            <div class="title">
+              Spotify web token
+              <span class="pill" id="spotify-token-age"></span>
+            </div>
+            <div class="desc" style="margin-bottom: 10px">
+              Copied out of the web player: open.spotify.com → DevTools → Network → any request to
+              <code>api-partner.spotify.com</code> → the <code>Authorization: Bearer …</code>
+              value. It lasts about an hour, which is what the refresh above is for. The cookie
+              route below is closed — Spotify now refuses to trade a cookie for a token.
+            </div>
+            <div class="inline">
+              <input type="password" class="mono" id="secret-spotifyWebToken" placeholder="BQD…" />
+              <button class="action" data-reveal="spotifyWebToken">Reveal</button>
+              <button class="action primary" data-save-secret="spotifyWebToken">Save</button>
+            </div>
+          </div>
 
           <div class="card">
             <div class="title">Spotify <code>sp_dc</code> cookie</div>
@@ -139,32 +190,57 @@
 
         <!-- ---- cache ------------------------------------------------------ -->
         <section id="tab-cache" hidden>
-          <h2>Cache</h2>
+          <h2>Library</h2>
           <p class="hint">
-            Every provider's raw response is kept alongside the merged document, so improving
-            the merge is a local recompute rather than thousands of requests to services doing
-            this for free.
+            Every song the server has been asked about, and everything it holds on each — the
+            merged lyrics, every provider's raw response, and the artwork, palette, tempo and
+            analysis the tokens turned up. Ordered by artist and title by default.
           </p>
           <div class="stats" id="cache-stats"></div>
-          <div class="inline" style="margin-bottom: 14px">
-            <input type="text" id="cache-search" placeholder="Search title or artist" />
-            <button class="action" id="cache-remerge">Re-merge stale</button>
+
+          <div class="card">
+            <div class="inline" style="margin-bottom: 10px">
+              <input type="text" id="cache-search" placeholder="Search artist, title or album" />
+              <select id="library-sort" style="width: auto">
+                <option value="song">By song</option>
+                <option value="recent">Recently updated</option>
+                <option value="hits">Most asked for</option>
+                <option value="lines">Biggest</option>
+              </select>
+            </div>
+            <div class="inline" style="flex-wrap: wrap; gap: 14px">
+              <label class="inline" style="color: var(--muted); font-size: 13px">
+                <input type="checkbox" id="library-in-lyrics" style="width: auto" />
+                search the words too
+              </label>
+              <select id="library-missing" style="width: auto">
+                <option value="">Everything</option>
+                <option value="lyrics">Missing lyrics</option>
+                <option value="syllables">Missing word timings</option>
+                <option value="translation">Missing a translation</option>
+                <option value="extras">Missing artwork and analysis</option>
+              </select>
+              <span class="spacer"></span>
+              <button class="action" id="cache-remerge">Re-merge stale</button>
+            </div>
           </div>
+
           <div class="card" style="padding: 0; overflow: hidden">
             <table id="cache-table">
               <thead>
                 <tr>
-                  <th>Track</th>
-                  <th>Timing from</th>
-                  <th>Kind</th>
-                  <th class="num">Lines</th>
-                  <th class="num">Hits</th>
+                  <th>Song</th>
+                  <th>Lyrics</th>
+                  <th>What else is cached</th>
+                  <th class="num">Asked</th>
                   <th>Updated</th>
                 </tr>
               </thead>
               <tbody></tbody>
             </table>
           </div>
+
+          <div class="inline" id="library-pager" style="margin-top: 12px"></div>
           <div id="entry-detail"></div>
         </section>
 
