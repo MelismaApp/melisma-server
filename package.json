@@ -1,0 +1,17 @@
+{
+  "name": "better-lyrics-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal caching and merging lyrics server for Better Lyrics",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "dev": "node --watch src/main.ts",
+    "test": "node --test 'test/**/*.test.ts'"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Better Lyrics Server</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <!-- Shown until the API key is accepted. Everything else stays out of the DOM's way. -->
+    <div class="card" id="login" hidden>
+      <h1>Better Lyrics Server</h1>
+      <p class="hint">
+        The key is printed in the terminal when the server starts. It is also what the app
+        sends, so keep it to yourself.
+      </p>
+      <label class="field">
+        <span>API key</span>
+        <input type="password" id="login-key" class="mono" autocomplete="current-password" />
+      </label>
+      <button class="action primary" id="login-go">Unlock</button>
+    </div>
+
+    <div id="app" hidden>
+      <header>
+        <h1>Better Lyrics Server</h1>
+        <span class="sub" id="header-stats"></span>
+        <span class="spacer"></span>
+        <button class="action" id="logout">Lock</button>
+      </header>
+
+      <nav id="tabs">
+        <button data-tab="sources" aria-selected="true">Sources</button>
+        <button data-tab="tokens">Tokens</button>
+        <button data-tab="cache">Cache</button>
+        <button data-tab="try">Try a track</button>
+        <button data-tab="log">Log</button>
+        <button data-tab="settings">Settings</button>
+      </nav>
+
+      <main>
+        <!-- ---- sources ---------------------------------------------------- -->
+        <section id="tab-sources">
+          <h2>Where lyrics come from</h2>
+          <p class="hint">
+            Every enabled source is asked at once, and the answers are merged rather than
+            raced — one source supplies the timing, the rest lend translations, readings,
+            background vocals and credits. Order only breaks ties. A source with a missing
+            token is skipped rather than queried.
+          </p>
+          <div id="providers"></div>
+        </section>
+
+        <!-- ---- tokens ----------------------------------------------------- -->
+        <section id="tab-tokens" hidden>
+          <h2>Apple Music</h2>
+          <p class="hint">
+            Two tokens, and a subscription only gets you one of them. This is the reason the
+            server exists: these cannot safely live inside the app.
+          </p>
+
+          <div class="card">
+            <div class="title">
+              Developer token (bearer)
+              <span class="pill" id="apple-expiry"></span>
+            </div>
+            <div class="desc" style="margin-bottom: 10px">
+              No Apple Developer membership needed — use the web player's own. Open
+              <a href="https://music.apple.com" target="_blank" rel="noreferrer noopener">music.apple.com</a>,
+              open DevTools → Network, click any song, find a request to
+              <code>amp-api.music.apple.com</code>, and copy the whole
+              <code>Authorization: Bearer eyJ…</code> value. It is shared by every web listener
+              and lasts months, but it does expire — the badge above says when.
+            </div>
+            <div class="inline">
+              <input type="password" class="mono" id="secret-appleBearerToken" placeholder="eyJhbGci…" />
+              <button class="action" data-reveal="appleBearerToken">Reveal</button>
+              <button class="action primary" data-save-secret="appleBearerToken">Save</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="title">Media user token</div>
+            <div class="desc" style="margin-bottom: 10px">
+              This is the one your subscription gets you. On music.apple.com, signed in:
+              DevTools → Application → Cookies → <code>media-user-token</code>. It dies with the
+              browser session, so if lyrics start returning 403 this is what to replace.
+            </div>
+            <div class="inline">
+              <input type="password" class="mono" id="secret-appleMediaUserToken" placeholder="Aq…" />
+              <button class="action" data-reveal="appleMediaUserToken">Reveal</button>
+              <button class="action primary" data-save-secret="appleMediaUserToken">Save</button>
+            </div>
+          </div>
+
+          <h2>Everything else</h2>
+          <p class="hint">All optional. Each source that has no token stays quiet rather than failing.</p>
+
+          <div class="card">
+            <div class="title">Spotify <code>sp_dc</code> cookie</div>
+            <div class="desc" style="margin-bottom: 10px">
+              From a signed-in session at open.spotify.com. Unlocks Spotify's own lyrics, which
+              are line-timed but matched to the exact track — useful as a text reference the
+              merge can trust.
+            </div>
+            <div class="inline">
+              <input type="password" class="mono" id="secret-spDcCookie" />
+              <button class="action" data-reveal="spDcCookie">Reveal</button>
+              <button class="action primary" data-save-secret="spDcCookie">Save</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="title">Musixmatch user token</div>
+            <div class="desc" style="margin-bottom: 10px">
+              Optional. The server mints an anonymous one on demand; your own reaches more of
+              the catalogue.
+            </div>
+            <div class="inline">
+              <input type="password" class="mono" id="secret-musixmatchUserToken" />
+              <button class="action" data-reveal="musixmatchUserToken">Reveal</button>
+              <button class="action primary" data-save-secret="musixmatchUserToken">Save</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="title">NetEase cookie</div>
+            <div class="desc" style="margin-bottom: 10px">
+              Optional. Raises the per-IP limits and unlocks some regional catalogues.
+            </div>
+            <div class="inline">
+              <input type="password" class="mono" id="secret-neteaseCookie" />
+              <button class="action" data-reveal="neteaseCookie">Reveal</button>
+              <button class="action primary" data-save-secret="neteaseCookie">Save</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ---- cache ------------------------------------------------------ -->
+        <section id="tab-cache" hidden>
+          <h2>Cache</h2>
+          <p class="hint">
+            Every provider's raw response is kept alongside the merged document, so improving
+            the merge is a local recompute rather than thousands of requests to services doing
+            this for free.
+          </p>
+          <div class="stats" id="cache-stats"></div>
+          <div class="inline" style="margin-bottom: 14px">
+            <input type="text" id="cache-search" placeholder="Search title or artist" />
+            <button class="action" id="cache-remerge">Re-merge stale</button>
+          </div>
+          <div class="card" style="padding: 0; overflow: hidden">
+            <table id="cache-table">
+              <thead>
+                <tr>
+                  <th>Track</th>
+                  <th>Timing from</th>
+                  <th>Kind</th>
+                  <th class="num">Lines</th>
+                  <th class="num">Hits</th>
+                  <th>Updated</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="entry-detail"></div>
+        </section>
+
+        <!-- ---- try -------------------------------------------------------- -->
+        <section id="tab-try" hidden>
+          <h2>Try a track</h2>
+          <p class="hint">
+            Runs a real lookup and shows what every source said, which source won the timing,
+            and what the merge borrowed from where. This is the fastest way to tell a broken
+            token from a track nobody has transcribed.
+          </p>
+          <div class="card">
+            <div class="grid">
+              <label class="field"><span>Title</span><input type="text" id="try-title" value="Lemon" /></label>
+              <label class="field"><span>Artist</span><input type="text" id="try-artist" value="Kenshi Yonezu" /></label>
+              <label class="field"><span>Album</span><input type="text" id="try-album" /></label>
+              <label class="field"><span>Duration (ms)</span><input type="number" id="try-duration" value="255000" /></label>
+              <label class="field"><span>Spotify track id</span><input type="text" id="try-spotify" class="mono" placeholder="7Cd17G3oNQ34OWUwS8ZxfR" /></label>
+              <label class="field"><span>ISRC</span><input type="text" id="try-isrc" class="mono" /></label>
+            </div>
+            <div class="inline">
+              <button class="action primary" id="try-go">Look up</button>
+              <label class="inline" style="color: var(--muted); font-size: 13px">
+                <input type="checkbox" id="try-force" style="width: auto" /> ignore the cache
+              </label>
+            </div>
+          </div>
+          <div id="try-result"></div>
+        </section>
+
+        <!-- ---- log -------------------------------------------------------- -->
+        <section id="tab-log" hidden>
+          <h2>Log</h2>
+          <p class="hint">
+            Live. Tokens are stripped before anything is written here, but provider errors
+            sometimes quote your request back, so it is still worth not screenshotting.
+          </p>
+          <div class="card" id="log"></div>
+        </section>
+
+        <!-- ---- settings --------------------------------------------------- -->
+        <section id="tab-settings" hidden>
+          <h2>Merging</h2>
+          <div class="card">
+            <label class="field">
+              <span>Preferred translation language</span>
+              <input type="text" id="set-translationLang" class="mono" placeholder="en" />
+              <span class="note">
+                A BCP-47 prefix. A source's translation is preferred when it is in this
+                language — otherwise a Chinese translation of a Japanese song wins simply by
+                being first, which is no use to an English reader.
+              </span>
+            </label>
+          </div>
+
+          <h2>Cache lifetime</h2>
+          <div class="card">
+            <div class="grid">
+              <label class="field">
+                <span>Re-check a found track after (days)</span>
+                <input type="number" id="set-refreshDays" />
+                <span class="note">Sources add tracks; this is how long before asking again.</span>
+              </label>
+              <label class="field">
+                <span>Re-check "no lyrics" after (hours)</span>
+                <input type="number" id="set-negativeTtlHours" />
+                <span class="note">
+                  Short on purpose: a track nobody has transcribed today may be in the
+                  community database tomorrow.
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <h2>Endpoints</h2>
+          <p class="hint">Point these at your own instance if you run one.</p>
+          <div class="card">
+            <div class="grid">
+              <label class="field"><span>AMLL TTML API</span><input type="text" id="set-endpoint-amll" class="mono" /></label>
+              <label class="field"><span>LRCLIB</span><input type="text" id="set-endpoint-lrclib" class="mono" /></label>
+              <label class="field"><span>NetEase</span><input type="text" id="set-endpoint-netease" class="mono" /></label>
+              <label class="field"><span>Apple API</span><input type="text" id="set-endpoint-apple" class="mono" /></label>
+              <label class="field"><span>Apple storefront</span><input type="text" id="set-endpoint-appleStorefront" class="mono" placeholder="us" /></label>
+            </div>
+          </div>
+
+          <h2>Server</h2>
+          <div class="card">
+            <div class="grid">
+              <label class="field">
+                <span>Bind address</span>
+                <input type="text" id="set-server-host" class="mono" />
+                <span class="note">
+                  Restart to apply. Leave as 127.0.0.1 unless something in front of it
+                  terminates TLS — the database holds your Apple and Spotify credentials in
+                  the clear.
+                </span>
+              </label>
+              <label class="field">
+                <span>Port</span>
+                <input type="number" id="set-server-port" />
+                <span class="note">Restart to apply.</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="inline"><button class="action primary" id="settings-save">Save settings</button></div>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast"></div>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>
