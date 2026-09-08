@@ -31,6 +31,19 @@ export interface Config {
   /** How long before a found document is re-fetched to pick up newly added sources. */
   refreshDays: number;
 
+  /**
+   * Whether a lookup from this machine or the local network may skip the API key.
+   *
+   * On by default, because the app is designed to send no authentication and a phone on the
+   * same Wi-Fi is the normal case. It only ever applies to `/v1` — the admin surface, which
+   * is the only thing that can read a token, always wants the key.
+   *
+   * Turn it off if anything public proxies to this server: the check uses the connecting
+   * socket's address, and a reverse proxy on the same host looks local no matter who is
+   * really on the other end.
+   */
+  allowLocalNetwork: boolean;
+
   providers: Record<string, ProviderSetting>;
 
   lrclibBaseUrl: string;
@@ -75,6 +88,7 @@ const DEFAULTS = {
   translationLang: 'en',
   negativeTtlHours: 48,
   refreshDays: 30,
+  allowLocalNetwork: true,
   lrclibBaseUrl: 'https://lrclib.net',
   neteaseBaseUrl: 'https://music.163.com',
   amllBaseUrl: 'https://api.amll.dev',
@@ -123,6 +137,10 @@ export class Settings {
       translationLang: value('merge.translationLang', 'BL_TRANSLATION_LANG') ?? DEFAULTS.translationLang,
       negativeTtlHours: int(raw['cache.negativeTtlHours'], DEFAULTS.negativeTtlHours),
       refreshDays: int(raw['cache.refreshDays'], DEFAULTS.refreshDays),
+      allowLocalNetwork: bool(
+        value('server.allowLocalNetwork', 'BL_ALLOW_LOCAL_NETWORK'),
+        DEFAULTS.allowLocalNetwork,
+      ),
 
       providers,
 
@@ -201,6 +219,7 @@ function isWritable(key: string): boolean {
     'server.apiKey',
     'server.host',
     'server.port',
+    'server.allowLocalNetwork',
     'merge.translationLang',
     'cache.negativeTtlHours',
     'cache.refreshDays',

@@ -22,7 +22,7 @@ import { PROVIDERS, providerById } from './providers/index.ts';
 import { parseTtml, writeTtml } from './format/ttml.ts';
 import { parseLrc } from './format/lrc.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
-import type { LyricsDocument } from './model.ts';
+import type { LyricsDocument, MergedDocument } from './model.ts';
 
 const ADMIN_DIR = new URL('./admin/', import.meta.url).pathname;
 
@@ -128,7 +128,7 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
   }
 
   // ---- authenticated -----------------------------------------------------
-  if (!isAuthorised(app, request)) {
+  if (!isAuthorised(app, request, path)) {
     return send(response, 401, { error: 'unauthorised' });
   }
 
@@ -290,7 +290,11 @@ async function lyrics(app: App, url: URL, response: ServerResponse): Promise<voi
   });
 
   if (!resolution.document) {
+    // Any non-2xx reads as "nothing found" to the app, which does not distinguish a miss
+    // from a failure — a source that cannot answer simply contributes nothing. The body is
+    // for a human debugging it.
     return send(response, 404, {
+      status: 404,
       key: resolution.key,
       source: resolution.source,
       candidates: resolution.candidates,
@@ -298,22 +302,85 @@ async function lyrics(app: App, url: URL, response: ServerResponse): Promise<voi
     });
   }
 
-  if (url.searchParams.get('format') === 'ttml') {
-    response.writeHead(200, {
-      'Content-Type': 'application/ttml+xml; charset=utf-8',
-      'X-Lyrics-Source': resolution.document.provenance.timing,
-      'X-Cache': resolution.source,
-    });
+  const format = url.searchParams.get('format');
+  const credit = creditFor(app, resolution.key, resolution.document);
+  response.setHeader('X-Cache', resolution.source);
+  response.setHeader('X-Lyrics-Source', resolution.document.provenance.timing);
+
+  // Bare TTML, for saving a file or handing to the community tooling.
+  if (format === 'ttml') {
+    response.writeHead(200, { 'Content-Type': 'application/ttml+xml; charset=utf-8' });
     return void response.end(writeTtml(resolution.document));
   }
 
-  response.setHeader('X-Cache', resolution.source);
+  // The structured document, for the admin page and anything that wants the model rather
+  // than a serialisation of it.
+  if (format === 'json') {
+    return send(response, 200, {
+      key: resolution.key,
+      source: resolution.source,
+      ms: resolution.ms,
+      document: resolution.document,
+    });
+  }
+
+  // The default, and what the app asks for: TTML in an envelope.
+  //
+  // TTML rather than the structured document deliberately. It carries everything the app
+  // renders — syllables, agents, background vocals, readings, translations with their
+  // language — and unlike a bespoke JSON shape it is a format other things already speak, so
+  // the app can point at any lyrics server rather than only at this one.
   return send(response, 200, {
-    key: resolution.key,
-    source: resolution.source,
-    ms: resolution.ms,
-    document: resolution.document,
+    status: 200,
+    data: {
+      format: 'ttml',
+      lyrics: writeTtml(resolution.document),
+      source: resolution.document.provenance.timing,
+      providerName: credit,
+      // Not part of the contract; useful when watching what the server is doing.
+      key: resolution.key,
+      cache: resolution.source,
+      ms: resolution.ms,
+    },
   });
+}
+
+/**
+ * Who to credit under the last line.
+ *
+ * The attribution has to survive the hop through the cache, or every track ends up claiming
+ * to come from "a cache server" and the sources that actually did the work — including the
+ * volunteer who hand-timed the file — go unnamed.
+ */
+function creditFor(app: App, key: string, document: MergedDocument): string {
+  const label = (id: string): string => {
+    const contributed = id.startsWith('app:');
+    const provider = providerById(contributed ? id.slice(4) : id);
+    const name = provider?.label ?? id;
+    return contributed ? `${name} (via the app)` : name;
+  };
+
+  const provenance = document.provenance;
+  let credit = label(provenance.timing);
+
+  // The archived note is where a provider recorded something worth passing on, which for the
+  // community database is the name of the person who timed it.
+  const note = app.store.getRaw(key).find((raw) => raw.provider === provenance.timing)?.note;
+  if (note && /by /i.test(note)) credit += ` · ${note}`;
+
+  const borrowed: string[] = [];
+  for (const id of provenance.syllables) borrowed.push(`${label(id)} timings`);
+  if (provenance.translation && provenance.translation !== provenance.timing) {
+    borrowed.push(`${label(provenance.translation)} translation`);
+  }
+  if (provenance.romanization && provenance.romanization !== provenance.timing) {
+    borrowed.push(`${label(provenance.romanization)} reading`);
+  }
+  if (provenance.background && provenance.background !== provenance.timing) {
+    borrowed.push(`${label(provenance.background)} backing vocals`);
+  }
+
+  return borrowed.length > 0 ? `${credit} + ${borrowed.join(', ')}` : credit;
 }
 
 /**
@@ -463,20 +530,60 @@ function trackFromJson(body: unknown): TrackQuery | null {
   };
 }
 
-function isAuthorised(app: App, request: IncomingMessage): boolean {
+/**
+ * Two different questions, so two different answers.
+ *
+ * `/admin` is the only surface that can read a credential, and it always wants the key or a
+ * session. `/v1` can only cause lyric lookups, and the app that calls it is designed to send
+ * no authentication at all — so a request arriving from this machine or the local network is
+ * allowed through, which is what makes the app work as written without leaving the tokens or a
+ * public deployment open. See `allowLocalNetwork` for the reverse-proxy caveat.
+ */
+function isAuthorised(app: App, request: IncomingMessage, path: string): boolean {
   const header = request.headers.authorization ?? '';
   if (header.toLowerCase().startsWith('bearer ')) {
     return matchesApiKey(app, header.slice(7).trim());
   }
+
   const token = cookie(request, 'bls_session');
-  if (!token) return false;
-  const expiry = sessions.get(token);
-  if (!expiry) return false;
-  if (expiry < Date.now()) {
-    sessions.delete(token);
+  if (token) {
+    const expiry = sessions.get(token);
+    if (expiry && expiry >= Date.now()) return true;
+    if (expiry) sessions.delete(token);
+  }
+
+  if (path.startsWith('/v1/') && app.settings.read().allowLocalNetwork) {
+    return isLocalAddress(request.socket.remoteAddress);
+  }
+  return false;
+}
+
+/**
+ * Whether the connecting socket is this machine or the private network.
+ *
+ * The socket's own address, never a header: `X-Forwarded-For` is whatever the client says it
+ * is, and trusting it here would turn the whole check into a formality.
+ */
+export function isLocalAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  // Node reports IPv4 over a dual-stack socket as ::ffff:192.168.1.5.
+  const host = address.replace(/^::ffff:/i, '').toLowerCase();
+
+  if (host === '127.0.0.1' || host === '::1' || host === 'localhost') return true;
+  if (host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return true;
+
+  const octets = host.split('.').map((part) => Number.parseInt(part, 10));
+  if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
     return false;
   }
-  return true;
+  const [a, b] = octets;
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 192 && b === 168) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 169 && b === 254)
+  );
 }
 
 /** Constant-time, so a wrong key cannot be found one character at a time. */

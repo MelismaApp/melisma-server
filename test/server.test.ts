@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import type { AddressInfo } from 'node:net';
 
-import { createApp, start, type App } from '../src/server.ts';
+import { createApp, isLocalAddress, start, type App } from '../src/server.ts';
 import { MERGE_VERSION } from '../src/merge.ts';
 
 let app: App;
@@ -37,16 +37,54 @@ const authed = (path: string, options: RequestInit = {}) =>
 
 // ---- authentication -------------------------------------------------------
 
-test('the API is closed without a key', async () => {
-  assert.equal((await fetch(`${base}/v1/health`)).status, 401);
+test('the admin surface is closed without a key, always', async () => {
+  // It is the only thing that can read a credential.
   assert.equal((await fetch(`${base}/admin/api/stats`)).status, 401);
+  assert.equal((await fetch(`${base}/admin/api/config`)).status, 401);
 });
 
-test('a wrong key is rejected', async () => {
+test('a lookup from this machine needs no key', async () => {
+  // The app is designed to send no authentication, and a lookup cannot read a token — it can
+  // only cause a lyric fetch. This is what lets the app work as written.
+  assert.equal((await fetch(`${base}/v1/health`)).status, 200);
+});
+
+test('a wrong key is rejected even from here', async () => {
+  // An explicit credential that does not match is an error, not something to shrug off and
+  // fall back to the local allowance.
   const response = await fetch(`${base}/v1/health`, {
     headers: { Authorization: 'Bearer definitely-not-the-key' },
   });
   assert.equal(response.status, 401);
+});
+
+test('turning the local allowance off closes lookups too', async () => {
+  app.settings.update({ 'server.allowLocalNetwork': '0' });
+  try {
+    assert.equal((await fetch(`${base}/v1/health`)).status, 401);
+    assert.equal((await authed('/v1/health')).status, 200);
+  } finally {
+    app.settings.update({ 'server.allowLocalNetwork': '1' });
+  }
+});
+
+test('only this machine and the private network count as local', () => {
+  for (const address of [
+    '127.0.0.1',
+    '::1',
+    '::ffff:192.168.1.5', // IPv4 over a dual-stack socket
+    '10.0.0.7',
+    '172.16.4.1',
+    '192.168.1.20',
+    '169.254.1.1',
+    'fd00::1',
+  ]) {
+    assert.ok(isLocalAddress(address), address);
+  }
+
+  for (const address of ['8.8.8.8', '172.32.0.1', '192.169.1.1', '2001:4860::1', '', undefined]) {
+    assert.ok(!isLocalAddress(address), String(address));
+  }
 });
 
 test('the admin page itself is public, because it is only a login form', async () => {
@@ -233,6 +271,76 @@ test('a contribution that is not lyrics is refused', async () => {
     }),
   });
   assert.equal(response.status, 400);
+});
+
+// ---- the shape the app expects --------------------------------------------
+
+test('a found track comes back as TTML in an envelope, with the credit', async () => {
+  // Exactly the request the app makes: no Authorization header, no format parameter.
+  const track = { title: 'Enveloped', artist: 'Someone', durationMs: 240_000 };
+  const { cacheKey } = await import('../src/match.ts');
+  const key = cacheKey(track);
+
+  app.store.putRaw({
+    key,
+    provider: 'app:amll',
+    body:
+      '<tt xmlns:ttm="http://www.w3.org/ns/ttml#metadata" itunes:timing="Word"><body><div>' +
+      '<p begin="1.0" end="3.0" itunes:key="L1"><span begin="1.0" end="2.0">one</span>' +
+      '<span begin="2.0" end="3.0"> two</span>' +
+      '<span ttm:role="x-roman">wan tsu</span></p>' +
+      '<p begin="4.0" end="6.0" itunes:key="L2"><span begin="4.0" end="6.0">three</span></p>' +
+      '<p begin="7.0" end="9.0" itunes:key="L3"><span begin="7.0" end="9.0">four</span></p>' +
+      '</div></body></tt>',
+    contentType: 'application/ttml+xml',
+    ok: true,
+    note: 'timed by somebody',
+  });
+  app.store.putEntry({
+    key,
+    title: track.title,
+    artist: track.artist,
+    album: '',
+    durationMs: track.durationMs,
+    spotifyId: null,
+    isrc: null,
+    merged: null,
+    mergeVersion: 0, // forces a re-merge from the archive on the next lookup
+  });
+
+  const response = await fetch(
+    `${base}/v1/lyrics?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(
+      track.artist,
+    )}&durationMs=${track.durationMs}`,
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+
+  assert.equal(body.status, 200);
+  assert.equal(body.data.format, 'ttml');
+  assert.ok(body.data.lyrics.startsWith('<?xml') || body.data.lyrics.startsWith('<tt'));
+  assert.match(body.data.lyrics, /itunes:timing="Word"/);
+  assert.match(body.data.lyrics, /ttm:role="x-roman"/);
+  // The attribution has to survive the hop, or every track claims to come from a cache.
+  assert.match(body.data.providerName, /AMLL TTML Database \(via the app\)/);
+  assert.match(body.data.providerName, /timed by somebody/);
+  assert.equal(response.headers.get('x-cache'), 'remerge');
+});
+
+test('format=json gives the structured document instead', async () => {
+  const body = await (
+    await authed('/v1/lyrics?title=Enveloped&artist=Someone&durationMs=240000&format=json')
+  ).json();
+  assert.equal(body.document.kind, 'syllable');
+  assert.equal(body.document.lines[0].romanized, 'wan tsu');
+});
+
+test('format=ttml gives the bare file', async () => {
+  const response = await authed(
+    '/v1/lyrics?title=Enveloped&artist=Someone&durationMs=240000&format=ttml',
+  );
+  assert.match(response.headers.get('content-type') ?? '', /ttml/);
+  assert.match(await response.text(), /^<\?xml/);
 });
 
 // ---- admin ----------------------------------------------------------------

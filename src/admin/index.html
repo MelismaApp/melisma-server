@@ -252,6 +252,22 @@
           </div>
 
           <h2>Server</h2>
+          <div class="card row">
+            <label class="switch">
+              <input type="checkbox" id="set-allowLocalNetwork" />
+              <span></span>
+            </label>
+            <div class="grow">
+              <div class="title">Let the local network look lyrics up without the key</div>
+              <div class="desc">
+                On, because the app sends no authentication and a phone on the same Wi-Fi is the
+                normal case. It only ever applies to lyric lookups — the admin page and the
+                tokens always need the key. Turn it off if anything public proxies to this
+                server: the check reads the connecting socket, and a proxy on this host looks
+                local whoever is really behind it.
+              </div>
+            </div>
+          </div>
           <div class="card">
             <div class="grid">
               <label class="field">

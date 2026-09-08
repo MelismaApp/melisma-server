@@ -251,6 +251,7 @@ function fillSettings(config) {
   $('#set-endpoint-appleStorefront').value = config.appleStorefront ?? '';
   $('#set-server-host').value = config.host ?? '';
   $('#set-server-port').value = config.port ?? '';
+  $('#set-allowLocalNetwork').checked = config.allowLocalNetwork !== false;
 
   for (const [name, state] of Object.entries(config.secrets ?? {})) {
     const input = $(`#secret-${name}`);
@@ -276,6 +277,7 @@ $('#settings-save').addEventListener('click', async () => {
     'endpoint.appleStorefront': $('#set-endpoint-appleStorefront').value,
     'server.host': $('#set-server-host').value,
     'server.port': $('#set-server-port').value,
+    'server.allowLocalNetwork': $('#set-allowLocalNetwork').checked ? '1' : '0',
   });
   toast('Saved. Host and port need a restart.');
 });

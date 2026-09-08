@@ -83,6 +83,15 @@ export class Resolver {
 
     const age = Date.now() - entry.updatedAt;
 
+    // Before anything else: if the algorithm has moved on, rebuild from the archive. This
+    // comes first because it applies even to an entry that found nothing last time — a new
+    // merge may get something out of raw bodies the old one could not, and re-deriving it
+    // costs no request.
+    if (entry.mergeVersion < MERGE_VERSION) {
+      const remerged = this.remerge(key, config);
+      if (remerged) return { document: remerged, key, source: 'remerge' };
+    }
+
     if (!entry.merged) {
       // A cached "nothing found". Short-lived on purpose.
       if (age > config.negativeTtlHours * 3_600_000) return null;
@@ -90,11 +99,6 @@ export class Resolver {
     }
 
     if (age > config.refreshDays * 86_400_000) return null;
-
-    if (entry.mergeVersion < MERGE_VERSION) {
-      const remerged = this.remerge(key, config);
-      if (remerged) return { document: remerged, key, source: 'remerge' };
-    }
 
     try {
       return { document: JSON.parse(entry.merged) as MergedDocument, key, source: 'cache' };

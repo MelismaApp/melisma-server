@@ -110,28 +110,37 @@ volunteer's server. A cache turns one query per track *ever* into the steady sta
 
 ## API
 
-Every `/v1` route wants `Authorization: Bearer <api key>`.
-
 ```
 GET  /v1/health
 GET  /v1/lyrics?title=&artist=&album=&durationMs=&spotifyId=&isrc=
-     &format=json|ttml  &force=1  &cacheOnly=1
-POST /v1/warm        {title, artist, album, durationMs, spotifyId?, isrc?}
+     [&format=ttml|json] [&force=1] [&cacheOnly=1]
+POST /v1/warm        {title, artist, album, durationMs, spotifyId?}
 POST /v1/contribute  {track:{…}, provider, format:"lrc"|"ttml"|"json", body}
 ```
 
-`GET /v1/lyrics` returns `{key, source, ms, document}` where `document` is the same shape the
-app renders, plus a `provenance` block naming which source supplied what. `404` means nothing
-was found, and the body still lists every candidate and why it lost. `X-Cache` is `cache`,
-`remerge`, `network` or `absent`.
+`GET /v1/lyrics` returns the merged document as TTML in an envelope —
+`{status, data:{format, lyrics, source, providerName}}` — which is what the app expects, and
+which any other lyrics server could also produce. `providerName` names the sources that
+actually did the work, so attribution survives the hop through the cache. `format=json` gives
+the structured model with its provenance and candidate list instead; `format=ttml` gives the
+bare file. `404` means nothing was found, with every candidate and why it lost in the body.
+`X-Cache` is `cache`, `remerge`, `network` or `absent`.
 
-`format=ttml` returns the merged document as TTML — readable by the app, by the community
-tooling, and by this server again.
+**Authentication is split by what a route can reach.** `/admin/*` always needs the API key, or
+a session cookie obtained by presenting it — it is the only surface that can read a credential.
+`/v1/*` can only cause a lyric lookup, so a request from this machine or the private network is
+allowed through without one; that is what lets the app work while sending no authentication at
+all. A wrong key is still an error rather than a fallback. If anything public proxies to this
+server, turn off **Allow the local network to look lyrics up without the key** in Settings and
+give the app the key — the check reads the connecting socket, and a proxy on the same host looks
+local whoever is really behind it.
 
 `POST /v1/contribute` accepts lyrics the app found and the server could not: the phone can
-reach a region-locked endpoint or a provider whose rate limit the server hit. It is archived
-under `app:<provider>` so it can never overwrite a real fetch, and it joins the merge from
-then on. See [docs/APP-INTEGRATION.md](docs/APP-INTEGRATION.md).
+reach a region-locked endpoint or a provider whose rate limit the server hit. Archived under
+`app:<provider>` so it can never overwrite a real fetch, and merged in from then on.
+
+The full contract, and why each disagreement with the app was settled the way it was, is in
+[docs/CACHE-SERVER.md](docs/CACHE-SERVER.md).
 
 ## Sharing it
 
@@ -149,11 +158,11 @@ exactly this cache built in the open. `format=ttml` exists so timings from here 
 contributed back to it.
 
 If you do expose the server anyway, note what is at stake. The database holds your Spotify
-cookie and Apple tokens **in the clear** — not encrypted at rest, because a passphrase on
-every boot is the wrong trade for a personal service. It is `chmod 600`, it binds to
-`127.0.0.1` by default, and secrets are masked in the admin API and stripped from the log.
-That is the whole of it. Put nothing in front of it that you would not put a password
-manager behind.
+cookie and Apple tokens **in the clear** — not encrypted at rest, because a passphrase on every
+boot is the wrong trade for a personal service. It is `chmod 600`, it binds to `127.0.0.1` by
+default, the admin surface always demands the key, and secrets are masked in the admin API and
+stripped from the log. That is the whole of it. Put nothing in front of it that you would not
+put a password manager behind.
 
 ## Credits
 
