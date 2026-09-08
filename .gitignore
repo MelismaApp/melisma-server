@@ -7,3 +7,6 @@ data/
 node_modules/
 .DS_Store
 *.log
+
+# Real deployment credentials. Only the sample is tracked.
+.kamal/secrets

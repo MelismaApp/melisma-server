@@ -68,6 +68,26 @@ test('turning the local allowance off closes lookups too', async () => {
   }
 });
 
+test('a forwarded request never counts as local', async () => {
+  // The deployment case: behind kamal-proxy or a tunnel, every request arrives from the Docker
+  // bridge or loopback. Reading the socket alone would hand the whole internet an exception
+  // meant for a phone on the same Wi-Fi.
+  for (const headers of [
+    { 'X-Forwarded-For': '203.0.113.9' },
+    { 'X-Forwarded-For': '10.0.0.5' }, // even a private-looking one: the socket is still a proxy
+    { Forwarded: 'for=203.0.113.9;proto=https' },
+  ]) {
+    const response = await fetch(`${base}/v1/health`, { headers });
+    assert.equal(response.status, 401, JSON.stringify(headers));
+  }
+
+  // With the key, a forwarded request is fine — that is how the app talks to a deployed server.
+  const authorised = await fetch(`${base}/v1/health`, {
+    headers: { 'X-Forwarded-For': '203.0.113.9', Authorization: `Bearer ${apiKey}` },
+  });
+  assert.equal(authorised.status, 200);
+});
+
 test('only this machine and the private network count as local', () => {
   for (const address of [
     '127.0.0.1',

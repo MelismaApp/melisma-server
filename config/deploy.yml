@@ -1,0 +1,88 @@
+# Kamal 2 deployment config.
+# See https://kamal-deploy.org/docs/configuration for all options.
+#
+# Fill in the TODO(...) markers before the first deploy:
+#   - image          -> must match your container registry path
+#   - servers.web[]  -> the VM's IP or hostname
+#   - ssh.user       -> the user with Docker access on that VM
+#   - registry       -> your Docker Hub / GHCR / OCIR details
+#
+# Then: cp .kamal/secrets.sample .kamal/secrets, fill it in, and `make setup`.
+
+service: better-lyrics-server
+image: mangotornado/better-lyrics-server   # TODO(registry path)
+
+servers:
+  web:
+    - TODO(vm-ip-or-hostname)
+
+ssh:
+  user: ubuntu   # TODO(deploy user)
+
+registry:
+  server: registry.gitlab.com   # TODO(docker.io, ghcr.io, registry.cloud.oracle.com, …)
+  username:
+    - KAMAL_REGISTRY_USERNAME
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  arch: amd64   # set to arm64 for an Ampere A1 / Graviton host
+
+# kamal-proxy listens on :80 on the host; put a Cloudflare Tunnel or another TLS terminator in
+# front of it, exactly as the flight-search deploy does. TLS is not terminated here.
+proxy:
+  ssl: false
+  app_port: 8787
+  healthcheck:
+    # The admin page answers unauthenticated — it is only a login form — so it is a health check
+    # that needs no key baked into the config.
+    path: /
+    interval: 3
+
+# The cache *and* the credentials live in this volume. Losing it means re-fetching every track and
+# re-pasting every token, so it is the one piece of state worth backing up.
+volumes:
+  - "better-lyrics-data:/data"
+
+env:
+  clear:
+    NODE_ENV: production
+    BL_HOST: 0.0.0.0
+    BL_PORT: 8787
+    BL_DATA: /data/better-lyrics.db
+
+    # OFF, and this matters more than anything else in this file.
+    #
+    # The "local network" exception exists so a phone on your own Wi-Fi can look lyrics up without
+    # a key. Behind kamal-proxy every request arrives from the Docker bridge, which *is* a private
+    # address — so leaving this on would hand that exception to the entire internet.
+    #
+    # The server also refuses the exception whenever it sees an X-Forwarded-For header, which
+    # kamal-proxy always sets, so this is the second of two locks rather than the only one. Both
+    # are deliberate: the header check covers the proxy, and this covers anything that reaches the
+    # container directly.
+    #
+    # Consequence: the app must be given the API key. Settings -> Developer -> Cache server key.
+    BL_ALLOW_LOCAL_NETWORK: "0"
+
+    # The language to prefer when a source ships translations in several.
+    BL_TRANSLATION_LANG: en
+
+  secret:
+    # A fixed key, so it survives a rebuilt volume and is known before the first boot. Leave it
+    # out and the server generates one on first run — which works, but then it lives only in the
+    # database and you have to go and ask for it:
+    #   kamal app exec --interactive --reuse "node scripts/key.ts"
+    - BL_API_KEY
+
+    # Apple Music. The reason this server exists, and the reason it should never be public.
+    # Both are pasted into the admin page instead if you would rather not keep them here — the
+    # database is on a volume, so they persist either way. Env wins over stored values.
+    - BL_APPLE_BEARER_TOKEN
+    - BL_APPLE_MEDIA_USER_TOKEN
+
+    # Optional; every source works without them.
+    - BL_SP_DC_COOKIE
+    - BL_MUSIXMATCH_USER_TOKEN
+    - BL_NETEASE_COOKIE

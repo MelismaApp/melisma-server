@@ -35,6 +35,25 @@ has a **Test** button that says what is actually wrong rather than just failing.
 
 `npm test` runs the suite. `npm run dev` restarts on change.
 
+### The key
+
+One key does both jobs: the admin page asks for it, and the app sends it. It is generated on
+first boot and printed — but a printed key is no use once the terminal has scrolled, so:
+
+```sh
+npm run key                       # print it
+node scripts/key.ts --new         # rotate it
+node scripts/key.ts --set <value> # use one you chose
+make remote-key                   # print it on a deployed host
+```
+
+`BL_API_KEY` in the environment overrides the stored one, which is how the deployment sets it.
+When that is in play `npm run key` says so, rather than confidently printing a key the running
+server is not using.
+
+Rotating invalidates the old one immediately: the admin page asks again on its next visit, and
+the app needs the new value in **Settings → Developer → Cache server key**.
+
 ## The tokens
 
 Everything works with no tokens at all — LRCLIB, the AMLL community database, NetEase and
@@ -172,6 +191,47 @@ boot is the wrong trade for a personal service. It is `chmod 600`, it binds to `
 default, the admin surface always demands the key, and secrets are masked in the admin API and
 stripped from the log. That is the whole of it. Put nothing in front of it that you would not
 put a password manager behind.
+
+## Deploying it
+
+Docker + **Kamal 2**, set up the same way as the flight-search deploy: `kamal-proxy` on :80 with
+TLS terminated in front of it by a Cloudflare Tunnel or equivalent.
+
+```sh
+cp .kamal/secrets.sample .kamal/secrets   # fill in the registry and BL_API_KEY
+$EDITOR config/deploy.yml                 # replace the TODO(...) markers
+make setup                                # one-time bootstrap and first deploy
+make deploy                               # every time after that
+```
+
+There is nothing to compile, so the image is `node:24-alpine` plus the source — no `npm ci`, no
+build stage, no lockfile to keep in step. Node 24 is a hard floor rather than a preference:
+`node:sqlite` and TypeScript type stripping both come from it.
+
+| Target | |
+|---|---|
+| `make deploy` | rebuild and ship |
+| `make logs` / `make app-logs` | tail |
+| `make remote-key` | print the deployed API key |
+| `make console` | shell inside the container |
+| `make backup` | copy the database here, timestamped |
+| `make rollback` | previous image |
+
+### Two things to get right
+
+**The volume.** `better-lyrics-data:/data` holds the cache *and* the credentials. Lose it and you
+re-fetch every track and re-paste every token — so it is the one thing worth `make backup`.
+
+**`BL_ALLOW_LOCAL_NETWORK: "0"`, which the shipped config sets.** The local-network exception
+exists so a phone on your own Wi-Fi can look lyrics up without a key. Behind `kamal-proxy` every
+request arrives from the Docker bridge, which *is* a private address — so leaving it on would hand
+that exception to the whole internet. The server independently refuses the exception whenever it
+sees an `X-Forwarded-For` header, which `kamal-proxy` always sets, so there are two locks: the
+header check covers anything proxied, and the setting covers anything reaching the container
+directly. Either alone would do; both is cheap.
+
+The consequence is that a deployed server always wants the key, including from the app. That is
+the right way round for something reachable off your own network.
 
 ## Credits
 

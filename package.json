@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node src/main.ts",
     "dev": "node --watch src/main.ts",
-    "test": "node --test 'test/**/*.test.ts'"
+    "test": "node --test 'test/**/*.test.ts'",
+    "key": "node scripts/key.ts"
   },
   "dependencies": {},
   "devDependencies": {}

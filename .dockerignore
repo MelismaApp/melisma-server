@@ -1,0 +1,19 @@
+# The database first: it holds the cache and the credentials, and must never end up in an image.
+data
+*.db
+*.db-wal
+*.db-shm
+
+.git
+.gitignore
+.kamal
+node_modules
+test
+docs
+README.md
+Makefile
+Dockerfile
+.dockerignore
+config
+*.log
+.DS_Store

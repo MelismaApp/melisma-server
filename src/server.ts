@@ -560,6 +560,12 @@ function isAuthorised(app: App, request: IncomingMessage, path: string): boolean
   }
 
   if (LOCAL_ROUTES.has(path) && app.settings.read().allowLocalNetwork) {
+    // A forwarded request's socket belongs to whatever forwarded it, not to the client. Behind
+    // kamal-proxy, nginx or a Cloudflare tunnel that socket is on the Docker bridge or
+    // loopback — so without this check the "local network" exception would let the entire
+    // internet through. The header cannot be trusted to say *who* the client is, but its mere
+    // presence is enough to know the socket does not.
+    if (request.headers['x-forwarded-for'] ?? request.headers.forwarded) return false;
     return isLocalAddress(request.socket.remoteAddress);
   }
   return false;
