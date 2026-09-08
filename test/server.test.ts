@@ -769,6 +769,205 @@ test('the library lists a song with everything held about it', async () => {
   assert.deepEqual(row.extrasFields, ['cover', 'tempo', 'palette', 'metadata']);
 });
 
+test('everything the harvest collects reaches the library', async () => {
+  // The audit this test exists for: the extras row is three JSON blobs precisely so a provider can
+  // start reporting something new without a migration, which means a reader with a hard-coded list
+  // of fields silently drops whatever was added. Nothing below is named in `toLibraryRow`.
+  const key = 'sp:harvestCoverage';
+  app.store.saveExtras({
+    key,
+    title: 'Harvest Coverage',
+    artist: 'Everyone',
+    coverUrl: 'https://example.invalid/{w}x{h}.jpg',
+    artistImageUrl: 'https://example.invalid/artist.jpg',
+    tempo: 87.6,
+    isrc: 'JPU901800227',
+    durationMs: 255_000,
+    palette: { bgColor: '#1b2a3a', textColor1: '#e8eaf0' },
+    // The real shape: Spotify's audio analysis, nested under `track`, in snake_case.
+    analysis: {
+      track: { key: 9, mode: 0, time_signature: 4, loudness: -6.2, duration: 255.1 },
+      beats: [1, 2, 3, 4],
+      bars: [1, 2],
+      sections: [1],
+    },
+    metadata: {
+      albumName: 'Lemon',
+      albumType: 'single',
+      albumTotalTracks: 1,
+      albumSpotifyId: 'albumId',
+      releaseDate: '2018-03-14',
+      releaseDatePrecision: 'day',
+      trackNumber: 1,
+      discNumber: 1,
+      explicit: false,
+      popularity: 82,
+      artistNames: ['米津玄師'],
+      artistSpotifyIds: ['artistId'],
+      spotifyId: 'spotifyTrackId',
+      spotifyUrl: 'https://open.spotify.com/track/x',
+      composerName: 'Kenshi Yonezu',
+      genreNames: ['J-Pop'],
+      contentRating: 'clean',
+      hasLyrics: true,
+      hasTimeSyncedLyrics: true,
+      isAppleDigitalMaster: true,
+      audioTraits: ['lossless'],
+      appleMusicId: '1537460612',
+      appleMusicUrl: 'https://music.apple.com/x',
+      neteaseId: 536_622_304,
+      neteaseAlbumId: 1,
+      publishTime: 1_521_000_000_000,
+      musixmatchTrackId: 99,
+      musixmatchCommontrackId: 12,
+      hasRichsync: true,
+      lrclibId: 7,
+      instrumental: false,
+    },
+    source: 'spotify+apple',
+  });
+
+  const body = await (await authed('/admin/api/library?search=Harvest%20Coverage')).json();
+  const row = body.rows.find((r: { key: string }) => r.key === key);
+  assert.ok(row, 'the song is missing from the library');
+
+  // Identity, gathered by shape rather than by name — so an id added later appears on its own.
+  for (const [name, value] of [
+    ['isrc', 'JPU901800227'],
+    ['apple', '1537460612'],
+    ['netease', '536622304'],
+    ['musixmatch track', '99'],
+    ['lrclib', '7'],
+  ]) {
+    assert.equal(row.ids[name], value, `id "${name}" did not reach the library`);
+  }
+
+  // Identity written to the extras row before an entry existed still counts.
+  assert.equal(row.isrc, 'JPU901800227');
+  assert.equal(row.durationMs, 255_000);
+
+  // The grids are the part that cannot be re-fetched, so the row names them rather than folding
+  // them into a generic "analysis".
+  const analysisField = row.extrasFields.find((f: string) => f.startsWith('analysis'));
+  assert.match(analysisField, /beats/);
+  assert.match(analysisField, /bars/);
+  assert.match(analysisField, /sections/);
+
+  for (const field of ['cover', 'artist image', 'tempo', 'palette', 'metadata']) {
+    assert.ok(row.extrasFields.includes(field), `${field} did not reach the library`);
+  }
+  assert.ok(row.createdAt > 0, 'first-seen was lost');
+
+  // And searching by an id finds it, which is how you arrive here from a log line.
+  for (const term of ['JPU901800227', '1537460612', '536622304']) {
+    const found = await (
+      await authed(`/admin/api/library?search=${encodeURIComponent(term)}`)
+    ).json();
+    assert.ok(
+      found.rows.some((r: { key: string }) => r.key === key),
+      `searching for ${term} did not find the track`,
+    );
+  }
+});
+
+test('the identity map reads ids by shape, so a new one needs no code change', async () => {
+  const { identityFrom } = await import('../src/db.ts');
+  const ids = identityFrom({
+    // None of these are named anywhere in the implementation.
+    deezerId: 12345,
+    tidalTrackId: 'abc',
+    someFutureServiceIds: ['x', 'y'],
+    albumName: 'not an id',
+    hasLyrics: true,
+  });
+  assert.equal(ids.deezer, '12345');
+  assert.equal(ids['tidal track'], 'abc');
+  assert.equal(ids['some future service'], 'x, y');
+  assert.ok(!('album name' in ids), 'a non-id field was treated as identity');
+});
+
+test('the library can list what has no ISRC, and what has no analysis', async () => {
+  for (const missing of ['isrc', 'analysis']) {
+    const body = await (await authed(`/admin/api/library?missing=${missing}`)).json();
+    const keys = body.rows.map((r: { key: string }) => r.key);
+    // The fully-populated song above has both, so it must not appear in either list.
+    assert.ok(!keys.includes('sp:harvestCoverage'), `missing=${missing} matched a populated track`);
+  }
+});
+
+test('forgetting the lyrics keeps what cannot be fetched again', async () => {
+  const key = 'sp:deleteScope';
+  app.store.putEntry({
+    key,
+    title: 'Delete Scope',
+    artist: 'Someone',
+    album: '',
+    durationMs: 200_000,
+    spotifyId: null,
+    isrc: null,
+    merged: JSON.stringify({ kind: 'line', lines: [{ text: 'a' }], provenance: { timing: 'x' } }),
+    mergeVersion: MERGE_VERSION,
+  });
+  app.store.putRaw({ key, provider: 'lrclib', body: '{}', contentType: 'application/json', ok: true, note: null });
+  app.store.saveExtras({
+    key,
+    title: 'Delete Scope',
+    artist: 'Someone',
+    coverUrl: 'https://example.invalid/c.jpg',
+    artistImageUrl: null,
+    tempo: 100,
+    isrc: null,
+    durationMs: 200_000,
+    palette: null,
+    analysis: { beats: [1, 2, 3] },
+    metadata: null,
+    source: 'spotify',
+  });
+
+  await authed(`/admin/api/entry?key=${encodeURIComponent(key)}`, { method: 'DELETE' });
+
+  // The lyrics and the archive go, so the next lookup is fresh.
+  assert.equal(app.store.getEntry(key), null);
+  assert.equal(app.store.getRaw(key).length, 0);
+  // The analysis stays: Spotify withdrew that endpoint, so this is the only copy there will be.
+  assert.ok(app.store.extras(key), 'the extras were destroyed by a lyrics-only delete');
+});
+
+test('forgetting everything leaves nothing in the library', async () => {
+  // The bug the library exposed: deleting a song left its extras row behind, and the union brought
+  // it back as a track that had never been fetched.
+  const key = 'sp:deleteScope';
+  await authed(`/admin/api/entry?key=${encodeURIComponent(key)}&everything=1`, {
+    method: 'DELETE',
+  });
+  assert.equal(app.store.extras(key), null);
+
+  const body = await (await authed('/admin/api/library?search=Delete%20Scope')).json();
+  assert.equal(
+    body.rows.filter((r: { key: string }) => r.key === key).length,
+    0,
+    'a deleted song came back through the extras table',
+  );
+});
+
+test('the archive says whether each response actually succeeded', async () => {
+  const key = 'sp:harvestCoverage';
+  app.store.putRaw({
+    key,
+    provider: 'netease',
+    body: '{}',
+    contentType: 'application/json',
+    ok: false,
+    note: 'region blocked',
+  });
+  const detail = await (await authed(`/admin/api/entry?key=${encodeURIComponent(key)}`)).json();
+  const row = detail.raw.find((r: { provider: string }) => r.provider === 'netease');
+  // Stored on every row since the archive existed, and invisible until now: a failed response
+  // looked exactly like a good one.
+  assert.equal(row.ok, false);
+  assert.equal(row.note, 'region blocked');
+});
+
 test('the library searches the words, not only the titles', async () => {
   const titled = await (await authed('/admin/api/library?search=one')).json();
   const inWords = await (await authed('/admin/api/library?search=one&inLyrics=1')).json();
@@ -864,7 +1063,7 @@ test('running with nothing configured is a clear no, not a crash', async () => {
 });
 
 test('a cookie is all the built-in browser harvest needs', async (t) => {
-  const { chromiumAvailable } = await import('../src/harvest/spotify.ts');
+  const { chromiumAvailable } = await import('../src/browser/spotify.ts');
   if (!chromiumAvailable()) {
     t.skip('no Chromium on this machine — the deployed image carries one');
     return;

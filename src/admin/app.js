@@ -408,6 +408,8 @@ async function loadCache() {
     stat(stats.found, 'with lyrics'),
     stat(stats.misses, 'nothing found'),
     stat(stats.extras ?? 0, 'with artwork etc'),
+    stat(stats.withIsrc ?? 0, 'with an ISRC'),
+    stat(stats.withAnalysis ?? 0, 'with the audio analysis'),
     stat(stats.hits, 'cache hits'),
     stat(stats.rawBodies, 'archived responses'),
     stat(`${(stats.bytes / 1_048_576).toFixed(1)} MB`, 'on disk'),
@@ -425,11 +427,31 @@ async function loadCache() {
         el('td', {}, [
           el('div', { text: row.title || '(no title)' }),
           el('div', { class: 'desc', text: [row.artist, row.album].filter(Boolean).join(' — ') }),
+          Object.keys(row.ids).length > 0
+            ? el('div', { class: 'desc mono', style: 'font-size: 11px; margin-top: 2px' }, [
+                el('span', {
+                  // Identity is what turns a fuzzy title match into an exact lookup, so it is
+                  // worth seeing without opening the row.
+                  text: Object.entries(row.ids)
+                    .map(([name, value]) => `${name}:${value}`)
+                    .join('  '),
+                }),
+              ])
+            : null,
         ]),
         el('td', {}, lyricsPills(row)),
         el('td', {}, cachedPills(row)),
-        el('td', { class: 'num', text: String(row.hits) }),
-        el('td', { class: 'desc', text: when(row.updatedAt) }),
+        el('td', {
+          class: 'num',
+          text: String(row.hits),
+          title: row.lastHitAt ? `last asked for ${when(row.lastHitAt)}` : 'never asked for',
+        }),
+        el('td', { class: 'desc' }, [
+          el('div', { text: when(row.updatedAt) }),
+          row.createdAt && row.createdAt !== row.updatedAt
+            ? el('div', { style: 'font-size: 11px', text: `first seen ${when(row.createdAt)}` })
+            : null,
+        ]),
       ]),
     );
   }
@@ -499,6 +521,15 @@ function lyricsPills(row) {
 /** Everything held that is not the words: archived responses, artwork, analysis. */
 function cachedPills(row) {
   const pills = [];
+  if (row.isrc) {
+    pills.push(
+      el('span', {
+        class: 'pill good',
+        text: 'ISRC',
+        title: `${row.isrc} — every later lookup for this track can be exact rather than fuzzy`,
+      }),
+    );
+  }
   for (const provider of row.providers) {
     pills.push(
       el('span', { class: 'pill', text: provider, title: 'archived response' }),
@@ -589,15 +620,45 @@ async function showEntry(key) {
           text: 'Download TTML',
           style: 'text-decoration: none',
         }),
+        // Two buttons because there are two intents, and one of them is destructive in a way that
+        // cannot be undone: the audio analysis came from an endpoint Spotify has since withdrawn.
         el('button', {
           class: 'action danger',
-          text: 'Delete',
+          text: 'Forget the lyrics',
+          title: 'Drops the merged lyrics and the archived responses. Artwork and analysis stay.',
           onclick: async () => {
             await api(`/admin/api/entry?key=${encodeURIComponent(key)}`, { method: 'DELETE' });
+            toast('Lyrics dropped — the next lookup will be fresh');
             host.replaceChildren();
             await loadCache();
           },
         }),
+        data.extras
+          ? el('button', {
+              class: 'action danger',
+              text: 'Forget everything',
+              title:
+                'Also drops the artwork, palette and audio analysis. The analysis came from an ' +
+                'endpoint Spotify withdrew, so this cannot be undone.',
+              onclick: async () => {
+                if (
+                  !confirm(
+                    'Also delete the artwork, palette and audio analysis?\n\n' +
+                      'Spotify withdrew the analysis endpoint, so the beat and bar grids stored ' +
+                      'here are the only copy that will ever exist for this track.',
+                  )
+                ) {
+                  return;
+                }
+                await api(`/admin/api/entry?key=${encodeURIComponent(key)}&everything=1`, {
+                  method: 'DELETE',
+                });
+                toast('Forgotten');
+                host.replaceChildren();
+                await loadCache();
+              },
+            })
+          : null,
       ]),
     ]),
 
@@ -611,6 +672,7 @@ async function showEntry(key) {
                 el('th', { text: 'Archived response' }),
                 el('th', { text: 'Type' }),
                 el('th', { class: 'num', text: 'Bytes' }),
+                el('th', { text: 'Fetched' }),
                 el('th', { text: 'Note' }),
                 el('th', {}),
               ]),
@@ -620,9 +682,13 @@ async function showEntry(key) {
               {},
               data.raw.map((raw) =>
                 el('tr', {}, [
-                  el('td', { class: 'mono', text: raw.provider }),
+                  el('td', { class: 'mono' }, [
+                    el('span', { text: raw.provider }),
+                    raw.ok === false ? el('span', { class: 'pill bad', text: 'failed' }) : null,
+                  ]),
                   el('td', { class: 'desc', text: raw.contentType }),
                   el('td', { class: 'num', text: String(raw.bytes) }),
+                  el('td', { class: 'desc', text: when(raw.fetchedAt) }),
                   el('td', { class: 'desc', text: raw.note ?? '' }),
                   el('td', {}, [
                     el('a', {
@@ -660,25 +726,31 @@ function extrasCard(extras) {
   const analysis = extras.analysis ?? null;
   const metadata = extras.metadata ?? null;
 
+  // Spotify's audio analysis nests the summary under `track`, in snake_case — `track.key`,
+  // `track.time_signature`, `track.loudness`. Reading them off the top level looked right and
+  // silently showed nothing.
+  const track = (analysis?.track ?? {});
+  const num = (value) => (typeof value === 'number' ? value : null);
+
   const facts = [];
   if (extras.tempo != null) facts.push(['Tempo', `${Math.round(extras.tempo)} BPM`]);
-  if (extras.isrc) facts.push(['ISRC', extras.isrc]);
-  if (analysis?.key != null) facts.push(['Key', String(analysis.key)]);
-  if (analysis?.timeSignature != null) facts.push(['Time', `${analysis.timeSignature}/4`]);
-  if (analysis?.loudness != null) facts.push(['Loudness', `${analysis.loudness} dB`]);
-  for (const [label, field] of [
-    ['Album', 'albumName'],
-    ['Released', 'releaseDate'],
-    ['Writer', 'composerName'],
-    ['Genres', 'genreNames'],
-  ]) {
-    const value = metadata?.[field];
-    if (value) facts.push([label, Array.isArray(value) ? value.join(', ') : String(value)]);
+  if (num(track.key) != null) {
+    facts.push(['Key', `${PITCH[track.key] ?? track.key}${track.mode === 0 ? ' minor' : ' major'}`]);
   }
+  if (num(track.time_signature) != null) facts.push(['Time', `${track.time_signature}/4`]);
+  if (num(track.loudness) != null) facts.push(['Loudness', `${track.loudness.toFixed(1)} dB`]);
+  if (num(track.duration) != null) facts.push(['Analysed length', `${track.duration.toFixed(1)} s`]);
+
+  // The grids are the reason this is worth storing at all: Spotify withdrew the endpoint from the
+  // public API, so what is here is the only copy there will be.
+  const grids = ['beats', 'bars', 'sections', 'tatums']
+    .filter((name) => Array.isArray(analysis?.[name]))
+    .map((name) => `${analysis[name].length} ${name}`);
+  if (grids.length > 0) facts.push(['Grids', grids.join(', ')]);
 
   return el('div', { class: 'card' }, [
     el('div', { class: 'title' }, [
-      el('span', { text: 'Artwork, palette and analysis' }),
+      el('span', { text: 'Artwork, identity and analysis' }),
       extras.source ? el('span', { class: 'pill', text: extras.source }) : null,
       el('span', { class: 'pill', text: when(extras.updatedAt) }),
     ]),
@@ -686,9 +758,11 @@ function extrasCard(extras) {
     el('div', { class: 'inline', style: 'margin-top: 12px; align-items: flex-start; gap: 14px' }, [
       ...[extras.coverUrl, extras.artistImageUrl].filter(Boolean).map((src) =>
         el('img', {
-          src,
+          // Apple leaves its artwork URL as a `{w}x{h}` template so a caller picks its own size.
+          src: src.replace('{w}', '256').replace('{h}', '256'),
           loading: 'lazy',
           referrerpolicy: 'no-referrer',
+          title: src,
           style:
             'width: 108px; height: 108px; object-fit: cover; border-radius: 8px; ' +
             'border: 1px solid var(--line); flex: none; background: var(--bg)',
@@ -697,45 +771,67 @@ function extrasCard(extras) {
       palette
         ? el(
             'div',
-            { style: 'display: flex; flex-wrap: wrap; gap: 6px; flex: none' },
+            { style: 'display: flex; flex-wrap: wrap; gap: 6px; flex: none; max-width: 120px' },
             Object.entries(palette)
-              .filter(([, value]) => typeof value === 'string' && value.startsWith('#'))
+              .filter(([, value]) => typeof value === 'string' && /^#?[0-9a-f]{3,8}$/i.test(value))
               .map(([name, value]) =>
                 el('div', {
                   title: `${name} ${value}`,
                   style:
-                    `width: 34px; height: 34px; border-radius: 6px; background: ${value}; ` +
+                    `width: 34px; height: 34px; border-radius: 6px; ` +
+                    `background: ${value.startsWith('#') ? value : `#${value}`}; ` +
                     'border: 1px solid var(--line)',
                 }),
               ),
           )
         : null,
-      facts.length > 0
-        ? el(
-            'div',
-            { class: 'grow' },
-            facts.map(([label, value]) =>
-              el('div', { class: 'desc' }, [
-                el('span', { style: 'color: var(--muted)', text: `${label}: ` }),
-                el('span', { text: value }),
-              ]),
-            ),
-          )
-        : null,
+      facts.length > 0 ? el('div', { class: 'grow' }, facts.map(factRow)) : null,
     ]),
 
-    // The grids and anything nobody has named yet. Collapsed, because it is long and the point of
-    // keeping it is that it cannot be re-fetched, not that it is readable.
-    analysis || palette || metadata
+    // Everything else in the metadata, rendered generically rather than from a list of field names
+    // — the whole point of keeping it as a blob is that a provider can start reporting something
+    // new without a migration, and a reader with a hard-coded list would quietly undo that.
+    metadata ? el('details', { open: 'open', style: 'margin-top: 14px' }, [
+      el('summary', { class: 'desc', text: 'Everything known about the recording' }),
+      el(
+        'div',
+        { style: 'margin-top: 8px; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 2px 18px' },
+        Object.entries(metadata)
+          .filter(([, value]) => value !== null && value !== undefined && value !== '')
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([field, value]) => factRow([humanise(field), formatValue(value)])),
+      ),
+    ]) : null,
+
+    analysis
       ? el('details', { style: 'margin-top: 12px' }, [
-          el('summary', { class: 'desc', text: 'Everything, as stored' }),
-          el('pre', {
-            style: 'margin-top: 8px',
-            text: JSON.stringify({ palette, analysis, metadata }, null, 2),
-          }),
+          el('summary', { class: 'desc', text: 'The audio analysis, as stored' }),
+          el('pre', { style: 'margin-top: 8px', text: JSON.stringify(analysis, null, 2) }),
         ])
       : null,
   ]);
+}
+
+const PITCH = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+
+function factRow([label, value]) {
+  return el('div', { class: 'desc', style: 'overflow: hidden; text-overflow: ellipsis' }, [
+    el('span', { style: 'color: var(--muted)', text: `${label}: ` }),
+    el('span', { text: value, title: value }),
+  ]);
+}
+
+/** `albumTotalTracks` -> `Album total tracks`. */
+function humanise(field) {
+  const spaced = field.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+function formatValue(value) {
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'boolean') return value ? 'yes' : 'no';
+  if (value && typeof value === 'object') return JSON.stringify(value);
+  return String(value);
 }
 
 /** A readable rendering of a merged document: syllables underlined, extras indented. */

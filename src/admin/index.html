@@ -206,11 +206,16 @@
 
           <div class="card">
             <div class="inline" style="margin-bottom: 10px">
-              <input type="text" id="cache-search" placeholder="Search artist, title or album" />
+              <input
+                type="text"
+                id="cache-search"
+                placeholder="Search artist, title, album, ISRC or any provider id"
+              />
               <select id="library-sort" style="width: auto">
                 <option value="song">By song</option>
                 <option value="recent">Recently updated</option>
                 <option value="hits">Most asked for</option>
+                <option value="added">Recently added</option>
                 <option value="lines">Biggest</option>
               </select>
             </div>
@@ -225,6 +230,8 @@
                 <option value="syllables">Missing word timings</option>
                 <option value="translation">Missing a translation</option>
                 <option value="extras">Missing artwork and analysis</option>
+                <option value="isrc">Missing an ISRC</option>
+                <option value="analysis">Missing the audio analysis</option>
               </select>
               <span class="spacer"></span>
               <button class="action" id="cache-remerge">Re-merge stale</button>

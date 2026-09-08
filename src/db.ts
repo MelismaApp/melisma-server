@@ -127,7 +127,19 @@ export interface LibraryRow {
   extrasFields: string[];
   extrasSource: string | null;
 
+  /**
+   * Every external id collected for this recording, keyed by where it came from.
+   *
+   * Pulled out of the metadata blob rather than stored in columns, and surfaced separately from
+   * the rest of it because identity is what turns a fuzzy title match into an exact lookup — it
+   * is the most valuable thing the harvest collects, and the thing most worth searching by.
+   */
+  ids: Record<string, string>;
+
   hits: number;
+  /** When the track was first seen, as opposed to last touched. */
+  createdAt: number;
+  lastHitAt: number | null;
   updatedAt: number;
 }
 
@@ -135,9 +147,9 @@ export interface LibraryQuery {
   search?: string;
   /** Search the lyric text as well as the title, artist and album. */
   inLyrics?: boolean;
-  sort?: 'song' | 'recent' | 'hits' | 'lines';
+  sort?: 'song' | 'recent' | 'hits' | 'lines' | 'added';
   /** Only songs missing something, for finding the gaps. */
-  missing?: 'lyrics' | 'extras' | 'syllables' | 'translation';
+  missing?: 'lyrics' | 'extras' | 'syllables' | 'translation' | 'isrc' | 'analysis';
   limit?: number;
   offset?: number;
 }
@@ -516,9 +528,26 @@ export class Store {
       .run(Date.now(), key);
   }
 
-  deleteEntry(key: string): void {
+  /**
+   * Forgets a track, in one of two senses.
+   *
+   * Without `includeExtras` the lyrics and their archived responses go and the artwork, palette and
+   * analysis stay — which is what "look this up again" means. With it, the track is gone entirely.
+   *
+   * The distinction is not tidiness. Spotify withdrew the audio-analysis endpoint from the public
+   * API, so the beat and bar grids stored here are the only copy that will ever exist for that
+   * track; throwing them away to force a fresh lyrics lookup would be a bad trade made silently.
+   *
+   * Leaving the extras behind used to be the only behaviour, and the library made that visible: the
+   * song reappeared in the list with no lyrics and no archive, indistinguishable from one that had
+   * never been fetched.
+   */
+  deleteEntry(key: string, options: { includeExtras?: boolean } = {}): void {
     this.db.prepare('DELETE FROM entries WHERE key = ?').run(key);
     this.db.prepare('DELETE FROM raw WHERE key = ?').run(key);
+    if (options.includeExtras) {
+      this.db.prepare('DELETE FROM extras WHERE key = ?').run(key);
+    }
   }
 
   listEntries(options: { search?: string; limit?: number; offset?: number } = {}): CacheEntry[] {
@@ -557,12 +586,15 @@ export class Store {
 
     if (search) {
       const like = `%${search}%`;
-      const fields = ['title', 'artist', 'album'];
+      // Identity as well as names: an ISRC, a Spotify id or an Apple id pasted in should find the
+      // track, because that is how you arrive here from a log line or another tool. The ids the
+      // harvest collects live inside the metadata blob, so it is searched as text.
+      const fields = ['title', 'artist', 'album', 'isrc', 'spotify_id', 'metadata'];
       // Searching the lyric text is a LIKE over the merged JSON. Not an index, but a personal
       // cache is thousands of rows rather than millions, and the alternative is an FTS table to
       // keep in step for a feature used by one person occasionally.
       if (query.inLyrics) fields.push('lyrics');
-      where.push(`(${fields.map((f) => `${f} LIKE ?`).join(' OR ')})`);
+      where.push(`(${fields.map((f) => `COALESCE(${f}, '') LIKE ?`).join(' OR ')})`);
       params.push(...fields.map(() => like));
     }
 
@@ -579,6 +611,15 @@ export class Store {
       case 'translation':
         where.push('(lyrics IS NULL OR hasTranslationFlag = 0)');
         break;
+      case 'isrc':
+        // The one worth hunting for. Without it every later lookup is a fuzzy name match.
+        where.push('isrc IS NULL');
+        break;
+      case 'analysis':
+        // Spotify withdrew this endpoint from the public API, so a track without it may never
+        // get one — worth being able to list them while a token still works.
+        where.push('analysis IS NULL');
+        break;
       default:
         break;
     }
@@ -588,6 +629,7 @@ export class Store {
       recent: 'updated_at DESC',
       hits: 'hits DESC, updated_at DESC',
       lines: 'LENGTH(COALESCE(lyrics, \'\')) DESC',
+      added: 'created_at DESC',
     }[query.sort ?? 'song'];
 
     // One expression for the row shape, used by both the count and the page, so a filter can
@@ -599,13 +641,19 @@ export class Store {
           COALESCE(NULLIF(e.title, ''),  x.title,  '')            AS title,
           COALESCE(NULLIF(e.artist, ''), x.artist, '')            AS artist,
           COALESCE(e.album, '')                                   AS album,
-          COALESCE(e.duration_ms, 0)                              AS duration_ms,
+          COALESCE(NULLIF(e.duration_ms, 0), x.duration_ms, 0)    AS duration_ms,
           e.spotify_id                                            AS spotify_id,
-          e.isrc                                                  AS isrc,
+          -- Identity is written to whichever row existed at the time, so either can hold it.
+          COALESCE(e.isrc, x.isrc)                                AS isrc,
           e.merged                                                AS lyrics,
           COALESCE(e.merge_version, 0)                            AS merge_version,
           COALESCE(e.hits, 0) + COALESCE(x.hits, 0)               AS hits,
           MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0)) AS updated_at,
+          MIN(
+            COALESCE(NULLIF(e.created_at, 0), 9e18),
+            COALESCE(NULLIF(x.created_at, 0), 9e18)
+          )                                                       AS created_at,
+          e.last_hit_at                                           AS last_hit_at,
           x.updated_at                                            AS extras_updated_at,
           x.cover_url, x.artist_image_url, x.tempo,
           x.palette, x.analysis, x.metadata, x.source             AS extras_source,
@@ -647,6 +695,8 @@ export class Store {
     rawBodies: number;
     bytes: number;
     extras: number;
+    withIsrc: number;
+    withAnalysis: number;
   } {
     const count = (sql: string): number => {
       const row = this.db.prepare(sql).get() as { n: number } | undefined;
@@ -663,6 +713,14 @@ export class Store {
       hits: count('SELECT COALESCE(SUM(hits), 0) AS n FROM entries'),
       rawBodies: count('SELECT COUNT(*) AS n FROM raw'),
       extras: count('SELECT COUNT(*) AS n FROM extras'),
+      // Identity coverage, because it is what decides whether the next lookup is exact or fuzzy.
+      withIsrc: count(
+        'SELECT COUNT(*) AS n FROM (' +
+          'SELECT key FROM entries WHERE isrc IS NOT NULL ' +
+          'UNION SELECT key FROM extras WHERE isrc IS NOT NULL)',
+      ),
+      // Spotify withdrew this endpoint from the public API, so what is stored is the only copy.
+      withAnalysis: count('SELECT COUNT(*) AS n FROM extras WHERE analysis IS NOT NULL'),
       bytes:
         count('SELECT COALESCE(SUM(LENGTH(merged)), 0) AS n FROM entries') +
         count('SELECT COALESCE(SUM(LENGTH(body)), 0) AS n FROM raw'),
@@ -745,13 +803,23 @@ function toLibraryRow(row: Record<string, unknown>): LibraryRow {
   const lines = Array.isArray(merged?.lines) ? (merged!.lines as Record<string, unknown>[]) : [];
   const provenance = (merged?.provenance ?? null) as Record<string, unknown> | null;
 
+  const metadata = parseJson(row.metadata);
+  const analysis = parseJson(row.analysis);
+
   const extrasFields: string[] = [];
   if (row.cover_url) extrasFields.push('cover');
   if (row.artist_image_url) extrasFields.push('artist image');
   if (row.tempo != null) extrasFields.push('tempo');
   if (parseJson(row.palette)) extrasFields.push('palette');
-  if (parseJson(row.analysis)) extrasFields.push('analysis');
-  if (parseJson(row.metadata)) extrasFields.push('metadata');
+  if (metadata) extrasFields.push('metadata');
+  // The grids are the part that cannot be re-fetched, so they are named rather than folded into
+  // "analysis": Spotify withdrew the endpoint from the public API in 2024.
+  if (analysis) {
+    const grids = ['beats', 'bars', 'sections', 'tatums'].filter((name) =>
+      Array.isArray(analysis[name]),
+    );
+    extrasFields.push(grids.length > 0 ? `analysis + ${grids.join('/')}` : 'analysis');
+  }
 
   return {
     key: String(row.key),
@@ -782,10 +850,43 @@ function toLibraryRow(row: Record<string, unknown>): LibraryRow {
     hasExtras: row.extras_updated_at != null,
     extrasFields,
     extrasSource: (row.extras_source as string | null) || null,
+    ids: identityFrom(metadata, row),
 
     hits: Number(row.hits ?? 0),
+    createdAt: Number(row.created_at ?? 0) < 9e17 ? Number(row.created_at ?? 0) : 0,
+    lastHitAt: (row.last_hit_at as number | null) ?? null,
     updatedAt: Number(row.updated_at ?? 0),
   };
+}
+
+/**
+ * Every external id known for a recording, gathered from wherever it was recorded.
+ *
+ * Read by suffix rather than by an allowlist of names, so an id a provider starts reporting
+ * tomorrow appears here without this function being edited. That matters: the ids arrive in a JSON
+ * blob precisely so that adding one needs no migration, and a reader that hard-codes the list
+ * would quietly undo that.
+ */
+export function identityFrom(
+  metadata: Record<string, unknown> | null,
+  row: Record<string, unknown> = {},
+): Record<string, string> {
+  const ids: Record<string, string> = {};
+  if (row.isrc) ids.isrc = String(row.isrc);
+  if (row.spotify_id) ids.spotify = String(row.spotify_id);
+
+  for (const [field, value] of Object.entries(metadata ?? {})) {
+    if (value === null || value === undefined || value === '') continue;
+    if (!/(^|[a-z])Id$|Ids$/.test(field)) continue;
+    const name = field
+      .replace(/(Music)?Ids?$/, '')
+      .replace(/([A-Z])/g, ' $1')
+      .trim()
+      .toLowerCase();
+    if (!name) continue;
+    ids[name] ??= Array.isArray(value) ? value.map(String).join(', ') : String(value);
+  }
+  return ids;
 }
 
 function toEntry(row: Record<string, unknown>): CacheEntry {

@@ -238,20 +238,21 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       });
 
     case 'GET /admin/api/library': {
-      const sort = url.searchParams.get('sort') ?? 'song';
-      const missing = url.searchParams.get('missing') ?? '';
+      // The options are named once, here, so adding one means adding it in a single place. The
+      // previous shape repeated each list inside its own validation, and a filter missing from
+      // that copy was accepted by the URL, dropped silently, and answered with everything — which
+      // reads exactly like a filter that found nothing to exclude.
+      const pick = <T extends string>(name: string, allowed: readonly T[], fallback?: T) => {
+        const value = url.searchParams.get(name) ?? '';
+        return (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
+      };
+
       return send(response, 200, {
         ...app.store.library({
           search: url.searchParams.get('search') ?? undefined,
           inLyrics: url.searchParams.get('inLyrics') === '1',
-          sort: (['song', 'recent', 'hits', 'lines'] as const).includes(sort as never)
-            ? (sort as 'song' | 'recent' | 'hits' | 'lines')
-            : 'song',
-          missing: (['lyrics', 'extras', 'syllables', 'translation'] as const).includes(
-            missing as never,
-          )
-            ? (missing as 'lyrics' | 'extras' | 'syllables' | 'translation')
-            : undefined,
+          sort: pick('sort', LIBRARY_SORTS, 'song'),
+          missing: pick('missing', LIBRARY_MISSING),
           limit: Number(url.searchParams.get('limit') ?? 50),
           offset: Number(url.searchParams.get('offset') ?? 0),
         }),
@@ -284,6 +285,9 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
           contentType: raw.contentType,
           bytes: raw.body.length,
           fetchedAt: raw.fetchedAt,
+          // Stored on every row and never surfaced until now: a failed archived response looked
+          // exactly like a good one.
+          ok: raw.ok,
           note: raw.note,
         })),
       });
@@ -300,8 +304,10 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
 
     case 'DELETE /admin/api/entry': {
       const key = url.searchParams.get('key') ?? '';
-      app.store.deleteEntry(key);
-      app.store.log('info', null, `deleted ${key}`);
+      // Opt in, because the extras hold the one thing here that cannot be fetched again.
+      const includeExtras = url.searchParams.get('everything') === '1';
+      app.store.deleteEntry(key, { includeExtras });
+      app.store.log('info', null, `deleted ${includeExtras ? 'everything for' : 'the lyrics of'} ${key}`);
       return send(response, 200, { ok: true });
     }
 
@@ -716,6 +722,17 @@ function isAuthorised(app: App, request: IncomingMessage, route: string): boolea
  * `POST /v1/warm` is the exception that proves the rule: it accepts no content, only a track to
  * go and look up, so it is a read that happens to populate the cache.
  */
+/** The library's sort and filter options: the single definition the route validates against. */
+const LIBRARY_SORTS = ['song', 'recent', 'hits', 'lines', 'added'] as const;
+const LIBRARY_MISSING = [
+  'lyrics',
+  'extras',
+  'syllables',
+  'translation',
+  'isrc',
+  'analysis',
+] as const;
+
 const LOCAL_ROUTES = new Set([
   'GET /v1/lyrics',
   'GET /v1/health',

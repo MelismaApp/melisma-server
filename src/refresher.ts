@@ -32,7 +32,7 @@
 import { execFile } from 'node:child_process';
 
 import { SECRET_NAMES, type SecretName, type Settings } from './config.ts';
-import { chromiumAvailable, harvestSpotifyToken } from './harvest/spotify.ts';
+import { chromiumAvailable, harvestSpotifyToken } from './browser/spotify.ts';
 import { redact } from './http.ts';
 import type { Store } from './db.ts';
 
