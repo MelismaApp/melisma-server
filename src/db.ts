@@ -398,6 +398,28 @@ export class Store {
   }
 
   /**
+   * What is known about a track's identity, from wherever it was recorded.
+   *
+   * The point of keeping it: the next lookup of the same track can be an exact one. AMLL indexes
+   * on ISRC directly and Apple filters on it, so a recording seen once by name can be found by
+   * identity ever after — which is worth more than any amount of tuning the name matcher.
+   */
+  identityFor(key: string): { isrc: string | null; durationMs: number | null } {
+    const entry = this.db
+      .prepare('SELECT isrc, duration_ms FROM entries WHERE key = ?')
+      .get(key) as { isrc: string | null; duration_ms: number | null } | undefined;
+    const extras = this.db
+      .prepare('SELECT isrc, duration_ms FROM extras WHERE key = ?')
+      .get(key) as { isrc: string | null; duration_ms: number | null } | undefined;
+
+    const isrc = entry?.isrc?.trim() || extras?.isrc?.trim() || null;
+    const durationMs =
+      (entry?.duration_ms && entry.duration_ms > 0 ? entry.duration_ms : null) ??
+      (extras?.duration_ms && extras.duration_ms > 0 ? extras.duration_ms : null);
+    return { isrc, durationMs };
+  }
+
+  /**
    * The ISRC known for a track, from wherever it was recorded.
    *
    * The entry first, because that is where the lookup path keeps it, then the extras row, which

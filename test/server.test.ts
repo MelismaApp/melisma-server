@@ -459,6 +459,50 @@ test('a contribution needs the key even from the local network', async () => {
   assert.equal(app.store.getRaw('q:unauthorised|x|0').length, 0);
 });
 
+// ---- status ----------------------------------------------------------------
+
+test('the status route reports every source without leaking a credential', async () => {
+  // What the app's developer menu asks. Pointing the app at a server puts every source failure out
+  // of its reach, so the server has to answer the same question about itself: off, needs a token,
+  // token expired, or working.
+  //
+  // try/finally rather than a tidy-up at the end: a failed assertion that leaves a secret behind
+  // breaks whichever test runs next, which is a worse bug than the one being investigated.
+  app.settings.update({ 'secret.appleBearerToken': 'super-secret-jwt-value' });
+  app.settings.update({ 'provider.apple.enabled': '1' });
+  try {
+    const response = await fetch(`${base}/v1/status`, { headers: { Accept: 'application/json' } });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      sources: Array<{ id: string; name: string; ok: boolean; detail: string }>;
+      cache: Record<string, number>;
+    };
+
+    const byId = new Map(body.sources.map((source) => [source.id, source]));
+    assert.equal(byId.size, 6, 'every source should be reported, including ones that cannot run');
+    // Disabled in this suite's setup, and that is a different thing from missing a token.
+    assert.match(byId.get('lrclib')!.detail, /off on the server/i);
+    // Enabled but with only one of the two tokens Apple needs.
+    assert.match(byId.get('apple')!.detail, /needs|token/i);
+    assert.equal(typeof body.cache.entries, 'number');
+
+    // The whole payload, not only the detail strings: a token must never travel to the app.
+    assert.ok(
+      !JSON.stringify(body).includes('super-secret-jwt-value'),
+      'a credential value reached the status response',
+    );
+  } finally {
+    app.settings.update({ 'secret.appleBearerToken': '' });
+    app.settings.update({ 'provider.apple.enabled': '0' });
+  }
+});
+
+test('status does not need the key from the local network', async () => {
+  // Same footing as a lookup: it reads, and it is what the app calls to explain itself.
+  const response = await fetch(`${base}/v1/status`);
+  assert.notEqual(response.status, 401);
+});
+
 // ---- artwork and tempo ----------------------------------------------------
 //
 // Read-only over HTTP. The server collects these itself while it is already looking a track up,

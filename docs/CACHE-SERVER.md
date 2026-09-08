@@ -189,6 +189,39 @@ is the name-and-duration form. `cacheKey` prefers an ISRC when it has one, so fi
 the server has just learned would put the row under an identity no reader has yet — a phone with
 no token knows a title and an artist, which is why it is asking in the first place.
 
+## Asking the server about itself
+
+```
+GET {baseUrl}/v1/status
+```
+
+```json
+{
+  "ok": true,
+  "ms": 940,
+  "mergeVersion": 7,
+  "cache": { "entries": 412, "found": 388, "extras": 401, "bytes": 9138422 },
+  "sources": [
+    { "id": "amll", "name": "AMLL TTML DB", "ok": true, "ms": 210, "detail": "reachable, 1 result(s) for a known track" },
+    { "id": "apple", "name": "Apple Music", "ok": false, "detail": "Needs appleBearerToken and appleMediaUserToken" },
+    { "id": "spotify", "name": "Spotify", "ok": false, "detail": "the token has expired — copy a fresh one" }
+  ]
+}
+```
+
+Each source is asked in parallel using the same `test` the admin page runs, so this reports what
+actually happens on the wire rather than what the configuration claims. No key needed from the
+local network, on the same footing as a lookup.
+
+**No credential is ever returned** — only whether one works. The app may know that Apple's token
+has expired; it may not know what the token was. A test asserts that on the whole payload, not
+just on the detail strings.
+
+This exists because pointing the app at a server moves every source failure out of the app's
+reach. Its own developer menu can say why LRCLIB found nothing; it cannot say why the *server*
+found nothing, and "the server returned no lyrics" covers a source switched off, a token that
+expired last week and a track nobody has transcribed. Those need telling apart from a phone.
+
 ## What the server deliberately does not do
 
 - **Interludes.** The app inserts its own three-dot lines from the gaps between lines. The

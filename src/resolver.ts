@@ -125,7 +125,14 @@ export class Resolver {
     const existing = this.inFlight.get(key);
     if (existing) return existing;
 
-    const work = this.fetchAndMerge(track, key, config, started).finally(() => {
+    // Ask with everything known about this recording, not only what the caller sent. An ISRC
+    // learned on a previous lookup turns AMLL and Apple from a name search into an exact one, and
+    // a duration recorded from Spotify makes the matcher's duration term decide rather than
+    // abstain. Deliberately after the key is computed: `cacheKey` prefers an ISRC, so enriching
+    // first would file the result under an identity the next caller will not have.
+    const enriched = this.withKnownIdentity(key, track);
+
+    const work = this.fetchAndMerge(enriched, key, config, started).finally(() => {
       this.inFlight.delete(key);
       // After, not before. The harvest records the ISRC and the authoritative duration onto the
       // cache entry, and until the lookup has run there is no entry to record them on — so
@@ -144,6 +151,22 @@ export class Resolver {
    * lives, skipped when the extras and the identity are both already on record, and never
    * awaited.
    */
+  /**
+   * Fill in identity the caller did not have.
+   *
+   * Never overrides what was sent: a phone that knows its own duration is describing the file it
+   * is playing, which is a better authority than a record of something that matched before.
+   */
+  private withKnownIdentity(key: string, track: TrackQuery): TrackQuery {
+    const known = this.store.identityFor(key);
+    if (!known.isrc && !known.durationMs) return track;
+    return {
+      ...track,
+      isrc: track.isrc ?? known.isrc ?? undefined,
+      durationMs: track.durationMs > 0 ? track.durationMs : (known.durationMs ?? 0),
+    };
+  }
+
   /**
    * Kick off a harvest without waiting for it.
    *

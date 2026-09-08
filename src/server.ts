@@ -25,6 +25,7 @@ import { parseTtml, writeTtml } from './format/ttml.ts';
 import { parseLrc, writePlainText } from './format/lrc.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
 import type { LyricsDocument, MergedDocument } from './model.ts';
+import { redact } from './http.ts';
 
 // `URL.pathname` stays percent-encoded, so a checkout under a path with a space in it would
 // look for a directory literally called `%20`. fileURLToPath is the one that decodes.
@@ -165,6 +166,9 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
 
     case 'GET /v1/extras':
       return readExtras(app, url, response);
+
+    case 'GET /v1/status':
+      return status(app, response);
 
     case 'POST /admin/api/logout': {
       const token = cookie(request, 'bls_session');
@@ -542,6 +546,59 @@ function health(app: App) {
   };
 }
 
+/**
+ * What this server can currently do, source by source.
+ *
+ * The app has its own version of this for the sources it reaches directly, and it is the most
+ * useful thing in its developer menu: a source switched off, one whose token has expired, and one
+ * that answered and found nothing are indistinguishable from the lyrics screen. Pointing the app
+ * at a server moves every one of those failures out of its reach — so the server has to be able
+ * to answer the same question about itself.
+ *
+ * Asked in parallel, with the same `test` the admin page uses. No credential is returned, only
+ * whether one works: the app may know that Apple's token has expired, not what it was.
+ */
+async function status(app: App, response: ServerResponse): Promise<void> {
+  const config = app.settings.read();
+  const started = performance.now();
+
+  const sources = await Promise.all(
+    PROVIDERS.map(async (provider) => {
+      const named = { id: provider.id, name: provider.label };
+      if (config.providers[provider.id]?.enabled === false) {
+        return { ...named, ok: false, detail: 'Off on the server' };
+      }
+      if (!provider.isConfigured(config)) {
+        return { ...named, ok: false, detail: `Needs ${provider.requires.join(' and ')}` };
+      }
+
+      try {
+        const result = await provider.test({
+          config,
+          log: (level, message) => app.store.log(level, provider.id, redact(message)),
+          unreachable: (detail) => app.store.log('warn', provider.id, redact(detail)),
+          learn: () => undefined,
+        });
+        return { ...named, ok: result.ok, ms: result.ms, detail: redact(result.detail ?? '') };
+      } catch (error) {
+        return {
+          ...named,
+          ok: false,
+          detail: redact(error instanceof Error ? error.message : 'the test threw'),
+        };
+      }
+    }),
+  );
+
+  send(response, 200, {
+    ok: sources.some((source) => source.ok),
+    ms: Math.round(performance.now() - started),
+    mergeVersion: MERGE_VERSION,
+    cache: app.store.stats(),
+    sources,
+  });
+}
+
 function describeProvider(app: App) {
   const config = app.settings.read();
   return (provider: (typeof PROVIDERS)[number]) => ({
@@ -662,6 +719,7 @@ const LOCAL_ROUTES = new Set([
   'GET /v1/lyrics',
   'GET /v1/health',
   'GET /v1/extras',
+  'GET /v1/status',
   'POST /v1/warm',
 ]);
 
