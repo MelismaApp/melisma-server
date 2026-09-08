@@ -22,6 +22,7 @@ import { document, line, type LyricsDocument, type MergedDocument } from './mode
 import { parseTtml } from './format/ttml.ts';
 import { parseLrc } from './format/lrc.ts';
 import { harvest } from './harvest.ts';
+import type { LearnedExtras } from './providers/types.ts';
 
 export interface ResolveOptions {
   /** Ignore the cache and ask every source again. */
@@ -92,6 +93,9 @@ function plainTextDocument(body: string): LyricsDocument | null {
 export class Resolver {
   private readonly inFlight = new Map<string, Promise<Resolution>>();
 
+  /** Tracks already harvested this run. See [harvestOnce]. */
+  private readonly harvested = new Set<string>();
+
   private readonly store: Store;
   private readonly settings: Settings;
 
@@ -104,6 +108,13 @@ export class Resolver {
     const key = cacheKey(track);
     const started = performance.now();
     const config = this.settings.read();
+
+    // Collect everything else about the track while the tokens are alive, whether or not
+    // anything reads it yet — and on every request rather than only on a cache miss, because a
+    // track whose lyrics were cached before a token existed would otherwise never be harvested
+    // at all. Detached: the caller asked for words, and none of this may make them slower or
+    // fail where they can see it.
+    void this.harvestOnce(config, key, track);
 
     if (!options.force) {
       const cached = this.fromCache(key, config);
@@ -125,6 +136,28 @@ export class Resolver {
     });
     this.inFlight.set(key, work);
     return work;
+  }
+
+  /**
+   * Harvest a track's extras, at most once per process per track.
+   *
+   * Bounded three ways, because this runs on every lookup: once per key while the process
+   * lives, skipped when the extras and the identity are both already on record, and never
+   * awaited.
+   */
+  private async harvestOnce(config: Config, key: string, track: TrackQuery): Promise<void> {
+    if (this.harvested.has(key)) return;
+    this.harvested.add(key);
+    // A cap rather than an unbounded set: this is a memo, not a record.
+    if (this.harvested.size > 4_000) this.harvested.clear();
+
+    try {
+      const already = this.store.extras(key);
+      if (already && this.store.isrcFor(key)) return;
+      await harvest(this.store, config, key, track);
+    } catch {
+      // Best effort by definition.
+    }
   }
 
   /**
@@ -167,11 +200,6 @@ export class Resolver {
     config: Config,
     started: number,
   ): Promise<Resolution> {
-    // Collect everything else about the track while the tokens are alive, whether or not
-    // anything reads it yet. Detached on purpose: the caller asked for words, and none of this
-    // is allowed to make them slower or to fail in a way they can see.
-    void harvest(this.store, config, key, track).catch(() => undefined);
-
     const providers = activeProviders(config);
     if (providers.length === 0) {
       this.store.log('warn', null, 'no sources are both enabled and configured');
@@ -190,6 +218,34 @@ export class Resolver {
           unreachable: (detail: string) => {
             unreachable.push(provider.id);
             this.store.log('warn', provider.id, redact(detail));
+          },
+          learn: (extras: LearnedExtras) => {
+            // Identity where the matcher can see it, presentation where the renderer can.
+            this.store.noteIdentity(key, {
+              isrc: extras.isrc,
+              durationMs: extras.durationMs,
+            });
+            if (
+              extras.coverUrl ||
+              extras.artistImageUrl ||
+              extras.tempo ||
+              extras.palette ||
+              extras.analysis ||
+              extras.metadata
+            ) {
+              this.store.saveExtras({
+                key,
+                title: track.title,
+                artist: track.artist,
+                coverUrl: extras.coverUrl ?? null,
+                artistImageUrl: extras.artistImageUrl ?? null,
+                tempo: extras.tempo ?? null,
+                palette: extras.palette ?? null,
+                analysis: extras.analysis ?? null,
+                metadata: extras.metadata ?? null,
+                source: provider.id,
+              });
+            }
           },
         };
         try {

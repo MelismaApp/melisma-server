@@ -32,6 +32,37 @@ const LYRICS_BASE = 'https://spclient.wg.spotify.com/color-lyrics/v2/track';
 let webToken: { value: string; expiresAt: number } | null = null;
 
 /**
+ * Pull `colors` out of a `color-lyrics` response and hand it to the store.
+ *
+ * Spotify returns the background, the text colour and a highlight, as signed 32-bit integers
+ * rather than hex — negative because the sign bit is part of the colour. Converted here so
+ * nothing downstream has to know that.
+ */
+function reportColours(body: string, ctx: ProviderContext): void {
+  try {
+    const parsed = JSON.parse(body) as {
+      colors?: { background?: number; text?: number; highlightText?: number };
+    };
+    const colors = parsed.colors;
+    if (!colors) return;
+
+    const hex = (value: number | undefined): string | undefined =>
+      typeof value === 'number' ? `#${((value >>> 0) & 0xffffff).toString(16).padStart(6, '0')}` : undefined;
+
+    const palette: Record<string, unknown> = {};
+    const background = hex(colors.background);
+    const text = hex(colors.text);
+    const highlight = hex(colors.highlightText);
+    if (background) palette.spotifyBackground = background;
+    if (text) palette.spotifyText = text;
+    if (highlight) palette.spotifyHighlight = highlight;
+    if (Object.keys(palette).length) ctx.learn({ palette });
+  } catch {
+    // The words parsed or they did not; the colours are a bonus either way.
+  }
+}
+
+/**
  * The pasted token, cleaned up.
  *
  * Accepts the whole `Authorization` header as well as the bare value, because copying the
@@ -90,6 +121,11 @@ export const spotify: Provider = {
       }
       return null;
     }
+
+    // The album's extracted colours come back in the same payload as the words, so they cost
+    // nothing to keep — and they let a palette exist before the artwork has finished
+    // downloading, which is the one thing deriving it locally cannot do.
+    reportColours(response.body, ctx);
 
     const doc = parseColorLyrics(response.body);
     if (!doc) return null;

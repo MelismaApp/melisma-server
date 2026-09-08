@@ -132,11 +132,17 @@ network to look lyrics up without the key** for that, and give the app the key.
 
 ## Everything that is not the words
 
-`GET /v1/extras` and `POST /v1/extras`, both documented on the app's side. Two things are worth
-saying here about *why* the server holds what it holds.
+`GET /v1/extras`, documented on the app's side. There is no write endpoint: the server collects
+its own, so nothing needs one, and an endpoint nothing needs is surface nobody should have.
 
-**It collects more than anything reads.** After every lookup, `harvest.ts` asks whatever tokens
-are configured for the rest of what they know and files it. The reason is that the tokens are the
+Two things are worth saying here about *why* the server holds what it holds.
+
+**It collects more than anything reads, on its own, on every lookup** — not only on a cache
+miss, or a track whose words were cached before a token existed would never be harvested at all.
+`harvest.ts` asks whatever tokens are configured for the rest of what they know and files it;
+providers also report what they already hold through `ctx.learn()`, which is how Spotify's album
+colours arrive without a second request and how Apple's ISRC, songwriter and palette arrive from
+the search the lyrics lookup was making anyway. The reason is that the tokens are the
 scarce resource, not the storage: a Spotify access token is good for about an hour, an Apple
 developer token for a few months, and `audio-attributes` — which carries the tempo, the key, the
 loudness and the beat, bar and section grids — was withdrawn from the public Web API in November
@@ -160,10 +166,10 @@ corpus carries no durations at all.
 Both are only ever filled in, never overwritten. The first source to identify a recording is as
 good as the second, and overwriting invites a worse answer to replace a better one.
 
-One consequence worth knowing: a contribution carrying an ISRC is filed under the *name* key, not
-the ISRC key. `cacheKey` prefers an ISRC when it has one, so keying on an ISRC that arrived in
-this very request would file the extras under an identity no reader has yet — a phone with no
-token knows a title and an artist, which is why it is asking in the first place.
+One consequence worth knowing: extras are filed under the key the *asking* phone will have, which
+is the name-and-duration form. `cacheKey` prefers an ISRC when it has one, so filing under an ISRC
+the server has just learned would put the row under an identity no reader has yet — a phone with
+no token knows a title and an artist, which is why it is asking in the first place.
 
 ## What the server deliberately does not do
 

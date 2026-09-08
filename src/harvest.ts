@@ -156,12 +156,19 @@ async function fromSpotify(config: Config, track: TrackQuery): Promise<Harvest |
     analysis: analysis.value ? compactAnalysis(analysis.value) : null,
     metadata: compact({
       albumName: found.album?.name,
+      albumType: found.album?.album_type,
+      albumTotalTracks: found.album?.total_tracks,
+      albumSpotifyId: found.album?.id,
       releaseDate: found.album?.release_date,
+      releaseDatePrecision: found.album?.release_date_precision,
       trackNumber: found.track_number,
       discNumber: found.disc_number,
       explicit: found.explicit,
       popularity: found.popularity,
+      artistNames: found.artists?.map((artist) => artist.name).filter(Boolean),
+      artistSpotifyIds: found.artists?.map((artist) => artist.id).filter(Boolean),
       spotifyId: found.id,
+      spotifyUrl: found.external_urls?.spotify,
     }),
   };
 }
@@ -188,22 +195,24 @@ async function spotifyArtistImage(
  * beats and bars and sections, are two orders of magnitude smaller.
  */
 function compactAnalysis(analysis: Record<string, unknown>): Record<string, unknown> | null {
-  const track = analysis.track as Record<string, unknown> | undefined;
-  const kept = compact({
-    tempo: track?.tempo,
-    tempoConfidence: track?.tempo_confidence,
-    key: track?.key,
-    mode: track?.mode,
-    timeSignature: track?.time_signature,
-    loudness: track?.loudness,
-    duration: track?.duration,
-    endOfFadeIn: track?.end_of_fade_in,
-    startOfFadeOut: track?.start_of_fade_out,
-    beats: analysis.beats,
-    bars: analysis.bars,
-    sections: analysis.sections,
-  });
-  return kept;
+  // Everything except `segments`, rather than a hand-picked list: the endpoint is withdrawn from
+  // the public API, so a field left behind today cannot be fetched tomorrow, and the shape has
+  // fields nobody has named yet. `segments` is the one exclusion — one entry per note-level event
+  // with a twelve-value timbre vector each, megabytes for a long track, and nothing a lyrics
+  // renderer will ever read.
+  const kept: Record<string, unknown> = {};
+  for (const [field, value] of Object.entries(analysis)) {
+    if (field === 'segments') continue;
+    if (value === undefined || value === null) continue;
+    kept[field] = value;
+  }
+
+  // A bound anyway. Beats and tatums for a long track are large, and a cache is not a place for
+  // an unbounded blob however useful it is.
+  if (JSON.stringify(kept).length > 256_000) {
+    delete kept.tatums;
+  }
+  return Object.keys(kept).length ? kept : null;
 }
 
 /**
@@ -304,10 +313,15 @@ interface SpotifyTrack {
   explicit?: boolean;
   popularity?: number;
   external_ids?: { isrc?: string };
+  external_urls?: { spotify?: string };
   artists?: Array<{ id?: string; name?: string }>;
   album?: {
+    id?: string;
     name?: string;
+    album_type?: string;
+    total_tracks?: number;
     release_date?: string;
+    release_date_precision?: string;
     images?: Array<{ url?: string; width?: number }>;
   };
 }

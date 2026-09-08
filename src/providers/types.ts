@@ -24,6 +24,30 @@ export interface ProviderContext {
    * hide the track until the negative cache expired.
    */
   unreachable(detail: string): void;
+
+  /**
+   * Something learned in passing that is not the lyrics.
+   *
+   * A provider often has more in its hands than it was asked for — Spotify's `color-lyrics`
+   * carries the album's extracted colours, Apple's search result carries the ISRC, the
+   * songwriter and a full palette. Reporting it here means the server holds it without a second
+   * request, and holds it for the sources that cannot get it at all.
+   *
+   * Merged, never overwritten, so two providers that know different things both contribute.
+   */
+  learn(extras: LearnedExtras): void;
+}
+
+/** What a provider can report alongside the words. All of it optional. */
+export interface LearnedExtras {
+  isrc?: string | null;
+  durationMs?: number | null;
+  coverUrl?: string | null;
+  artistImageUrl?: string | null;
+  tempo?: number | null;
+  palette?: Record<string, unknown> | null;
+  analysis?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface ProviderAnswer {

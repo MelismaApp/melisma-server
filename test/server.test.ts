@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 
 import { createApp, isLocalAddress, start, type App } from '../src/server.ts';
 import { MERGE_VERSION } from '../src/merge.ts';
+import { cacheKey } from '../src/match.ts';
 
 let app: App;
 let server: ReturnType<typeof start>;
@@ -459,143 +460,113 @@ test('a contribution needs the key even from the local network', async () => {
 });
 
 // ---- artwork and tempo ----------------------------------------------------
+//
+// Read-only over HTTP. The server collects these itself while it is already looking a track up,
+// so these exercise the store directly and then check that the route serves what it holds.
 
-test('extras come back once a token has reported them', async () => {
-  // The reason this table exists: a Spotify token lasts an hour, a cover URL lasts forever.
-  const track = { title: 'Held Cover', artist: 'Someone', durationMs: 200_000 };
-
-  const stored = await fetch(`${base}/v1/extras`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ...track,
-      coverUrl: 'https://i.scdn.co/image/cover.jpg',
-      artistImageUrl: 'https://i.scdn.co/image/artist.jpg',
-      tempo: 87.5,
-      source: 'spotify',
-    }),
+test('extras the server harvested are served', async () => {
+  const track = { title: 'Held Cover', artist: 'Someone', album: '', durationMs: 200_000 };
+  app.store.saveExtras({
+    // Derived rather than written out: the key format is the matcher's business, and a test that
+    // hard-codes it tests the wrong thing.
+    key: cacheKey(track),
+    title: track.title,
+    artist: track.artist,
+    coverUrl: 'https://i.scdn.co/image/cover.jpg',
+    artistImageUrl: 'https://i.scdn.co/image/artist.jpg',
+    tempo: 87.5,
+    palette: { bgColor: '1f1f24', spotifyBackground: '#1f1f24' },
+    analysis: { timeSignature: 4, beats: [{ start: 0.5 }, { start: 1.0 }] },
+    metadata: { composerName: 'Someone Else', albumName: 'The Album' },
+    source: 'spotify',
   });
-  assert.equal(stored.status, 202);
 
   const read = await fetch(
     `${base}/v1/extras?title=Held%20Cover&artist=Someone&durationMs=200000`,
   );
   assert.equal(read.status, 200);
-  const body = (await read.json()) as Record<string, unknown>;
+  const body = (await read.json()) as Record<string, any>;
   assert.equal(body.coverUrl, 'https://i.scdn.co/image/cover.jpg');
-  assert.equal(body.artistImageUrl, 'https://i.scdn.co/image/artist.jpg');
   assert.equal(body.tempo, 87.5);
-  assert.equal(body.source, 'spotify');
+  assert.equal(body.palette.bgColor, '1f1f24');
+  assert.equal(body.analysis.beats.length, 2);
+  assert.equal(body.metadata.composerName, 'Someone Else');
 });
 
-test('a later contribution does not blank what an earlier one knew', async () => {
-  // Apple has no tempo. If its contribution overwrote rather than merged, pasting an Apple
-  // token would silently throw away a tempo a Spotify token had already found.
-  const track = { title: 'Merged Extras', artist: 'Someone', durationMs: 210_000 };
-  const post = (extra: Record<string, unknown>) =>
-    fetch(`${base}/v1/extras`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...track, ...extra }),
-    });
+test('a second source fills gaps without blanking the first', async () => {
+  // Apple has no tempo and Spotify has no songwriter. If the merge overwrote rather than filled
+  // in, whichever ran second would silently throw away what the other knew.
+  const key = cacheKey({ title: 'Merged Extras', artist: 'Someone', album: '', durationMs: 210_000 });
+  const common = { key, title: 'Merged Extras', artist: 'Someone' };
+  app.store.saveExtras({
+    ...common,
+    coverUrl: null,
+    artistImageUrl: null,
+    tempo: 120,
+    palette: null,
+    analysis: { key: 5 },
+    metadata: null,
+    source: 'spotify',
+  });
+  app.store.saveExtras({
+    ...common,
+    coverUrl: 'https://example.com/apple.jpg',
+    artistImageUrl: null,
+    tempo: null,
+    palette: { bgColor: 'abcdef' },
+    analysis: null,
+    metadata: { composerName: 'A Writer' },
+    source: 'applemusic',
+  });
 
-  await post({ tempo: 120, source: 'spotify' });
-  await post({ coverUrl: 'https://example.com/apple.jpg', source: 'applemusic' });
-
-  const read = await fetch(
-    `${base}/v1/extras?title=Merged%20Extras&artist=Someone&durationMs=210000`,
-  );
-  const body = (await read.json()) as Record<string, unknown>;
-  assert.equal(body.tempo, 120, 'the tempo Spotify supplied was lost');
-  assert.equal(body.coverUrl, 'https://example.com/apple.jpg');
+  const held = app.store.extras(key);
+  assert.equal(held?.tempo, 120, 'the tempo Spotify supplied was lost');
+  assert.equal(held?.coverUrl, 'https://example.com/apple.jpg');
+  assert.equal(held?.metadata?.composerName, 'A Writer');
+  assert.equal((held?.analysis as Record<string, unknown>)?.key, 5);
 });
 
-test('contributing extras needs the key even from the local network', async () => {
-  // A read is exempt; naming a URL that will be served to other clients as a track's cover
-  // art is not.
+test('an ISRC is identity, so it lands on the cache entry', () => {
+  // Not in the extras: the code that needs it is the matcher, and an ISRC turns a fuzzy name
+  // match into an exact lookup for every later caller.
+  const track = { title: 'Identified', artist: 'Someone', album: '', durationMs: 250_000 };
+  const key = cacheKey(track);
+  app.store.putEntry({
+    key,
+    ...track,
+    spotifyId: null,
+    isrc: null,
+    merged: null,
+    mergeVersion: MERGE_VERSION,
+    updatedAt: Date.now(),
+  });
+  app.store.noteIdentity(key, { isrc: 'GBAYE0601498', durationMs: 250_000 });
+  assert.equal(app.store.isrcFor(key), 'GBAYE0601498');
+
+  // Filled in, never overwritten: the first source to identify a recording is as good as the
+  // second, and overwriting invites a worse answer to replace a better one.
+  app.store.noteIdentity(key, { isrc: 'ZZZZZZZZZZZZ' });
+  assert.equal(app.store.isrcFor(key), 'GBAYE0601498');
+});
+
+test('a track nothing has been harvested for is a 404', async () => {
+  const read = await fetch(`${base}/v1/extras?title=Never%20Seen&artist=Nobody`);
+  assert.equal(read.status, 404);
+});
+
+test('there is no way for a client to write extras', async () => {
+  // The server harvests its own. An endpoint nothing needs is surface nobody should have.
   const response = await fetch(`${base}/v1/extras`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title: 'Unauthorised Cover', coverUrl: 'https://example.com/x.jpg' }),
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Nope', coverUrl: 'https://example.com/x.jpg' }),
   });
-  assert.equal(response.status, 401);
+  assert.equal(response.status, 404);
 });
 
 test('reading extras does not need the key from the local network', async () => {
   const response = await fetch(`${base}/v1/extras?title=Held%20Cover&artist=Someone`);
   assert.notEqual(response.status, 401);
-});
-
-test('the richer fields survive a round trip', async () => {
-  // Held even though the app reads none of them yet: the tokens are the scarce thing, not the
-  // storage, and `audio-attributes` is the endpoint the public API withdrew — so a cached copy
-  // is the only durable one there is.
-  const track = { title: 'Full House', artist: 'Someone', durationMs: 240_000 };
-  const stored = await fetch(`${base}/v1/extras`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ...track,
-      isrc: 'JPU901800227',
-      palette: { bgColor: '1f1f24', textColor1: 'ffffff' },
-      analysis: { timeSignature: 4, beats: [{ start: 0.5 }, { start: 1.0 }] },
-      metadata: { composerName: 'Someone Else', albumName: 'The Album' },
-      source: 'spotify',
-    }),
-  });
-  assert.equal(stored.status, 202);
-
-  const read = await fetch(`${base}/v1/extras?title=Full%20House&artist=Someone&durationMs=240000`);
-  const body = (await read.json()) as Record<string, any>;
-  assert.equal(body.palette.bgColor, '1f1f24');
-  assert.equal(body.analysis.timeSignature, 4);
-  assert.equal(body.analysis.beats.length, 2);
-  assert.equal(body.metadata.composerName, 'Someone Else');
-});
-
-test('an ISRC is identity, so it lands on the cache entry', async () => {
-  // Not in the extras payload: the code that needs it is the matcher, and an ISRC turns a fuzzy
-  // name match into an exact lookup for every later caller.
-  const track = { title: 'Identified', artist: 'Someone', durationMs: 250_000 };
-  const stored = await fetch(`${base}/v1/extras`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...track, isrc: 'GBAYE0601498' }),
-  });
-  // Identity alone is accepted, not a 400 — a caller sending only an ISRC did something useful.
-  assert.equal(stored.status, 202);
-  assert.equal(((await stored.json()) as Record<string, unknown>).stored, 'identity');
-});
-
-test('an oversized analysis blob is refused rather than stored', async () => {
-  // Spotify's `segments` array is megabytes for a long track. A cache is not an upload target.
-  const huge = { beats: Array.from({ length: 40_000 }, (_, i) => ({ start: i / 10 })) };
-  const response = await fetch(`${base}/v1/extras`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title: 'Too Much', artist: 'Someone', analysis: huge }),
-  });
-  assert.equal(response.status, 400);
-});
-
-test('a track nothing has reported is a 404', async () => {
-  const read = await fetch(`${base}/v1/extras?title=Never%20Seen&artist=Nobody`);
-  assert.equal(read.status, 404);
-});
-
-test('only http urls are stored', async () => {
-  // Otherwise this is the server being asked to fetch something local on a caller's behalf.
-  const response = await fetch(`${base}/v1/extras`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      title: 'Local File',
-      artist: 'Someone',
-      coverUrl: 'file:///etc/passwd',
-      artistImageUrl: 'data:image/png;base64,AAAA',
-    }),
-  });
-  assert.equal(response.status, 400);
 });
 
 // ---- the shape the app expects --------------------------------------------

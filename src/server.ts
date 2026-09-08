@@ -156,9 +156,6 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
     case 'GET /v1/extras':
       return readExtras(app, url, response);
 
-    case 'POST /v1/extras':
-      return writeExtras(app, request, response);
-
     case 'POST /admin/api/logout': {
       const token = cookie(request, 'bls_session');
       if (token) sessions.delete(token);
@@ -554,96 +551,6 @@ function readExtras(app: App, url: URL, response: ServerResponse): void {
     isrc: app.store.isrcFor(cacheKey(track)) ?? undefined,
     source: found.source || undefined,
   });
-}
-
-/**
- * Take what a token turned up.
- *
- * URLs rather than images: the payload stays small, and nothing here needs a credential. The
- * fields are merged, so an Apple contribution — which has no tempo — cannot blank a tempo an
- * earlier Spotify one supplied.
- */
-async function writeExtras(
-  app: App,
-  request: IncomingMessage,
-  response: ServerResponse,
-): Promise<void> {
-  const body = await readJson<Record<string, unknown>>(request);
-  const track = trackFromJson(body);
-  if (!track) return void send(response, 400, { error: 'need at least a title' });
-
-  const url = (field: string): string | null => {
-    const value = body?.[field];
-    if (typeof value !== 'string') return null;
-    const trimmed = value.trim();
-    // Only http(s). A `file:` or `data:` URL here would be the server being asked to fetch
-    // something on the caller's behalf that has nothing to do with cover art.
-    if (!/^https?:\/\//i.test(trimmed)) return null;
-    return trimmed;
-  };
-
-  const tempo = Number(body?.tempo ?? 0);
-  const coverUrl = url('coverUrl');
-  const artistImageUrl = url('artistImageUrl');
-  const usableTempo = Number.isFinite(tempo) && tempo > 0 ? tempo : null;
-  const palette = record(body?.palette);
-  const analysis = record(body?.analysis);
-  const metadata = record(body?.metadata);
-
-  // Identity rather than presentation, so it goes on the cache entry where the matcher can
-  // see it. An ISRC turns a fuzzy name match into an exact lookup for every later caller, and
-  // an authoritative duration turns the matcher's duration term from a neutral 0.5 into a
-  // decision — which is exactly what is missing for the AMLL corpus, whose entries carry none.
-  // Keyed without the contributed ISRC, deliberately. `cacheKey` prefers an ISRC over the
-  // name-and-duration form, so keying on one that arrived *in this request* would file the
-  // extras under an identity no reader has yet — a phone with no token knows a title and an
-  // artist, which is exactly why it is asking. The ISRC is what is being learned here, not how
-  // to find it.
-  const key = cacheKey({ ...track, isrc: undefined });
-  const isrc = typeof body?.isrc === 'string' ? body.isrc.trim().slice(0, 32) : null;
-  const authoritativeDuration = Number(body?.durationMs ?? 0);
-  app.store.noteIdentity(key, {
-    isrc,
-    durationMs: Number.isFinite(authoritativeDuration) ? authoritativeDuration : null,
-  });
-
-  const hasPresentation =
-    coverUrl || artistImageUrl || usableTempo !== null || palette || analysis || metadata;
-  if (!hasPresentation) {
-    // The identity above may still have been recorded, which is worth saying so a caller
-    // sending only an ISRC does not read a 400 as "nothing happened".
-    if (isrc) return void send(response, 202, { ok: true, stored: 'identity' });
-    return void send(response, 400, { error: 'nothing usable in the contribution' });
-  }
-
-  app.store.saveExtras({
-    key,
-    title: track.title,
-    artist: track.artist,
-    coverUrl,
-    artistImageUrl,
-    tempo: usableTempo,
-    palette,
-    analysis,
-    metadata,
-    source: typeof body?.source === 'string' ? body.source.slice(0, 40) : '',
-  });
-  app.store.log('info', null, `extras stored for "${track.title}" from ${body?.source ?? '?'}`);
-  send(response, 202, { ok: true });
-}
-
-/**
- * A nested object from a contribution, or null.
- *
- * Size-capped: these are held whole and served whole, and Spotify's `sections` array for a long
- * track is already tens of kilobytes. A cache is not a place for an unbounded upload.
- */
-function record(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const keys = Object.keys(value as Record<string, unknown>);
-  if (!keys.length) return null;
-  if (JSON.stringify(value).length > 256_000) return null;
-  return value as Record<string, unknown>;
 }
 
 function trackFromJson(body: unknown): TrackQuery | null {

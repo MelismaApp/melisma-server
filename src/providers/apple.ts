@@ -29,6 +29,14 @@ import { MATCH_THRESHOLD, cleanTitleOf, primaryArtistOf, score, type TrackQuery 
 import { parseTtml } from '../format/ttml.ts';
 import type { Provider, ProviderAnswer, ProviderContext } from './types.ts';
 
+/**
+ * A catalogue song, with everything worth keeping rather than only what the match needs.
+ *
+ * All of it arrives in the same response as the id, so reading it costs nothing — and Apple is
+ * the only source here for several of these. `composerName` fills in the songwriter credit for
+ * tracks whose lyrics arrive without one, and the artwork object carries a full extracted
+ * palette which lets colours resolve before the image has downloaded.
+ */
 interface Song {
   id?: string;
   attributes?: {
@@ -37,7 +45,29 @@ interface Song {
     albumName?: string;
     durationInMillis?: number;
     isrc?: string;
+    composerName?: string;
+    genreNames?: string[];
+    releaseDate?: string;
+    trackNumber?: number;
+    discNumber?: number;
+    contentRating?: string;
+    hasLyrics?: boolean;
+    hasTimeSyncedLyrics?: boolean;
+    isAppleDigitalMaster?: boolean;
+    audioTraits?: string[];
+    url?: string;
+    artwork?: {
+      url?: string;
+      width?: number;
+      height?: number;
+      bgColor?: string;
+      textColor1?: string;
+      textColor2?: string;
+      textColor3?: string;
+      textColor4?: string;
+    };
   };
+  relationships?: { artists?: { data?: Array<{ id?: string }> } };
 }
 
 interface SearchResponse {
@@ -200,7 +230,10 @@ async function identify(
       { headers: headers(ctx) },
     );
     const first = byIsrc.value?.data?.[0];
-    if (first?.id) return { id: first.id, match: 1 };
+    if (first?.id) {
+      reportSongDetails(first, ctx);
+      return { id: first.id, match: 1 };
+    }
   }
 
   const term = `${cleanTitleOf(track)} ${primaryArtistOf(track)}`.trim();
@@ -214,7 +247,7 @@ async function identify(
   }
 
   const songs = search.value?.results?.songs?.data ?? [];
-  let best: { id: string; match: number } | null = null;
+  let best: { id: string; match: number; song: Song } | null = null;
   for (const song of songs) {
     if (!song.id) continue;
     const attributes = song.attributes ?? {};
@@ -225,9 +258,64 @@ async function identify(
       attributes.durationInMillis ?? 0,
     );
     if (match < MATCH_THRESHOLD) continue;
-    if (!best || match > best.match) best = { id: song.id, match };
+    if (!best || match > best.match) best = { id: song.id, match, song };
   }
-  return best;
+
+  // Reported for the winner even if its lyrics turn out to be missing: the ISRC, the songwriter
+  // and the palette are worth keeping regardless, and this was the request that had them.
+  if (best) reportSongDetails(best.song, ctx);
+  return best ? { id: best.id, match: best.match } : null;
+}
+
+/**
+ * Report everything the search already told us.
+ *
+ * Called for the winning song whether or not its lyrics turn out to be usable: the ISRC, the
+ * songwriter and the palette are worth keeping even when the TTML is not there, and this is the
+ * one request that had them in hand.
+ */
+export function reportSongDetails(song: Song, ctx: ProviderContext): void {
+  const attributes = song.attributes;
+  if (!attributes) return;
+
+  const compact = (values: Record<string, unknown>): Record<string, unknown> | null => {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined || value === null || value === '') continue;
+      if (Array.isArray(value) && value.length === 0) continue;
+      out[key] = value;
+    }
+    return Object.keys(out).length ? out : null;
+  };
+
+  ctx.learn({
+    isrc: attributes.isrc ?? null,
+    durationMs: attributes.durationInMillis ?? null,
+    // Left as Apple's `{w}x{h}` template so a caller picks its own size.
+    coverUrl: attributes.artwork?.url ?? null,
+    palette: compact({
+      bgColor: attributes.artwork?.bgColor,
+      textColor1: attributes.artwork?.textColor1,
+      textColor2: attributes.artwork?.textColor2,
+      textColor3: attributes.artwork?.textColor3,
+      textColor4: attributes.artwork?.textColor4,
+    }),
+    metadata: compact({
+      albumName: attributes.albumName,
+      composerName: attributes.composerName,
+      genreNames: attributes.genreNames,
+      releaseDate: attributes.releaseDate,
+      trackNumber: attributes.trackNumber,
+      discNumber: attributes.discNumber,
+      contentRating: attributes.contentRating,
+      hasLyrics: attributes.hasLyrics,
+      hasTimeSyncedLyrics: attributes.hasTimeSyncedLyrics,
+      isAppleDigitalMaster: attributes.isAppleDigitalMaster,
+      audioTraits: attributes.audioTraits,
+      appleMusicId: song.id,
+      appleMusicUrl: attributes.url,
+    }),
+  });
 }
 
 function headers(ctx: ProviderContext): Record<string, string> {
