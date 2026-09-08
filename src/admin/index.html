@@ -96,10 +96,10 @@
 
           <h2>Keeping them alive</h2>
           <p class="hint">
-            A Spotify web token lasts about an hour and Apple's user token dies with a browser
-            session, and neither can be renewed by asking. A browser signing in and reading the
-            header off its own traffic can — so the server runs one on a schedule, if you give it
-            one to run.
+            A Spotify web token lasts about an hour and cannot be renewed by asking — Spotify closed
+            that endpoint. Only a browser loading the player can mint one, so this server carries a
+            Chromium and does it itself on a schedule. Paste an <code>sp_dc</code> cookie below and
+            there is nothing else to configure.
           </p>
           <div class="card" id="refresh-card">
             <div class="title">
@@ -118,12 +118,15 @@
               <button class="action" id="refresh-save-minutes">Save</button>
             </div>
             <div class="desc" style="margin-top: 10px">
-              The command comes from <code>BL_TOKEN_REFRESH_COMMAND</code> in the environment and
-              cannot be set from this page — an admin session should not get to choose what the
-              host executes. <code>examples/refresh-spotify-token.mjs</code> is a working script
-              for Spotify; point the variable at it. Prefer giving it
-              <code>SPOTIFY_SP_DC</code> over a password: no password anywhere, and nothing for
-              two-factor auth to interrupt.
+              A cookie rather than a password on purpose: <code>sp_dc</code> still authenticates the
+              player, so nothing here stores a password and there is no login form for two-factor
+              auth or a CAPTCHA to interrupt. It lasts about a year — paste a new one when it stops
+              working.
+              <br /><br />
+              <code>BL_TOKEN_REFRESH_COMMAND</code> overrides this with an external command whose
+              stdout is JSON of token name to value, for renewing something the built-in harvest
+              does not know about. It comes from the environment and cannot be set from this page —
+              an admin session should not get to choose what the host executes.
             </div>
           </div>
 
@@ -149,11 +152,14 @@
           </div>
 
           <div class="card">
-            <div class="title">Spotify <code>sp_dc</code> cookie</div>
+            <div class="title">
+              Spotify <code>sp_dc</code> cookie
+              <span class="pill" id="sp-dc-role"></span>
+            </div>
             <div class="desc" style="margin-bottom: 10px">
-              From a signed-in session at open.spotify.com. Unlocks Spotify's own lyrics, which
-              are line-timed but matched to the exact track — useful as a text reference the
-              merge can trust.
+              From a signed-in session at open.spotify.com: DevTools → Application → Cookies →
+              <code>sp_dc</code>. This is what the automatic refresh above uses — with it set, the
+              hour-long web token renews itself and you never paste one again. Lasts about a year.
             </div>
             <div class="inline">
               <input type="password" class="mono" id="secret-spDcCookie" />

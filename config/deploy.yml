@@ -73,17 +73,15 @@ env:
     # about an hour, so fifty minutes leaves slack without overlapping runs.
     BL_TOKEN_REFRESH_MINUTES: "50"
 
-    # Renewing the hour-long Spotify token needs a browser, and this image has none — it is
-    # node:24-alpine plus source, and a bundled Chromium would be several hundred megabytes on
-    # every deploy. Two ways round it, both in the README:
+    # Nothing to configure for the Spotify refresh: the image carries a Chromium and the server
+    # drives it itself. Paste an sp_dc cookie into the admin page and the hour-long web token
+    # renews on the schedule above, on its own, in this container.
     #
-    #   1. Add a Playwright accessory and point this at it:
-    #        BL_TOKEN_REFRESH_COMMAND: "curl -fsS http://token-refresher:8080/"
-    #   2. Leave this unset and push a fresh token from a machine that already has a browser, with
-    #      POST /admin/api/config. Nothing extra is needed on the server, and a home IP is
-    #      challenged far less often than a datacenter one.
+    # `BL_TOKEN_REFRESH_COMMAND` overrides that with an external command whose stdout is JSON of
+    # secret name to value — for renewing something the built-in harvest does not know about, or
+    # for driving a browser that lives somewhere else. Left unset, which is the point.
     #
-    # BL_TOKEN_REFRESH_COMMAND: "curl -fsS http://token-refresher:8080/"
+    # BL_TOKEN_REFRESH_COMMAND: ""
 
   secret:
     # A fixed key, so it survives a rebuilt volume and is known before the first boot. Leave it

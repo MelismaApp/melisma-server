@@ -1,25 +1,28 @@
 /**
  * Keeping the short-lived tokens alive.
  *
- * Spotify closed the endpoint that turned an `sp_dc` cookie into an access token — it answers
- * `400 usage of this endpoint is not permitted under the Spotify Developer Terms`. What still
- * works is a bearer copied out of the web player, and that is good for about an hour. Apple's
+ * Spotify closed the endpoint that turned an `sp_dc` cookie into an access token — it answers `400
+ * usage of this endpoint is not permitted under the Spotify Developer Terms`. What still works is a
+ * bearer copied out of the web player, and that is good for about an hour. Apple's
  * `media-user-token` dies with a browser session. Neither can be renewed by asking politely.
  *
  * So the only thing that renews them is a browser doing what a browser does: sign in, load the
- * player, and read the `Authorization` header off its own network traffic.
+ * player, and read the `Authorization` header off its own network traffic. **That browser is in this
+ * image**, and the server drives it over the DevTools protocol — one deployment, nothing to point
+ * at, no second container to keep in step.
  *
- * **That browser does not live here.** This module runs an external command on a schedule and
- * reads new token values off its stdout. Two reasons, and both are about cost:
+ * Two mechanisms, in this order:
  *
- * - The server has no dependencies at all — the image is `node:24-alpine` plus source. Playwright
- *   with a bundled Chromium is several hundred megabytes and a native toolchain, which is a large
- *   price for one hourly job, paid on every deploy.
- * - A browser that logs in needs a password. Keeping that out of this process, and out of this
- *   database, means a leak here is a leak of harvested tokens rather than of an account.
+ * 1. **`BL_TOKEN_REFRESH_COMMAND`**, if set. An external command whose stdout is JSON of secret
+ *    name to value. The escape hatch: it can renew anything, including tokens this server knows
+ *    nothing about, and it is how a browser running somewhere else would report in.
+ * 2. **The built-in harvest**, when an `sp_dc` cookie is set and a Chromium is present. Needs no
+ *    configuration beyond the cookie.
  *
- * `examples/refresh-spotify-token.mjs` is a working script for exactly this. Point
- * `BL_TOKEN_REFRESH_COMMAND` at it, or at anything else that prints the same JSON.
+ * A cookie rather than a password, deliberately. `sp_dc` still authenticates the *player* even
+ * though it can no longer be traded for a token, so nothing here stores a password and there is no
+ * login form for two-factor auth or a CAPTCHA to interrupt — which is the difference between a job
+ * that runs for a year and one that breaks the first time Spotify shows a challenge.
  *
  * The command comes from the environment and **cannot be set through the admin API**. An admin
  * session should not be able to choose what the host executes; that turns one stolen key into
@@ -29,6 +32,7 @@
 import { execFile } from 'node:child_process';
 
 import { SECRET_NAMES, type SecretName, type Settings } from './config.ts';
+import { chromiumAvailable, harvestSpotifyToken } from './harvest/spotify.ts';
 import { redact } from './http.ts';
 import type { Store } from './db.ts';
 
@@ -36,12 +40,14 @@ export interface RefreshOutcome {
   ok: boolean;
   at: number;
   ms: number;
-  /** Which secrets the command returned a new value for. */
+  /** Which secrets came back with a new value. */
   updated: SecretName[];
   detail: string;
+  /** Which mechanism ran. */
+  via: 'command' | 'browser' | 'none';
 }
 
-/** Whatever the command prints, keyed by secret name. Unknown keys are ignored. */
+/** Whatever a refresh produced, keyed by secret name. Unknown keys are ignored. */
 type RefreshPayload = Partial<Record<SecretName, string>>;
 
 const MAX_OUTPUT_BYTES = 256 * 1024;
@@ -63,6 +69,27 @@ export class Refresher {
     return process.env.BL_TOKEN_REFRESH_COMMAND?.trim() || null;
   }
 
+  /**
+   * How a refresh would happen right now, if one were asked for.
+   *
+   * The command wins when it exists: somebody who set it meant it, and it can renew things the
+   * built-in harvest knows nothing about.
+   */
+  get mechanism(): 'command' | 'browser' | 'none' {
+    if (this.command) return 'command';
+    const hasCookie = Boolean(this.settings.read().secrets.spDcCookie?.trim());
+    return hasCookie && chromiumAvailable() ? 'browser' : 'none';
+  }
+
+  /** Why nothing would run, in the terms the operator can act on. */
+  get unavailableReason(): string | null {
+    if (this.mechanism !== 'none') return null;
+    if (!chromiumAvailable()) {
+      return 'no Chromium in this image, and no BL_TOKEN_REFRESH_COMMAND set';
+    }
+    return 'no sp_dc cookie set — paste one and the browser can renew the token by itself';
+  }
+
   get lastOutcome(): RefreshOutcome | null {
     return this.last;
   }
@@ -76,10 +103,10 @@ export class Refresher {
    * next run.
    */
   start(): void {
-    if (!this.command) return;
+    if (this.mechanism === 'none') return;
     const minutes = Math.max(5, this.settings.read().tokenRefreshMinutes);
 
-    this.store.log('info', null, `token refresh every ${minutes} min`);
+    this.store.log('info', null, `token refresh every ${minutes} min via the ${this.mechanism}`);
     void this.run('boot');
 
     this.timer = setInterval(
@@ -104,22 +131,26 @@ export class Refresher {
    * one process per interval until the host gave out.
    */
   async run(reason: 'boot' | 'schedule' | 'manual'): Promise<RefreshOutcome> {
-    const command = this.command;
-    if (!command) {
+    const via = this.mechanism;
+    if (via === 'none') {
       return this.record({
         ok: false,
         at: Date.now(),
         ms: 0,
         updated: [],
-        detail: 'no BL_TOKEN_REFRESH_COMMAND is set',
+        via,
+        detail: this.unavailableReason ?? 'nothing is configured to refresh tokens',
       });
     }
     if (this.running) {
+      // A browser launch that hangs would otherwise pile up one process per interval until the
+      // host gave out.
       return this.record({
         ok: false,
         at: Date.now(),
         ms: 0,
         updated: [],
+        via,
         detail: 'a refresh is already running',
       });
     }
@@ -127,15 +158,22 @@ export class Refresher {
     this.running = true;
     const started = Date.now();
     try {
-      const stdout = await this.execute(command);
-      const payload = parsePayload(stdout);
+      const payload =
+        via === 'command'
+          ? parsePayload(await this.execute(this.command!))
+          : await this.harvest();
+
       if (!payload) {
         return this.record({
           ok: false,
           at: started,
           ms: Date.now() - started,
           updated: [],
-          detail: 'the command printed nothing that looked like {"spotifyWebToken": "…"}',
+          via,
+          detail:
+            via === 'command'
+              ? 'the command printed nothing that looked like {"spotifyWebToken": "…"}'
+              : (this.lastHarvestDetail ?? 'the browser returned no token'),
         });
       }
 
@@ -150,17 +188,34 @@ export class Refresher {
 
       const detail =
         updated.length > 0
-          ? `refreshed ${updated.join(', ')} (${reason})`
-          : `ran, but every token it returned was already current (${reason})`;
+          ? `refreshed ${updated.join(', ')} (${reason}, ${via})`
+          : `ran, but every token was already current (${reason}, ${via})`;
       this.store.log('info', null, detail);
-      return this.record({ ok: true, at: started, ms: Date.now() - started, updated, detail });
+      return this.record({ ok: true, at: started, ms: Date.now() - started, updated, via, detail });
     } catch (error) {
       const detail = redact(error instanceof Error ? error.message : String(error));
       this.store.log('error', null, `token refresh failed: ${detail}`);
-      return this.record({ ok: false, at: started, ms: Date.now() - started, updated: [], detail });
+      return this.record({
+        ok: false,
+        at: started,
+        ms: Date.now() - started,
+        updated: [],
+        via,
+        detail,
+      });
     } finally {
       this.running = false;
     }
+  }
+
+  private lastHarvestDetail: string | null = null;
+
+  /** The built-in browser harvest. Spotify only — it is the one with an hour-long token. */
+  private async harvest(): Promise<RefreshPayload | null> {
+    const cookie = this.settings.read().secrets.spDcCookie ?? '';
+    const result = await harvestSpotifyToken(cookie);
+    this.lastHarvestDetail = result.detail;
+    return result.token ? { spotifyWebToken: result.token } : null;
   }
 
   private execute(command: string): Promise<string> {
@@ -200,13 +255,17 @@ export class Refresher {
     this.store.setSetting('refresh.lastAt', String(outcome.at));
     this.store.setSetting('refresh.lastOk', outcome.ok ? '1' : '0');
     this.store.setSetting('refresh.lastDetail', outcome.detail);
+    this.store.setSetting('refresh.lastVia', outcome.via);
     return outcome;
   }
 
   /** The last outcome, falling back to what was persisted before a restart. */
   status(): {
     configured: boolean;
+    mechanism: 'command' | 'browser' | 'none';
+    reason: string | null;
     command: string | null;
+    chromium: boolean;
     everyMinutes: number;
     last: RefreshOutcome | null;
   } {
@@ -219,13 +278,17 @@ export class Refresher {
             at: Number(stored['refresh.lastAt']),
             ms: 0,
             updated: [],
+            via: (stored['refresh.lastVia'] as 'command' | 'browser' | 'none') ?? 'none',
             detail: stored['refresh.lastDetail'] ?? '',
           }
         : null);
 
     return {
-      configured: Boolean(this.command),
+      configured: this.mechanism !== 'none',
+      mechanism: this.mechanism,
+      reason: this.unavailableReason,
       command: this.command,
+      chromium: chromiumAvailable(),
       everyMinutes: Math.max(5, this.settings.read().tokenRefreshMinutes),
       last,
     };

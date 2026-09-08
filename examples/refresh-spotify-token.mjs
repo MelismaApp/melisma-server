@@ -8,10 +8,14 @@
  * thing that produces one is a browser being a browser, so: open the player, and read the
  * `Authorization` header off its own network traffic.
  *
- * This script lives outside the server on purpose. It needs Playwright and a Chromium — several
- * hundred megabytes — and it needs credentials the server should never hold. Keeping it separate
- * means the server image stays dependency-free and a leak there is a leak of harvested tokens
- * rather than of an account.
+ * **You probably do not need this.** The server carries a Chromium and does the same harvest itself
+ * — paste an `sp_dc` cookie into the admin page and the token renews on a schedule, in the same
+ * container, with nothing else configured. See `src/harvest/spotify.ts`.
+ *
+ * This exists for the cases the built-in harvest cannot cover: renewing a token from a service the
+ * server knows nothing about, driving a browser on a machine with a residential IP (challenged far
+ * less often than a datacenter one), or signing in with a username and password rather than a
+ * cookie. It reports in through `BL_TOKEN_REFRESH_COMMAND`, which overrides the built-in path.
  *
  *   npm init -y && npm install playwright && npx playwright install chromium
  *   SPOTIFY_USERNAME=… SPOTIFY_PASSWORD=… node examples/refresh-spotify-token.mjs

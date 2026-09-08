@@ -269,15 +269,27 @@ async function loadRefresh() {
   const detail = $('#refresh-detail');
 
   $('#refresh-minutes').value = status.everyMinutes;
-  $('#refresh-command').textContent = status.command
-    ? `$ ${status.command}`
-    : 'BL_TOKEN_REFRESH_COMMAND is not set, so nothing runs on a schedule.';
   $('#refresh-run').disabled = !status.configured;
 
+  $('#refresh-command').textContent =
+    status.mechanism === 'command'
+      ? `$ ${status.command}`
+      : status.mechanism === 'browser'
+        ? 'Using the Chromium in this image, driven over the DevTools protocol.'
+        : (status.reason ?? '');
+
+  // The cookie field says whether it is only a credential or also the refresh's engine.
+  const role = $('#sp-dc-role');
+  if (role) {
+    role.textContent = status.mechanism === 'browser' ? 'powers the auto-refresh' : '';
+    role.className = status.mechanism === 'browser' ? 'pill good' : 'pill';
+  }
+
   if (!status.configured) {
-    state.textContent = 'not configured';
-    state.className = 'pill';
-    detail.textContent = '';
+    state.textContent = 'nothing to run';
+    state.className = 'pill warn';
+    detail.textContent = status.reason ?? '';
+    detail.style.color = 'var(--muted)';
     return;
   }
 
@@ -285,11 +297,14 @@ async function loadRefresh() {
   if (!last) {
     state.textContent = 'never run';
     state.className = 'pill warn';
-    detail.textContent = `Scheduled every ${status.everyMinutes} minutes.`;
+    detail.textContent =
+      `Scheduled every ${status.everyMinutes} minutes, via the ${status.mechanism}.`;
     return;
   }
 
-  state.textContent = last.ok ? `ok ${when(last.at)}` : `failed ${when(last.at)}`;
+  state.textContent = last.ok
+    ? `ok ${when(last.at)} · ${status.mechanism}`
+    : `failed ${when(last.at)}`;
   state.className = `pill ${last.ok ? 'good' : 'bad'}`;
   detail.textContent = last.detail;
   detail.style.color = last.ok ? 'var(--muted)' : 'var(--bad)';

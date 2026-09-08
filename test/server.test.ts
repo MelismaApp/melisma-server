@@ -842,17 +842,96 @@ test('the library pages, and reports how many there are in total', async () => {
 
 // ---- keeping the tokens alive ---------------------------------------------
 
-test('the refresh reports itself as unconfigured rather than pretending', async () => {
+test('with no cookie there is nothing to refresh, and it says why', async () => {
   const status = await (await authed('/admin/api/refresh')).json();
   assert.equal(status.configured, false);
+  assert.equal(status.mechanism, 'none');
   assert.equal(status.command, null);
   assert.ok(status.everyMinutes >= 5);
+  // The reason has to name the thing to do about it, and which thing depends on the image.
+  assert.match(
+    status.reason,
+    status.chromium ? /sp_dc cookie/ : /no Chromium/,
+    status.reason,
+  );
 });
 
-test('running an unconfigured refresh is a clear no, not a crash', async () => {
+test('running with nothing configured is a clear no, not a crash', async () => {
   const result = await (await authed('/admin/api/refresh', { method: 'POST' })).json();
   assert.equal(result.ok, false);
-  assert.match(result.detail, /BL_TOKEN_REFRESH_COMMAND/);
+  assert.equal(result.via, 'none');
+  assert.ok(result.detail.length > 0);
+});
+
+test('a cookie is all the built-in browser harvest needs', async (t) => {
+  const { chromiumAvailable } = await import('../src/harvest/spotify.ts');
+  if (!chromiumAvailable()) {
+    t.skip('no Chromium on this machine — the deployed image carries one');
+    return;
+  }
+
+  app.settings.update({ 'secret.spDcCookie': 'not-a-real-cookie-but-a-value' });
+  try {
+    const status = await (await authed('/admin/api/refresh')).json();
+    // No command, no second container, no configuration beyond the cookie.
+    assert.equal(status.mechanism, 'browser');
+    assert.equal(status.configured, true);
+    assert.equal(status.reason, null);
+  } finally {
+    app.settings.update({ 'secret.spDcCookie': null });
+  }
+});
+
+test('an external command overrides the built-in harvest', async () => {
+  process.env.BL_TOKEN_REFRESH_COMMAND = 'echo \'{"spotifyWebToken":"BQD_from_the_command"}\'';
+  app.settings.update({ 'secret.spDcCookie': 'a-cookie-that-would-have-been-used' });
+  try {
+    const status = await (await authed('/admin/api/refresh')).json();
+    // Somebody who set a command meant it, and it can renew things the harvest knows nothing about.
+    assert.equal(status.mechanism, 'command');
+
+    const result = await (await authed('/admin/api/refresh', { method: 'POST' })).json();
+    assert.equal(result.ok, true);
+    assert.equal(result.via, 'command');
+    assert.deepEqual(result.updated, ['spotifyWebToken']);
+
+    const revealed = await (
+      await authed('/admin/api/reveal', {
+        method: 'POST',
+        body: JSON.stringify({ name: 'spotifyWebToken' }),
+      })
+    ).json();
+    assert.equal(revealed.value, 'BQD_from_the_command');
+  } finally {
+    delete process.env.BL_TOKEN_REFRESH_COMMAND;
+    app.settings.update({ 'secret.spDcCookie': null, 'secret.spotifyWebToken': null });
+  }
+});
+
+test('a command that returns the same token is reported as a no-op, not a failure', async () => {
+  process.env.BL_TOKEN_REFRESH_COMMAND = 'echo \'{"spotifyWebToken":"already-current"}\'';
+  app.settings.update({ 'secret.spotifyWebToken': 'already-current' });
+  try {
+    const result = await (await authed('/admin/api/refresh', { method: 'POST' })).json();
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.updated, []);
+    assert.match(result.detail, /already current/);
+  } finally {
+    delete process.env.BL_TOKEN_REFRESH_COMMAND;
+    app.settings.update({ 'secret.spotifyWebToken': null });
+  }
+});
+
+test('a command that fails is reported with what it printed', async () => {
+  process.env.BL_TOKEN_REFRESH_COMMAND = 'echo "the cookie has expired" >&2; exit 3';
+  try {
+    const result = await (await authed('/admin/api/refresh', { method: 'POST' })).json();
+    assert.equal(result.ok, false);
+    // The tail of stderr, because that is where a browser script says what went wrong.
+    assert.match(result.detail, /cookie has expired/);
+  } finally {
+    delete process.env.BL_TOKEN_REFRESH_COMMAND;
+  }
 });
 
 test('the refresh needs the key, even from the local network', async () => {

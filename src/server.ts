@@ -99,8 +99,9 @@ export function start(
     // Tokens first: a container that has just started may have been down for a day, and every
     // lookup below depends on them. It runs in the background either way.
     app.refresher.start();
-    if (app.refresher.command) {
-      say(`token refresh: every ${app.settings.read().tokenRefreshMinutes} min`);
+    const refresh = app.refresher.mechanism;
+    if (refresh !== 'none') {
+      say(`token refresh: every ${app.settings.read().tokenRefreshMinutes} min via the ${refresh}`);
     }
 
     // A merge algorithm newer than the stored entries: bring them up to date at boot, from
