@@ -561,11 +561,24 @@ function stream(app: App, request: IncomingMessage, response: ServerResponse): v
   });
 
   let lastId = 0;
+  let lastRevision = '';
   const push = () => {
     const events = app.store.recentEvents(50).filter((event) => event.id > lastId);
     for (const event of events.reverse()) {
       lastId = Math.max(lastId, event.id);
       response.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+
+    // And whether the library changed, so the page can refresh itself instead of being reloaded.
+    // Sent only when the fingerprint moves: a tick that says nothing costs the browser nothing, and
+    // re-fetching a table nobody changed would fight with whatever the reader was doing to it.
+    const revision = app.store.cacheRevision();
+    if (revision !== lastRevision) {
+      const first = lastRevision === '';
+      lastRevision = revision;
+      // Not on the first tick. The page has just loaded the library itself; telling it to do so again
+      // immediately would be a wasted round trip on every connection.
+      if (!first) response.write(`data: ${JSON.stringify({ kind: 'cache', revision })}\n\n`);
     }
   };
 

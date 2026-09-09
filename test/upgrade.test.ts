@@ -311,3 +311,31 @@ test('a cache-only lookup makes no requests', async () => {
   await until(() => wordLevelAsked > asked, 300);
   assert.equal(wordLevelAsked, asked);
 });
+
+test('the library fingerprint moves for each thing the view shows', () => {
+  // What tells the admin page to refresh itself. Three tables because a row moves for three reasons —
+  // a lookup or a re-merge writes `entries`, a harvest writes `extras`, an archived answer writes
+  // `raw` — and watching only the first missed a tempo landing seconds later, which is precisely the
+  // update worth seeing.
+  const key = 'sp:fingerprint';
+  const before = store.cacheRevision();
+  assert.equal(store.cacheRevision(), before, 'reading it must not change it');
+
+  store.putEntry({
+    key, title: 'a song', artist: 'somebody', album: '', durationMs: 0,
+    spotifyId: null, isrc: null, merged: null, mergeVersion: 1,
+  });
+  const afterEntry = store.cacheRevision();
+  assert.notEqual(afterEntry, before, 'an entry should move it');
+
+  store.putRaw({ key, provider: 'lrclib', body: 'x', contentType: 'text/plain', ok: true, note: null });
+  const afterRaw = store.cacheRevision();
+  assert.notEqual(afterRaw, afterEntry, 'an archived answer should move it');
+
+  store.saveExtras({
+    key, title: 'a song', artist: 'somebody', tempo: 120,
+    coverUrl: null, artistImageUrl: null, palette: null, analysis: null, metadata: null,
+    source: 'test',
+  });
+  assert.notEqual(store.cacheRevision(), afterRaw, 'extras should move it');
+});

@@ -867,6 +867,33 @@ export class Store {
     }));
   }
 
+  /**
+   * A cheap fingerprint of everything the library view shows.
+   *
+   * Counts and newest timestamps rather than a change feed: the admin page wants to know *that*
+   * something changed, and it already has an endpoint for what. Three tables, because a track's row
+   * moves for three different reasons — a lookup or a re-merge writes `entries`, a harvest writes
+   * `extras`, and an archived answer writes `raw` — and watching only the first missed the harvest
+   * landing a tempo a few seconds later, which is exactly the update worth seeing.
+   */
+  cacheRevision(): string {
+    const row = this.db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM entries)                        AS entries,
+           (SELECT COALESCE(MAX(updated_at), 0) FROM entries)    AS entriesAt,
+           (SELECT COUNT(*) FROM extras)                         AS extras,
+           (SELECT COALESCE(MAX(updated_at), 0) FROM extras)     AS extrasAt,
+           (SELECT COUNT(*) FROM raw)                            AS raws,
+           (SELECT COALESCE(MAX(fetched_at), 0) FROM raw)        AS rawsAt,
+           (SELECT COALESCE(SUM(hits), 0) FROM entries)          AS hits`,
+      )
+      .get() as Record<string, number>;
+    return [
+      row.entries, row.entriesAt, row.extras, row.extrasAt, row.raws, row.rawsAt, row.hits,
+    ].join('.');
+  }
+
   // ---- what each source said ---------------------------------------------
 
   /**

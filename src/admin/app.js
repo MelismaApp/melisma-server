@@ -477,12 +477,13 @@ function libraryQuery() {
   }).toString();
 }
 
-async function loadCache() {
-  const [stats, page] = await Promise.all([
-    api('/admin/api/stats'),
-    api(`/admin/api/library?${libraryQuery()}`),
-  ]);
-
+/**
+ * The counter row and the header line, from one stats reply.
+ *
+ * Lifted out of `loadCache` so a live update renders exactly what a page load does — two copies of
+ * this would drift, and the one that drifted would be the one nobody watches.
+ */
+function renderStats(stats) {
   // Filtered for the same reason as the pager below: a `null` argument to `replaceChildren` is
   // coerced to the text "null", so with nothing stale the row ended "0.2 MB null".
   $('#cache-stats').replaceChildren(
@@ -501,6 +502,15 @@ async function loadCache() {
   );
   $('#header-stats').textContent =
     `${stats.entries} tracks · ${stats.found} with lyrics · merge v${stats.mergeVersion}`;
+}
+
+async function loadCache() {
+  const [stats, page] = await Promise.all([
+    api('/admin/api/stats'),
+    api(`/admin/api/library?${libraryQuery()}`),
+  ]);
+
+  renderStats(stats);
 
   const body = $('#cache-table tbody');
   body.replaceChildren();
@@ -1154,11 +1164,30 @@ async function refreshLog() {
 
 function startLog() {
   void refreshLog();
+  startStream();
+}
+
+/**
+ * One connection for the whole page, opened at boot and kept.
+ *
+ * It used to be opened by the log tab, which meant the library only changed when the page was
+ * reloaded — a new track appeared on the server and the view sat there stale. The same stream now
+ * carries a `cache` event when the library's fingerprint moves, so the page refreshes itself.
+ */
+function startStream() {
   if (logStream) return;
 
   logStream = new EventSource('/admin/api/stream');
   logStream.onmessage = (message) => {
     const event = JSON.parse(message.data);
+
+    if (event.kind === 'cache') {
+      cacheChanged();
+      return;
+    }
+
+    // A log line. Rendered even when the log tab is hidden, so switching to it shows what happened
+    // rather than only what happens next.
     if (!logVisible(event, logFilter())) return;
     $('#log').prepend(logRow(event));
     while ($('#log').childElementCount > 400) $('#log').lastElementChild.remove();
@@ -1171,7 +1200,42 @@ function startLog() {
       live.textContent = 'disconnected';
       live.className = 'pill warn';
     }
+    // Reconnect, because a stream that dies quietly is indistinguishable from a server with nothing
+    // to say — and the whole point of this is that the page stops needing to be reloaded.
+    setTimeout(startStream, 5_000);
   };
+}
+
+/**
+ * The library changed on the server. Bring the page up to date.
+ *
+ * Debounced, because a single lookup writes an entry, then extras, then a re-merge — three
+ * fingerprint changes in a couple of seconds for one track's worth of news.
+ *
+ * The counters refresh wherever you are, since the header shows them and the question they answer is
+ * "is it collecting anything". The table only refreshes when it is on screen: re-rendering rows behind
+ * a tab nobody is looking at is work for nothing, and doing it *while* someone is typing in the search
+ * box would pull the results out from under them.
+ */
+const cacheChanged = debounce(async () => {
+  const onCacheTab = !$('#tab-cache').hidden;
+  const typing = document.activeElement === $('#cache-search');
+
+  try {
+    if (onCacheTab && !typing) {
+      await loadCache();
+    } else {
+      await refreshCounters();
+    }
+  } catch {
+    // A refresh nobody asked for must not raise anything: the next change tries again.
+  }
+}, 700);
+
+/** The two counter rows, without touching the table. */
+async function refreshCounters() {
+  const stats = await api('/admin/api/stats');
+  renderStats(stats);
 }
 
 // Re-fetch rather than filter what is on screen: a line hidden by the old filter was never loaded,
@@ -1221,8 +1285,9 @@ function debounce(fn, ms) {
 
 async function boot() {
   await loadConfig();
-  const stats = await api('/admin/api/stats');
-  $('#header-stats').textContent = `${stats.entries} tracks · ${stats.found} with lyrics · merge v${stats.mergeVersion}`;
+  await refreshCounters();
+  // Before the first tab is chosen, so the page is live wherever it opens.
+  startStream();
   selectTab(location.hash.slice(1) || 'sources');
 }
 
