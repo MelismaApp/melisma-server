@@ -685,7 +685,12 @@ $('#cache-backfill-isrc').addEventListener('click', async (event) => {
     } else if (result.looked === 0) {
       toast('Every track with a Spotify id already has its ISRC');
     } else {
-      toast(`${result.found} of ${result.looked} tracks now have an ISRC`);
+      // The unfindable ones are worth naming: an id from the player does not always resolve in the
+      // public catalogue, and nothing will ever fill those in, so "4 of 6" would look like a fault.
+      toast(
+        `${result.found} of ${result.looked} tracks now have an ISRC` +
+          (result.missing ? ` — ${result.missing} are not in Spotify's public catalogue` : ''),
+      );
     }
     await loadCache();
   } catch (error) {

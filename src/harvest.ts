@@ -28,7 +28,7 @@
 import type { Config } from './config.ts';
 import type { LogLevel, Store } from './db.ts';
 import { spotifyAppToken } from './spotifyApp.ts';
-import { json, query } from './http.ts';
+import { json, query, redact } from './http.ts';
 import { MATCH_THRESHOLD, score, type TrackQuery } from './match.ts';
 import { pastedToken } from './providers/spotify.ts';
 
@@ -297,10 +297,14 @@ async function fromSpotify(
 /**
  * Fills in the ISRCs of tracks whose Spotify id is already known.
  *
- * Fifty at a time, which is what `/v1/tracks?ids=` allows, so a whole library costs a handful of
- * requests rather than one per track. Exact rather than matched: each id names one recording, so
- * there is no scoring and no chance of recording the wrong ISRC — which matters more than the speed,
- * because `noteIdentity` keeps the first ISRC it is told and a wrong one is permanent.
+ * One request per track, deliberately, after measuring: `/v1/tracks?ids=` would do fifty at a time but
+ * answers `403 Forbidden` for an ordinary application token — with two ids or with one, so it is the
+ * endpoint rather than the request. `/v1/tracks/{id}` answers 200 for the same token and the same
+ * track. Slower and it works, which is the better of the two.
+ *
+ * Exact rather than matched: each id names one recording, so there is no scoring and no chance of
+ * recording the wrong ISRC. That matters more than the speed, because `noteIdentity` keeps the first
+ * ISRC it is told and a wrong one is permanent.
  *
  * Needs an app token. Without one this is the endpoint that rate-limits a web-player token into
  * uselessness, and running it anyway would spend the whole budget to fill in two or three.
@@ -309,48 +313,60 @@ export async function backfillIsrc(
   store: Store,
   config: Config,
   log: (level: LogLevel, message: string) => void,
-): Promise<{ looked: number; found: number; skipped: string | null }> {
+): Promise<{ looked: number; found: number; missing: number; skipped: string | null }> {
   const app = await spotifyAppToken(config);
   if (app.detail) log('warn', app.detail);
   if (!app.token) {
     return {
       looked: 0,
       found: 0,
+      missing: 0,
       skipped:
         'needs a Spotify client id and secret — a web-player token is rate-limited too hard for this',
     };
   }
 
   const pending = store.keysNeedingIsrc();
-  if (pending.length === 0) return { looked: 0, found: 0, skipped: null };
+  if (pending.length === 0) return { looked: 0, found: 0, missing: 0, skipped: null };
 
   const headers = { Accept: 'application/json', Authorization: `Bearer ${app.token}` };
   let found = 0;
+  let missing = 0;
 
-  for (let start = 0; start < pending.length; start += 50) {
-    const batch = pending.slice(start, start + 50);
-    const result = await json<{ tracks?: Array<SpotifyTrack | null> }>(
-      `${SPOTIFY_API}/tracks?${query({ ids: batch.map((entry) => entry.spotifyId).join(',') })}`,
-      { headers },
-    );
+  for (const entry of pending) {
+    const result = await json<SpotifyTrack>(`${SPOTIFY_API}/tracks/${entry.spotifyId}`, { headers });
 
-    if (!result.value?.tracks) {
-      log('warn', `ISRC backfill stopped: HTTP ${result.result.status}`);
-      break;
-    }
-
-    // Spotify answers in the order asked, with a null for anything it does not recognise.
-    for (const [index, track] of result.value.tracks.entries()) {
-      const isrc = track?.external_ids?.isrc;
-      const entry = batch[index];
-      if (!isrc || !entry) continue;
-      store.noteIdentity(entry.key, { isrc, durationMs: track?.duration_ms ?? null });
+    const isrc = result.value?.external_ids?.isrc;
+    if (isrc) {
+      store.noteIdentity(entry.key, { isrc, durationMs: result.value?.duration_ms ?? null });
       found++;
+      continue;
     }
+
+    // A 404 is an answer rather than a fault, and rarer than it first looked: the case that prompted
+    // this turned out to be an id I had mistyped by eye from a screenshot — base62 is case-sensitive
+    // and `I` and `l` are the same shape in most fonts. An id that came from Spotify will resolve.
+    //
+    // Kept because it can still happen honestly — the player's catalogue is not the public one, and a
+    // regional release can be playable and unlisted — but it is not the common case.
+    if (result.result.status === 404) {
+      missing++;
+      log('debug', `${entry.spotifyId} is not in the public catalogue, so it has no ISRC to fetch`);
+      continue;
+    }
+
+    // Anything else stops the run rather than grinding through the rest against a closed door.
+    const said = redact(result.result.body ?? '').slice(0, 160).replace(/\s+/g, ' ');
+    log('warn', `ISRC backfill stopped at HTTP ${result.result.status}: ${said}`);
+    break;
   }
 
-  log('info', `ISRC backfill: ${found} of ${pending.length} tracks now have one`);
-  return { looked: pending.length, found, skipped: null };
+  log(
+    'info',
+    `ISRC backfill: ${found} of ${pending.length} tracks now have one` +
+      (missing > 0 ? `, ${missing} are not in the public catalogue` : ''),
+  );
+  return { looked: pending.length, found, missing, skipped: null };
 }
 
 /**
