@@ -216,11 +216,26 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
           detail: `needs ${provider.requires.join(' and ')}`,
         });
       }
+      // A whole context, not two of its four members. `test` reaches code shared with `fetch` —
+      // Spotify's token lookup calls `unreachable`, and its colour reporting calls `learn` — and the
+      // types are stripped at runtime, so a partial object did not fail to compile, it threw
+      // `ctx.unreachable is not a function` and the admin page said "internal error".
+      let detail: string | null = null;
       const result = await provider.test({
         config,
         log: (level, message) => app.store.log(level, provider.id, message),
+        unreachable: (reason) => {
+          // Kept rather than dropped: it is usually a better account of the failure than the
+          // summary the test itself returns.
+          detail = reason;
+          app.store.log('warn', provider.id, redact(reason));
+        },
+        learn: () => {
+          // A test is not a lookup. Anything it happens to notice belongs to no track here, and
+          // filing it under one would be worse than losing it.
+        },
       });
-      return send(response, 200, result);
+      return send(response, 200, detail && !result.ok ? { ...result, detail } : result);
     }
 
     case 'POST /admin/api/sources': {

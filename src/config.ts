@@ -130,8 +130,23 @@ export class Settings {
    */
   read(): Config {
     const raw = this.store.allSettings();
-    const value = (key: string, envKey: string): string | undefined =>
-      process.env[envKey] ?? raw[key];
+    /**
+     * The environment wins, but only when it actually says something.
+     *
+     * `??` alone was wrong here, and quietly. An empty string is neither null nor undefined, so a
+     * variable set to nothing shadowed the stored value permanently — and that is exactly what a
+     * Kamal secret left blank becomes, because `.kamal/secrets` lists every optional secret and
+     * passes the unfilled ones through as `""`.
+     *
+     * The visible symptom was Spotify: the refresh harvested a token every half hour and stored it,
+     * the admin page showed it working, and every lookup still read `""` from the environment and
+     * reported no usable token. The same trap applied to anything pasted into the admin page whose
+     * variable was listed but left blank, which is most of them.
+     */
+    const value = (key: string, envKey: string): string | undefined => {
+      const fromEnv = process.env[envKey]?.trim();
+      return fromEnv ? fromEnv : raw[key];
+    };
 
     const providers: Record<string, ProviderSetting> = {};
     for (const [id, fallback] of Object.entries(PROVIDER_DEFAULTS)) {

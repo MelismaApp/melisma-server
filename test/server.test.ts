@@ -1223,6 +1223,31 @@ test('an unknown source cannot be tested', async () => {
   assert.equal(response.status, 400);
 });
 
+test('testing a source that reports being unreachable is not a 500', async () => {
+  // Reported as "internal error". The route built a context with two of its four members, and
+  // `test` reaches code shared with `fetch` — Spotify's token lookup calls `unreachable`. Types are
+  // stripped at runtime, so the partial object compiled fine and threw
+  // `ctx.unreachable is not a function`.
+  //
+  // Spotify with a cookie and no token is exactly that path: `isConfigured` passes on the cookie,
+  // and the mint behind it has been closed by Spotify since.
+  app.settings.update({ 'secret.spDcCookie': 'not-a-real-cookie', 'secret.spotifyWebToken': '' });
+  try {
+    const response = await authed('/admin/api/test', {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'spotify' }),
+    });
+    assert.equal(response.status, 200, 'a failing source is an answer, not a server error');
+
+    const body = await response.json();
+    assert.equal(body.ok, false);
+    // And it says what went wrong rather than "internal error".
+    assert.ok(body.detail && body.detail.length > 0, 'expected a reason');
+  } finally {
+    app.settings.update({ 'secret.spDcCookie': '', 'secret.spotifyWebToken': '' });
+  }
+});
+
 test('the source test reports every source, and asks about a real track', async () => {
   const response = await authed('/admin/api/sources', { method: 'POST' });
   assert.equal(response.status, 200);

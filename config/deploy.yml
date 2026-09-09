@@ -14,7 +14,7 @@ image: mangotornado/better-lyrics-server   # TODO(registry path)
 
 servers:
   web:
-    - TODO(vm-ip-or-hostname)
+    - 129.213.159.137
 
 ssh:
   user: ubuntu   # TODO(deploy user)
@@ -27,13 +27,22 @@ registry:
     - KAMAL_REGISTRY_PASSWORD
 
 builder:
-  arch: amd64   # set to arm64 for an Ampere A1 / Graviton host
+  # The host is an Oracle Ampere A1, which is ARM. Building amd64 for it produced an image the host
+  # could not run and a deploy that failed at the pull, not at the build:
+  #
+  #   no matching manifest for linux/arm64/v8 in the manifest list entries
+  #
+  # Nothing else here is architecture-specific — `node:24-alpine` is multi-arch, Alpine ships
+  # chromium for arm64, and the server has no native dependencies to rebuild. On an Apple Silicon
+  # machine this also builds natively rather than under emulation.
+  arch: arm64
 
 # kamal-proxy listens on :80 on the host; put a Cloudflare Tunnel or another TLS terminator in
 # front of it, exactly as the flight-search deploy does. TLS is not terminated here.
 proxy:
   ssl: false
   app_port: 8787
+  host: betterlyrics.asu.tw
   healthcheck:
     # The admin page answers unauthenticated — it is only a login form — so it is a health check
     # that needs no key baked into the config.
@@ -71,7 +80,7 @@ env:
 
     # How often to run the token refresh, if one is configured below. A Spotify web token lasts
     # about an hour, so fifty minutes leaves slack without overlapping runs.
-    BL_TOKEN_REFRESH_MINUTES: "50"
+    BL_TOKEN_REFRESH_MINUTES: "30"
 
     # Nothing to configure for the Spotify refresh: the image carries a Chromium and the server
     # drives it itself. Paste an sp_dc cookie into the admin page and the hour-long web token
