@@ -73,6 +73,21 @@ export const SECRET_NAMES = [
    */
   'spotifyWebToken',
   'spDcCookie',
+
+  /**
+   * A registered Spotify application, for the public catalogue API.
+   *
+   * Separate from the two above, and for a different host. `api.spotify.com` rate-limits a
+   * web-player token hard — a persistent `429` that follows the token rather than the address — so
+   * the ISRC, the cover and the album metadata were effectively unobtainable through it. An app token
+   * from the client-credentials grant has documented quotas instead.
+   *
+   * What this does *not* buy: lyrics, which are not in the public API at all, and the audio analysis,
+   * which Spotify closed to applications registered after November 2024. Both still need the
+   * web-player token, so these are an addition rather than a replacement.
+   */
+  'spotifyClientId',
+  'spotifyClientSecret',
   'musixmatchUserToken',
   'neteaseCookie',
   'appleBearerToken',

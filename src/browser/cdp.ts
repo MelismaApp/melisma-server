@@ -21,6 +21,32 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+/**
+ * Deletes the temporary profile, and never fails the job that was using it.
+ *
+ * `SIGKILL` is not synchronous. Chromium's own child processes can still be writing into the profile
+ * while this walks it, and `rmSync` then throws `ENOTEMPTY` — `force` forgives a missing file, not a
+ * directory that refilled itself. That exception escaped through `harvestSpotifyToken`'s `finally`
+ * and turned a *successful* harvest into `token refresh failed: ENOTEMPTY`, which is the worst way to
+ * lose a token you already had in hand.
+ *
+ * So: let Node retry the races it knows about, then try once more after the browser has finished
+ * dying, then stop caring. It is a directory under `/tmp` that the host reclaims anyway — the only
+ * real cost of losing it is a stale session cookie on a disk that is already trusted with the
+ * database.
+ */
+function removeQuietly(directory: string, attempt = 0): void {
+  try {
+    // `maxRetries` exists for exactly this: it retries EBUSY, EMFILE, ENFILE, ENOTEMPTY and EPERM.
+    rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch {
+    if (attempt >= 2) return;
+    const timer = setTimeout(() => removeQuietly(directory, attempt + 1), 1_000);
+    // Must not hold the process open on the way out.
+    timer.unref?.();
+  }
+}
+
 /** Where Chromium usually is, in the order worth trying. */
 const CANDIDATES = [
   process.env.BL_CHROMIUM,
@@ -127,7 +153,7 @@ export class Browser {
 
     const cleanup = () => {
       child.kill('SIGKILL');
-      rmSync(profileDir, { recursive: true, force: true });
+      removeQuietly(profileDir);
     };
 
     let endpoint: string;
@@ -224,7 +250,7 @@ export class Browser {
     this.process.kill('SIGKILL');
     // The profile holds the session cookie that was just used. It is a temporary directory, but
     // leaving it behind would leave that on disk for no reason.
-    rmSync(this.profileDir, { recursive: true, force: true });
+    removeQuietly(this.profileDir);
   }
 }
 

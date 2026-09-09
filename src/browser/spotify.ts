@@ -249,7 +249,13 @@ export async function harvestSpotifyToken(
       detail: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    browser?.close();
+    // Teardown must never decide the outcome. A throw from here would replace a harvested token with
+    // an exception — which is how a cleanup race got reported as `token refresh failed: ENOTEMPTY`.
+    try {
+      browser?.close();
+    } catch {
+      /* Nothing here can help, and the token is already decided. */
+    }
   }
 }
 

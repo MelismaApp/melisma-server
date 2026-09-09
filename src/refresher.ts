@@ -34,6 +34,7 @@ import { execFile } from 'node:child_process';
 import { SECRET_NAMES, type SecretName, type Settings } from './config.ts';
 import { chromiumAvailable, harvestSpotifyToken } from './browser/spotify.ts';
 import { redact } from './http.ts';
+import { appTokenConfigured } from './spotifyApp.ts';
 import type { Store } from './db.ts';
 
 export interface RefreshOutcome {
@@ -382,6 +383,8 @@ export class Refresher {
     command: string | null;
     chromium: boolean;
     everyMinutes: number;
+    /** Whether a registered Spotify application is configured for the catalogue API. */
+    spotifyAppConfigured: boolean;
     /** When the token in hand expires, as the player stated it. Null when nothing said. */
     tokenExpiresAt: number | null;
     /** When the next scheduled refresh is due. */
@@ -409,6 +412,7 @@ export class Refresher {
       command: this.command,
       chromium: chromiumAvailable(),
       everyMinutes: Math.max(5, this.settings.read().tokenRefreshMinutes),
+      spotifyAppConfigured: appTokenConfigured(this.settings.read()),
       tokenExpiresAt: this.tokenExpiresAt,
       nextRefreshAt: this.nextRefreshAt,
       last,

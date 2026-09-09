@@ -165,9 +165,25 @@ export interface LibraryQuery {
 export interface LogEvent {
   id: number;
   at: number;
-  level: 'info' | 'warn' | 'error';
+  level: LogLevel;
   provider: string | null;
   message: string;
+}
+
+/**
+ * Log levels, in the order they are worth reading.
+ *
+ * `debug` exists so the detail that explains a failure can be recorded without burying the lines that
+ * announce one — a rate limit reported per request is noise on a good day and the whole answer on a
+ * bad one. The admin page filters by minimum level, so nothing has to be decided at the call site.
+ */
+export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
+
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
+/** How a minimum-level filter is applied: everything at least this severe. */
+export function atLeast(level: LogLevel): LogLevel[] {
+  return LOG_LEVELS.slice(LOG_LEVELS.indexOf(level)) as unknown as LogLevel[];
 }
 
 export class Store {
@@ -828,6 +844,29 @@ export class Store {
     }));
   }
 
+  /**
+   * Tracks whose ISRC is recoverable exactly, because their Spotify id is already known.
+   *
+   * The id names one recording, so `/v1/tracks/{id}` gives *the* ISRC for it rather than a best
+   * guess — no matching, nothing to get wrong. Anything cached before an app token was configured is
+   * sitting here waiting, because the only thing that ever stopped it was the rate limit.
+   */
+  keysNeedingIsrc(limit = 500): Array<{ key: string; spotifyId: string }> {
+    const rows = this.db
+      .prepare(
+        `SELECT key, spotify_id FROM entries
+         WHERE spotify_id IS NOT NULL AND spotify_id <> ''
+           AND (isrc IS NULL OR isrc = '')
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+      )
+      .all(Math.min(limit, 2000)) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      key: row.key as string,
+      spotifyId: row.spotify_id as string,
+    }));
+  }
+
   // ---- what each source said ---------------------------------------------
 
   /**
@@ -862,7 +901,7 @@ export class Store {
 
   // ---- log ---------------------------------------------------------------
 
-  log(level: LogEvent['level'], provider: string | null, message: string): void {
+  log(level: LogLevel, provider: string | null, message: string): void {
     this.db
       .prepare('INSERT INTO events (at, level, provider, message) VALUES (?, ?, ?, ?)')
       .run(Date.now(), level, provider, message);
@@ -873,10 +912,36 @@ export class Store {
     );
   }
 
-  recentEvents(limit = 200): LogEvent[] {
+  recentEvents(
+    limit = 200,
+    filter: { level?: LogLevel; provider?: string; search?: string } = {},
+  ): LogEvent[] {
+    // Filtered in SQL rather than in the page. The log is the thing you reach for when something is
+    // wrong, and "load two hundred and scroll" is not a way to find one line among them.
+    const clauses: string[] = [];
+    const values: unknown[] = [];
+
+    if (filter.level) {
+      const levels = atLeast(filter.level);
+      clauses.push(`level IN (${levels.map(() => '?').join(', ')})`);
+      values.push(...levels);
+    }
+    if (filter.provider) {
+      clauses.push('provider IS ?');
+      values.push(filter.provider);
+    }
+    if (filter.search?.trim()) {
+      // Provider as well as message: "spotify" is as likely to be what someone types as a word from
+      // the message itself.
+      clauses.push('(message LIKE ? OR provider LIKE ?)');
+      const like = `%${filter.search.trim()}%`;
+      values.push(like, like);
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db
-      .prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?')
-      .all(Math.min(limit, 1000)) as Record<string, unknown>[];
+      .prepare(`SELECT * FROM events ${where} ORDER BY id DESC LIMIT ?`)
+      .all(...values, Math.min(limit, 1000)) as Record<string, unknown>[];
     return rows.map((row) => ({
       id: row.id as number,
       at: row.at as number,

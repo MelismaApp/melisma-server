@@ -85,6 +85,29 @@ p.hint { color: var(--muted); margin: 0 0 14px; max-width: 70ch; }
 .card .title { font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .card .desc { color: var(--muted); font-size: 13px; margin-top: 2px; }
 
+/*
+ * A wrapping row of pills.
+ *
+ * The library's "what else is cached" cell laid its pills out as loose children, so a well-covered
+ * track ran the column off the side of the page. `nowrap` on the pill itself is right — a pill broken
+ * across two lines reads worse than a wide one — so the wrapping has to happen here, between them.
+ */
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Absent, not wrong: dimmer than a plain pill, and never coloured like a failure. */
+.pill.absent {
+  color: color-mix(in srgb, var(--muted) 60%, transparent);
+  border-style: dashed;
+}
+
+/* The level, in the log. Coloured by the row's own class, so this only has to size it. */
+.lvl { font-size: 10px; opacity: 0.75; letter-spacing: 0.04em; }
+
 .pill {
   font-size: 11px;
   padding: 2px 8px;

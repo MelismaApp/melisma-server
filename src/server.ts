@@ -16,12 +16,13 @@ import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 
 import { Settings, jwtExpiry, randomKey, SECRET_NAMES, type SecretName } from './config.ts';
-import { Store } from './db.ts';
+import { Store, LOG_LEVELS, type LogLevel } from './db.ts';
 import { Resolver, reparseByFormat } from './resolver.ts';
 import { Refresher } from './refresher.ts';
 import { MERGE_VERSION } from './merge.ts';
 import { PROVIDERS, providerById } from './providers/index.ts';
 import { testSources, TEST_TRACK } from './selftest.ts';
+import { backfillIsrc } from './harvest.ts';
 import { parseTtml, writeTtml } from './format/ttml.ts';
 import { parseLrc, writePlainText } from './format/lrc.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
@@ -247,6 +248,14 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       return send(response, 200, { track: TEST_TRACK, sources: reports });
     }
 
+    case 'POST /admin/api/backfill-isrc': {
+      // Exact, not matched: every one of these already has a Spotify id, which names one recording.
+      const result = await backfillIsrc(app.store, app.settings.read(), (level, message) =>
+        app.store.log(level, 'spotify', message),
+      );
+      return send(response, 200, result);
+    }
+
     case 'GET /admin/api/refresh':
       return send(response, 200, app.refresher.status());
 
@@ -353,8 +362,19 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       return send(response, 200, resolution);
     }
 
-    case 'GET /admin/api/events':
-      return send(response, 200, { events: app.store.recentEvents(200) });
+    case 'GET /admin/api/events': {
+      const level = url.searchParams.get('level');
+      return send(response, 200, {
+        levels: LOG_LEVELS,
+        events: app.store.recentEvents(Number(url.searchParams.get('limit')) || 200, {
+          // An unrecognised level is ignored rather than refused: this is a log viewer, and the
+          // useful failure mode is "you see everything", not a 400.
+          level: LOG_LEVELS.includes(level as never) ? (level as LogLevel) : undefined,
+          provider: url.searchParams.get('provider') ?? undefined,
+          search: url.searchParams.get('q') ?? undefined,
+        }),
+      });
+    }
 
     case 'GET /admin/api/stream':
       return stream(app, request, response);

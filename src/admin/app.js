@@ -336,6 +336,15 @@ async function loadRefresh() {
         ? 'Using the Chromium in this image, driven over the DevTools protocol.'
         : (status.reason ?? '');
 
+  // Whether the catalogue calls have a proper credential behind them, which is the difference
+  // between an ISRC that arrives and one that arrives when the rate limit happens to allow it.
+  const appRole = $('#spotify-app-role');
+  if (appRole) {
+    const set = status.spotifyAppConfigured;
+    appRole.textContent = set ? 'in use for ISRC and artwork' : 'not set — ISRC will be unreliable';
+    appRole.className = set ? 'pill good' : 'pill warn';
+  }
+
   // The cookie field says whether it is only a credential or also the refresh's engine.
   const role = $('#sp-dc-role');
   if (role) {
@@ -474,17 +483,21 @@ async function loadCache() {
     api(`/admin/api/library?${libraryQuery()}`),
   ]);
 
+  // Filtered for the same reason as the pager below: a `null` argument to `replaceChildren` is
+  // coerced to the text "null", so with nothing stale the row ended "0.2 MB null".
   $('#cache-stats').replaceChildren(
-    stat(stats.entries, 'tracks'),
-    stat(stats.found, 'with lyrics'),
-    stat(stats.misses, 'nothing found'),
-    stat(stats.extras ?? 0, 'with artwork etc'),
-    stat(stats.withIsrc ?? 0, 'with an ISRC'),
-    stat(stats.withAnalysis ?? 0, 'with the audio analysis'),
-    stat(stats.hits, 'cache hits'),
-    stat(stats.rawBodies, 'archived responses'),
-    stat(`${(stats.bytes / 1_048_576).toFixed(1)} MB`, 'on disk'),
-    stats.stale ? stat(stats.stale, `stale (merge v${stats.mergeVersion})`) : null,
+    ...[
+      stat(stats.entries, 'tracks'),
+      stat(stats.found, 'with lyrics'),
+      stat(stats.misses, 'nothing found'),
+      stat(stats.extras ?? 0, 'with artwork etc'),
+      stat(stats.withIsrc ?? 0, 'with an ISRC'),
+      stat(stats.withAnalysis ?? 0, 'with the audio analysis'),
+      stat(stats.hits, 'cache hits'),
+      stat(stats.rawBodies, 'archived responses'),
+      stat(`${(stats.bytes / 1_048_576).toFixed(1)} MB`, 'on disk'),
+      stats.stale ? stat(stats.stale, `stale (merge v${stats.mergeVersion})`) : null,
+    ].filter(Boolean),
   );
   $('#header-stats').textContent =
     `${stats.entries} tracks · ${stats.found} with lyrics · merge v${stats.mergeVersion}`;
@@ -539,32 +552,37 @@ async function loadCache() {
   // for X", and a count you can read beats a list you have to fall through.
   const shown = page.rows.length;
   const from = page.total === 0 ? 0 : libraryOffset + 1;
+  // Filtered, because `replaceChildren` takes nodes *or strings* — so a `null` argument is coerced
+  // to the text "null" and printed. With neither pager button needed, the page read "1–6 of 6
+  // nullnull". `el` already skips null children; this is the one place that bypasses it.
   $('#library-pager').replaceChildren(
-    el('span', {
-      class: 'desc',
-      text: page.total === 0 ? '' : `${from}–${libraryOffset + shown} of ${page.total}`,
-    }),
-    el('span', { class: 'spacer' }),
-    libraryOffset > 0
-      ? el('button', {
-          class: 'action',
-          text: 'Previous',
-          onclick: () => {
-            libraryOffset = Math.max(0, libraryOffset - LIBRARY_PAGE);
-            void loadCache();
-          },
-        })
-      : null,
-    libraryOffset + shown < page.total
-      ? el('button', {
-          class: 'action',
-          text: 'Next',
-          onclick: () => {
-            libraryOffset += LIBRARY_PAGE;
-            void loadCache();
-          },
-        })
-      : null,
+    ...[
+      el('span', {
+        class: 'desc',
+        text: page.total === 0 ? '' : `${from}–${libraryOffset + shown} of ${page.total}`,
+      }),
+      el('span', { class: 'spacer' }),
+      libraryOffset > 0
+        ? el('button', {
+            class: 'action',
+            text: 'Previous',
+            onclick: () => {
+              libraryOffset = Math.max(0, libraryOffset - LIBRARY_PAGE);
+              void loadCache();
+            },
+          })
+        : null,
+      libraryOffset + shown < page.total
+        ? el('button', {
+            class: 'action',
+            text: 'Next',
+            onclick: () => {
+              libraryOffset += LIBRARY_PAGE;
+              void loadCache();
+            },
+          })
+        : null,
+    ].filter(Boolean),
   );
 }
 
@@ -618,7 +636,33 @@ function cachedPills(row) {
       }),
     );
   }
-  return pills.length > 0 ? pills : [el('span', { class: 'desc', text: '—' })];
+
+  // What is *not* there, which is the more useful half once a track is working.
+  //
+  // Each of these has a different cause and a different fix, so they are named rather than counted:
+  // no ISRC means every later lookup stays a fuzzy title match, and no tempo or analysis means
+  // `api.spotify.com` refused the harvest — routinely, with a 429, because it rate-limits a
+  // web-player token hard. The log says which; this says that.
+  const absent = [];
+  if (!row.isrc) absent.push(['ISRC', 'no ISRC, so lookups for this track stay a fuzzy name match']);
+  if (!row.extrasFields.includes('cover')) absent.push(['cover', 'no cover art address']);
+  if (!row.extrasFields.includes('tempo')) {
+    absent.push(['tempo', 'no tempo — Spotify is the only source for it']);
+  }
+  if (!row.extrasFields.includes('analysis')) {
+    absent.push(['analysis', 'no audio analysis — Spotify has none for many tracks, and never will']);
+  }
+  for (const [text, title] of absent) {
+    pills.push(el('span', { class: 'pill absent', text: `no ${text}`, title }));
+  }
+
+  // A wrapping row rather than loose children: the pills used to be laid out in the cell directly and
+  // a well-covered track pushed the column off the side of the page.
+  return [
+    el('div', { class: 'pills' }, pills.length > 0 ? pills : [
+      el('span', { class: 'desc', text: '—' }),
+    ]),
+  ];
 }
 
 const reloadLibrary = () => {
@@ -630,6 +674,28 @@ $('#cache-search').addEventListener('input', debounce(reloadLibrary, 250));
 $('#library-in-lyrics').addEventListener('change', reloadLibrary);
 $('#library-sort').addEventListener('change', reloadLibrary);
 $('#library-missing').addEventListener('change', reloadLibrary);
+$('#cache-backfill-isrc').addEventListener('click', async (event) => {
+  const button = event.target;
+  button.disabled = true;
+  button.textContent = 'Looking them up…';
+  try {
+    const result = await api('/admin/api/backfill-isrc', { method: 'POST' });
+    if (result.skipped) {
+      toast(result.skipped, true);
+    } else if (result.looked === 0) {
+      toast('Every track with a Spotify id already has its ISRC');
+    } else {
+      toast(`${result.found} of ${result.looked} tracks now have an ISRC`);
+    }
+    await loadCache();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Fill in missing ISRCs';
+  }
+});
+
 $('#cache-remerge').addEventListener('click', async () => {
   const result = await api('/admin/api/remerge', { method: 'POST', body: '{}' });
   toast(`Re-merged ${result.rebuilt}/${result.attempted}`);
@@ -1030,28 +1096,81 @@ $('#try-go').addEventListener('click', async () => {
 
 let logStream;
 
-function startLog() {
-  if (logStream) return;
+/** How severe a line has to be to show, and what it has to contain. */
+const LEVEL_ORDER = ['debug', 'info', 'warn', 'error'];
+
+function logFilter() {
+  return {
+    level: $('#log-level')?.value ?? 'info',
+    search: ($('#log-search')?.value ?? '').trim().toLowerCase(),
+  };
+}
+
+/** Whether a line survives the filter, applied the same way to live lines and fetched ones. */
+function logVisible(event, filter) {
+  if (LEVEL_ORDER.indexOf(event.level) < LEVEL_ORDER.indexOf(filter.level)) return false;
+  if (!filter.search) return true;
+  return `${event.provider ?? ''} ${event.message}`.toLowerCase().includes(filter.search);
+}
+
+function logRow(event) {
+  return el('div', { class: event.level }, [
+    el('span', { class: 'at', text: new Date(event.at).toLocaleTimeString() }),
+    document.createTextNode(' '),
+    el('span', { class: 'lvl', text: `${event.level.toUpperCase()} ` }),
+    event.provider ? el('span', { class: 'who', text: `[${event.provider}] ` }) : null,
+    el('span', { class: 'msg', text: event.message }),
+  ]);
+}
+
+/**
+ * Loads the history that matches the filter, then keeps up with new lines.
+ *
+ * Both halves are needed. Filtering only the live stream answers "what is happening", and the
+ * question people actually arrive with is "what happened" — which is behind them, in the rows already
+ * written. So the filter is applied in SQL for the history and in the page for the stream.
+ */
+async function refreshLog() {
   const host = $('#log');
-  host.replaceChildren();
+  const filter = logFilter();
+  try {
+    const query = new URLSearchParams({ level: filter.level, limit: '400' });
+    if (filter.search) query.set('q', filter.search);
+    const data = await api(`/admin/api/events?${query}`);
+    // Newest first, which is how the stream prepends.
+    host.replaceChildren(...data.events.map(logRow));
+  } catch (error) {
+    host.replaceChildren(el('div', { class: 'error' }, [el('span', { text: error.message })]));
+  }
+}
+
+function startLog() {
+  void refreshLog();
+  if (logStream) return;
+
   logStream = new EventSource('/admin/api/stream');
   logStream.onmessage = (message) => {
     const event = JSON.parse(message.data);
-    host.prepend(
-      el('div', { class: event.level }, [
-        el('span', { class: 'at', text: new Date(event.at).toLocaleTimeString() }),
-        document.createTextNode(' '),
-        event.provider ? el('span', { class: 'who', text: `[${event.provider}] ` }) : null,
-        el('span', { class: 'msg', text: event.message }),
-      ]),
-    );
-    while (host.childElementCount > 400) host.lastElementChild.remove();
+    if (!logVisible(event, logFilter())) return;
+    $('#log').prepend(logRow(event));
+    while ($('#log').childElementCount > 400) $('#log').lastElementChild.remove();
   };
   logStream.onerror = () => {
     logStream.close();
     logStream = null;
+    const live = $('#log-live');
+    if (live) {
+      live.textContent = 'disconnected';
+      live.className = 'pill warn';
+    }
   };
 }
+
+// Re-fetch rather than filter what is on screen: a line hidden by the old filter was never loaded,
+// and hiding rows client-side would silently show fewer than the limit suggests.
+$('#log-level').addEventListener('change', () => void refreshLog());
+$('#log-search').addEventListener('input', debounce(() => void refreshLog(), 250));
+
 
 // ---- odds and ends --------------------------------------------------------
 

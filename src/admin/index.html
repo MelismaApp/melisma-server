@@ -186,6 +186,44 @@
           </div>
 
           <div class="card">
+            <div class="title">
+              Spotify application
+              <span class="pill" id="spotify-app-role"></span>
+            </div>
+            <div class="desc" style="margin-bottom: 10px">
+              A client id and secret from
+              <code>developer.spotify.com/dashboard</code> — tick <strong>Web API</strong> only, and
+              any redirect URI will do since this grant never uses one. This is what makes the ISRC
+              reliable: <code>api.spotify.com</code> rate-limits a web-player token so hard that the
+              ISRC and cover art mostly never arrive, while an application token has proper quotas.
+              <br /><br />
+              It does <em>not</em> replace the cookie above. Lyrics are not in the public API at all,
+              and the audio analysis was closed to applications registered after November 2024 — both
+              still come from the player's own token.
+            </div>
+            <div class="inline">
+              <input
+                type="password"
+                class="mono"
+                id="secret-spotifyClientId"
+                placeholder="client id"
+              />
+              <button class="action" data-reveal="spotifyClientId">Reveal</button>
+              <button class="action primary" data-save-secret="spotifyClientId">Save</button>
+            </div>
+            <div class="inline" style="margin-top: 8px">
+              <input
+                type="password"
+                class="mono"
+                id="secret-spotifyClientSecret"
+                placeholder="client secret"
+              />
+              <button class="action" data-reveal="spotifyClientSecret">Reveal</button>
+              <button class="action primary" data-save-secret="spotifyClientSecret">Save</button>
+            </div>
+          </div>
+
+          <div class="card">
             <div class="title">Musixmatch user token</div>
             <div class="desc" style="margin-bottom: 10px">
               Optional. The server mints an anonymous one on demand; your own reaches more of
@@ -252,6 +290,13 @@
               </select>
               <span class="spacer"></span>
               <button class="action" id="cache-remerge">Re-merge stale</button>
+              <button
+                class="action"
+                id="cache-backfill-isrc"
+                title="Every track here that already has a Spotify id can have its exact ISRC looked up, fifty at a time. Needs the Spotify client id and secret."
+              >
+                Fill in missing ISRCs
+              </button>
             </div>
           </div>
 
@@ -308,6 +353,21 @@
             Live. Tokens are stripped before anything is written here, but provider errors
             sometimes quote your request back, so it is still worth not screenshotting.
           </p>
+          <div class="inline" style="margin-bottom: 10px">
+            <input
+              type="search"
+              id="log-search"
+              class="mono"
+              placeholder="Search the log — a word, or a source name"
+            />
+            <select id="log-level" style="width: auto">
+              <option value="debug">everything</option>
+              <option value="info" selected>info and worse</option>
+              <option value="warn">warnings and errors</option>
+              <option value="error">errors only</option>
+            </select>
+            <span class="pill" id="log-live">live</span>
+          </div>
           <div class="card" id="log"></div>
         </section>
 

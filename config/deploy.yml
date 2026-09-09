@@ -108,5 +108,10 @@ env:
     # Optional; every source works without them.
     - BL_SPOTIFY_WEB_TOKEN
     - BL_SP_DC_COOKIE
+
+    # A registered Spotify application, for the public catalogue only. Makes the ISRC and cover art
+    # reliable; `api.spotify.com` rate-limits a web-player token far too hard to depend on.
+    - BL_SPOTIFY_CLIENT_ID
+    - BL_SPOTIFY_CLIENT_SECRET
     - BL_MUSIXMATCH_USER_TOKEN
     - BL_NETEASE_COOKIE
