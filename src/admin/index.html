@@ -50,6 +50,23 @@
             token is skipped rather than queried.
           </p>
           <div id="providers"></div>
+
+          <div class="card" style="margin-top: 16px">
+            <div class="inline">
+              <strong>Test every source</strong>
+              <span class="pill" id="sources-state"></span>
+            </div>
+            <div class="desc" style="margin-top: 4px">
+              Runs a real lookup for <em>Blinding Lights</em> by The Weeknd through every enabled
+              source — the same code path a request from the app takes. The per-source Test above
+              only proves a credential is accepted, which is not the same thing: a token can be
+              accepted and then refused the lyrics.
+            </div>
+            <div class="inline" style="margin-top: 10px">
+              <button class="action primary" id="sources-run">Test the sources</button>
+            </div>
+            <div id="sources-results" style="margin-top: 12px"></div>
+          </div>
         </section>
 
         <!-- ---- tokens ----------------------------------------------------- -->

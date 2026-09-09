@@ -21,6 +21,7 @@ import { Resolver, reparseByFormat } from './resolver.ts';
 import { Refresher } from './refresher.ts';
 import { MERGE_VERSION } from './merge.ts';
 import { PROVIDERS, providerById } from './providers/index.ts';
+import { testSources, TEST_TRACK } from './selftest.ts';
 import { parseTtml, writeTtml } from './format/ttml.ts';
 import { parseLrc, writePlainText } from './format/lrc.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
@@ -220,6 +221,15 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
         log: (level, message) => app.store.log(level, provider.id, message),
       });
       return send(response, 200, result);
+    }
+
+    case 'POST /admin/api/sources': {
+      // Every source, one known track, real lookups. See `selftest.ts` for why this exists
+      // alongside the per-source credential check above.
+      const reports = await testSources(app.store, app.settings.read());
+      const worked = reports.filter((report) => report.ok).length;
+      app.store.log('info', null, `source test: ${worked}/${reports.length} returned lyrics`);
+      return send(response, 200, { track: TEST_TRACK, sources: reports });
     }
 
     case 'GET /admin/api/refresh':

@@ -52,12 +52,59 @@ type RefreshPayload = Partial<Record<SecretName, string>>;
 
 const MAX_OUTPUT_BYTES = 256 * 1024;
 
+/**
+ * How far ahead of a stated expiry to renew.
+ *
+ * Five minutes, comfortably longer than a browser launch takes. Renewing at the moment of expiry
+ * would leave every request during that launch using a token that has already died.
+ */
+const RENEW_MARGIN_MS = 5 * 60_000;
+
+/**
+ * The soonest the schedule will fire again.
+ *
+ * A token that arrives already inside the margin — or a clock that disagrees — must not turn the
+ * schedule into a browser launch every few seconds.
+ */
+const MIN_DELAY_MS = 60_000;
+
+/**
+ * When to renew next, given what the token said and the configured ceiling.
+ *
+ * A free function because the arithmetic is where the edge cases are — an expiry already past, one
+ * further out than the ceiling, one so close that the margin would ask for a negative delay — and
+ * every one of them is a question about numbers rather than about timers or browsers.
+ *
+ * The ceiling still applies. It is no longer the whole schedule, but it bounds how long the server
+ * can go without looking when nothing stated an expiry, which is the case for a refresh command that
+ * reports only a token.
+ */
+export function nextDelayMs(
+  expiresAt: number | null,
+  ceilingMs: number,
+  now: number = Date.now(),
+): number {
+  if (expiresAt === null) return ceilingMs;
+  const ahead = expiresAt - RENEW_MARGIN_MS - now;
+  return Math.min(ceilingMs, Math.max(MIN_DELAY_MS, ahead));
+}
+
 export class Refresher {
   private readonly store: Store;
   private readonly settings: Settings;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private last: RefreshOutcome | null = null;
+
+  /**
+   * When the token in hand expires, as the player stated it. Null when nothing said.
+   *
+   * The schedule was a fixed interval against a lifetime this file assumed was an hour. A live token
+   * was measured at 29 minutes, so the default fifty-minute cycle spent about twenty minutes of every
+   * hour serving a token that had already died — and the fix is not a smaller constant, it is
+   * reading the number the player already provides.
+   */
+  private tokenExpiresAt: number | null = null;
 
   constructor(store: Store, settings: Settings) {
     this.store = store;
@@ -113,28 +160,60 @@ export class Refresher {
       this.store.log(
         'info',
         null,
-        `token refresh armed for every ${minutes} min — ${this.unavailableReason}`,
+        `token refresh armed for at most every ${minutes} min — ${this.unavailableReason}`,
       );
     } else {
-      this.store.log('info', null, `token refresh every ${minutes} min via the ${this.mechanism}`);
+      this.store.log(
+        'info',
+        null,
+        `token refresh at most every ${minutes} min via the ${this.mechanism}, ` +
+          'and sooner when a token says it expires before then',
+      );
       void this.run('boot');
     }
 
-    this.timer = setInterval(
-      () => {
-        // Silent when there is still nothing to do: a log line every fifty minutes saying the same
-        // thing is noise that hides the line that matters.
-        if (this.mechanism === 'none') return;
-        void this.run('schedule');
-      },
-      minutes * 60_000,
-    );
-    // The interval must not be the reason the process cannot exit.
+    this.schedule();
+  }
+
+  /**
+   * Arms the next run: five minutes before the token expires, or the configured interval.
+   *
+   * A self-rescheduling timeout rather than a fixed interval, because the right moment is a property
+   * of the token in hand and is only known once one has been fetched. The interval is the ceiling —
+   * it still bounds how long the server can go without checking when nothing stated an expiry.
+   */
+  private schedule(): void {
+    if (this.timer) clearTimeout(this.timer);
+
+    const delay = this.nextDelayMs();
+    this.timer = setTimeout(() => {
+      // Silent when there is still nothing to do: a log line every interval saying the same thing
+      // is noise that hides the line that matters. It still re-arms, so pasting a cookie later
+      // starts working without a restart.
+      if (this.mechanism === 'none') {
+        this.schedule();
+        return;
+      }
+      void this.run('schedule');
+    }, delay);
+    // The timer must not be the reason the process cannot exit.
     this.timer.unref?.();
   }
 
+  private nextDelayMs(): number {
+    return nextDelayMs(
+      this.tokenExpiresAt,
+      Math.max(5, this.settings.read().tokenRefreshMinutes) * 60_000,
+    );
+  }
+
+  /** When the next scheduled refresh is due, for the admin page. */
+  get nextRefreshAt(): number {
+    return Date.now() + this.nextDelayMs();
+  }
+
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
 
@@ -235,16 +314,22 @@ export class Refresher {
       });
     } finally {
       this.running = false;
+      // Re-armed from whatever this run learned, so a manual refresh moves the schedule too rather
+      // than leaving the next automatic one pointed at the old token's expiry.
+      this.schedule();
     }
   }
 
   private lastHarvestDetail: string | null = null;
 
-  /** The built-in browser harvest. Spotify only — it is the one with an hour-long token. */
+  /** The built-in browser harvest. Spotify only — it is the one with a short-lived token. */
   private async harvest(): Promise<RefreshPayload | null> {
     const cookie = this.settings.read().secrets.spDcCookie ?? '';
     const result = await harvestSpotifyToken(cookie);
     this.lastHarvestDetail = result.detail;
+    // Kept even when the harvest failed: a stale expiry would schedule against a token that is no
+    // longer there, so forgetting it falls back to the interval, which is the right behaviour.
+    this.tokenExpiresAt = result.expiresAt;
     return result.token ? { spotifyWebToken: result.token } : null;
   }
 
@@ -297,6 +382,10 @@ export class Refresher {
     command: string | null;
     chromium: boolean;
     everyMinutes: number;
+    /** When the token in hand expires, as the player stated it. Null when nothing said. */
+    tokenExpiresAt: number | null;
+    /** When the next scheduled refresh is due. */
+    nextRefreshAt: number;
     last: RefreshOutcome | null;
   } {
     const stored = this.store.allSettings();
@@ -320,6 +409,8 @@ export class Refresher {
       command: this.command,
       chromium: chromiumAvailable(),
       everyMinutes: Math.max(5, this.settings.read().tokenRefreshMinutes),
+      tokenExpiresAt: this.tokenExpiresAt,
+      nextRefreshAt: this.nextRefreshAt,
       last,
     };
   }

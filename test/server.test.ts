@@ -1223,6 +1223,35 @@ test('an unknown source cannot be tested', async () => {
   assert.equal(response.status, 400);
 });
 
+test('the source test reports every source, and asks about a real track', async () => {
+  const response = await authed('/admin/api/sources', { method: 'POST' });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+
+  // Fixed on purpose, and the duration is the album version's: the remixes run 216 and 261 seconds,
+  // and duration is how a provider tells them apart.
+  assert.equal(body.track.title, 'Blinding Lights');
+  assert.equal(body.track.artist, 'The Weeknd');
+  assert.equal(body.track.durationMs, 200_046);
+  assert.equal(body.track.spotifyId, '0VjIjW4GlUZAMYd2vXMi3b');
+
+  // Every source appears whether or not it could be asked. A source test that silently omits the
+  // ones it skipped is how "why is Apple not answering" stays unanswered.
+  const ids = body.sources.map((source: { id: string }) => source.id).sort();
+  assert.deepEqual(ids, ['amll', 'apple', 'lrclib', 'musixmatch', 'netease', 'spotify']);
+
+  // All disabled in this harness, so nothing reached the network and every answer says why.
+  for (const source of body.sources) {
+    assert.equal(source.ok, false);
+    assert.equal(source.detail, 'off in settings');
+  }
+});
+
+test('the source test needs the key', async () => {
+  // It causes six outbound lookups, so an unauthenticated caller may not trigger it.
+  assert.equal((await fetch(`${base}/admin/api/sources`, { method: 'POST' })).status, 401);
+});
+
 test('the log is readable and holds no token values', async () => {
   const body = await (await authed('/admin/api/events')).json();
   assert.ok(Array.isArray(body.events));

@@ -193,6 +193,64 @@ function renderProviders() {
   }
 }
 
+// ---- the source test ------------------------------------------------------
+
+/**
+ * Asks every source for one known track and shows what each said.
+ *
+ * Separate from the per-source Test button, which only proves a credential is accepted. The faults
+ * worth finding live in the gap between those two: a token that is accepted and then refused the
+ * lyrics, a cookie that reaches the browser without signing it in, a match that lands just under the
+ * threshold. All of them pass a credential check.
+ */
+$('#sources-run').addEventListener('click', async () => {
+  const button = $('#sources-run');
+  const state = $('#sources-state');
+  const host = $('#sources-results');
+
+  button.disabled = true;
+  button.textContent = 'Asking every source…';
+  state.textContent = '';
+  host.replaceChildren();
+
+  try {
+    const result = await api('/admin/api/sources', { method: 'POST' });
+    const worked = result.sources.filter((source) => source.ok).length;
+    state.textContent = `${worked}/${result.sources.length} returned lyrics`;
+
+    host.append(
+      el('div', {
+        class: 'desc mono',
+        text: `${result.track.artist} — ${result.track.title} · ${result.track.spotifyId}`,
+      }),
+    );
+
+    // Answered first, then the rest: the failures are what anyone opened this to read.
+    const order = [...result.sources].sort((a, b) => Number(b.ok) - Number(a.ok));
+    for (const source of order) {
+      host.append(
+        el('div', { class: 'inline', style: 'margin-top: 8px; align-items: baseline' }, [
+          el('strong', { text: source.label, style: 'min-width: 140px' }),
+          el('span', {
+            text: `${source.ok ? '✓' : '✗'} ${source.detail}`,
+            style: `color: var(--${source.ok ? 'good' : 'bad'})`,
+          }),
+          source.ms ? el('span', { class: 'desc', text: `${source.ms}ms` }) : null,
+          source.learned?.length
+            ? el('span', { class: 'desc', text: `also learned: ${source.learned.join(', ')}` })
+            : null,
+        ]),
+      );
+    }
+  } catch (error) {
+    state.textContent = 'failed';
+    host.append(el('div', { text: `✗ ${error.message}`, style: 'color: var(--bad)' }));
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Test the sources';
+  }
+});
+
 // ---- tokens ---------------------------------------------------------------
 
 /**
@@ -298,7 +356,7 @@ async function loadRefresh() {
     state.textContent = 'never run';
     state.className = 'pill warn';
     detail.textContent =
-      `Scheduled every ${status.everyMinutes} minutes, via the ${status.mechanism}.`;
+      `Scheduled at most every ${status.everyMinutes} minutes, via the ${status.mechanism}.`;
     return;
   }
 
@@ -306,7 +364,20 @@ async function loadRefresh() {
     ? `ok ${when(last.at)} · ${status.mechanism}`
     : `failed ${when(last.at)}`;
   state.className = `pill ${last.ok ? 'good' : 'bad'}`;
-  detail.textContent = last.detail;
+
+  // The token's real lifetime, and the schedule that follows from it. Both are worth showing: the
+  // interval used to be the whole story, against an assumed hour that was actually 29 minutes.
+  const schedule = [];
+  if (status.tokenExpiresAt) {
+    const minutes = Math.round((status.tokenExpiresAt - Date.now()) / 60_000);
+    schedule.push(minutes > 0 ? `token expires in ${minutes} min` : 'token has expired');
+  }
+  if (status.nextRefreshAt) {
+    const minutes = Math.max(0, Math.round((status.nextRefreshAt - Date.now()) / 60_000));
+    schedule.push(`next renewal in ${minutes} min`);
+  }
+
+  detail.textContent = schedule.length > 0 ? `${last.detail} · ${schedule.join(' · ')}` : last.detail;
   detail.style.color = last.ok ? 'var(--muted)' : 'var(--bad)';
 }
 

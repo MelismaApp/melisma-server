@@ -28,6 +28,15 @@ import type { Provider, ProviderAnswer, ProviderContext } from './types.ts';
 
 const LYRICS_BASE = 'https://spclient.wg.spotify.com/color-lyrics/v2/track';
 
+/**
+ * Blinding Lights — the track the source test asks for.
+ *
+ * Fixed, and chosen because it certainly has lyrics: verified live at 200 with 40 line-synced lines
+ * from Musixmatch. That makes an empty answer a statement about the token rather than about the
+ * catalogue, which is the only thing a token test can usefully distinguish.
+ */
+export const TEST_TRACK_ID = '0VjIjW4GlUZAMYd2vXMi3b';
+
 /** The web token is short-lived; caching it saves a round trip per lookup. */
 let webToken: { value: string; expiresAt: number } | null = null;
 
@@ -108,14 +117,21 @@ export const spotify: Provider = {
     });
 
     if (!response.ok) {
-      if (response.status === 401) {
-        // The cached token went stale mid-flight; drop it so the next lookup re-mints.
+      // 400 belongs here with 401, which is not obvious. A token from a signed-out player is
+      // accepted as a credential — no 401 — and then refused the data, because this endpoint needs a
+      // user and there is none. Verified against the live endpoint: with no cookie it answers 400
+      // for `market=from_token`, for `market=US` and for no market at all, so it is not the query;
+      // with a signed-in cookie the same request returns 200. Keeping such a token would mean
+      // failing every lookup until it expired on its own.
+      if (response.status === 401 || response.status === 400) {
         webToken = null;
       }
       // A 404 here is an answer: Spotify has no lyrics for this track. Anything else means the
       // question never got through.
       if (response.status === 404) {
         ctx.log('info', 'spotify: no lyrics for this track');
+      } else if (response.status === 400) {
+        ctx.unreachable('color-lyrics: HTTP 400 — the token is not signed in, so the sp_dc cookie is not working');
       } else {
         ctx.unreachable(`color-lyrics: HTTP ${response.status}`);
       }
@@ -159,7 +175,9 @@ export const spotify: Provider = {
       };
     }
 
-    const probe = await request(`${LYRICS_BASE}/4uLU6hMCjMI75M1A2tKUQC?format=json`, {
+    // A track that certainly has lyrics, so an empty answer is about the token rather than the
+    // catalogue: verified live at 200 with 40 line-synced lines from Musixmatch.
+    const probe = await request(`${LYRICS_BASE}/${TEST_TRACK_ID}?format=json`, {
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${token}`,
@@ -169,6 +187,16 @@ export const spotify: Provider = {
     const ms = Math.round(performance.now() - started);
     if (probe.status === 401 || probe.status === 403) {
       return { ok: false, ms, detail: 'the token has expired — copy a fresh one' };
+    }
+    if (probe.status === 400) {
+      // Not a malformed request, which is what the status looks like. See the note in `fetch`.
+      return {
+        ok: false,
+        ms,
+        detail:
+          'the token is not signed in (400) — the sp_dc cookie is expired or wrong, so the ' +
+          'browser harvested an anonymous token',
+      };
     }
     // A 404 means the token was accepted and that particular track has no lyrics, which is
     // exactly what this test needs to know.
