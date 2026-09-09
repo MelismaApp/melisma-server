@@ -13,7 +13,7 @@
  */
 
 import { MERGE_VERSION, merge, type Candidate, type MergeResult } from './merge.ts';
-import { activeProviders, providerById } from './providers/index.ts';
+import { activeProviders, providerById, type Provider } from './providers/index.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
 import { redact } from './http.ts';
 import type { Config, Settings } from './config.ts';
@@ -90,11 +90,22 @@ function plainTextDocument(body: string): LyricsDocument | null {
   return lines.length > 0 ? document(lines, { kind: 'static' }) : null;
 }
 
+/**
+ * How long to leave a source alone after it could not be reached.
+ *
+ * Six hours. Long enough that a service having a bad day is not asked once per play, short enough
+ * that a token fixed this morning is used this afternoon.
+ */
+const RETRY_UNREACHABLE_MS = 6 * 3_600_000;
+
 export class Resolver {
   private readonly inFlight = new Map<string, Promise<Resolution>>();
 
   /** Tracks already harvested this run. See [harvestOnce]. */
   private readonly harvested = new Set<string>();
+
+  /** Tracks already re-asked this run. See [upgradeOnce]. */
+  private readonly upgraded = new Set<string>();
 
   private readonly store: Store;
   private readonly settings: Settings;
@@ -114,6 +125,11 @@ export class Resolver {
       if (cached) {
         this.store.recordHit(key);
         this.harvestAfter(config, key, track);
+        // Only when there is something to improve on. A cached miss has no document to better, and
+        // `cacheOnly` is a promise not to make requests.
+        if (cached.document && !options.cacheOnly) {
+          this.upgradeAfter(config, key, track);
+        }
         return { ...cached, ms: Math.round(performance.now() - started) };
       }
     }
@@ -175,6 +191,116 @@ export class Resolver {
    */
   private harvestAfter(config: Config, key: string, track: TrackQuery): void {
     void this.harvestOnce(config, key, track);
+  }
+
+  /**
+   * Sources that are worth asking again about a track already in the cache.
+   *
+   * A cached answer used to stand for the full refresh window whatever it was missing, so a track
+   * first played during an outage — or before a source was configured, or before it was enabled —
+   * kept the poorer answer for thirty days. Nothing knew a better one had ever been missed.
+   *
+   * Only two cases qualify, and the rest are deliberately left alone:
+   *
+   * - **Never asked.** No attempt recorded, which means the source was off, unconfigured, or added
+   *   since. It has never had the chance to answer.
+   * - **Could not be reached.** A timeout, a refused token, a 500. The reason may well be gone, and
+   *   after this long it is worth finding out.
+   *
+   * A source that answered "no lyrics for this track" is *not* re-asked. That is a real answer, and
+   * re-asking it on every play would be six wasted requests a song for a result that will not change.
+   * The thirty-day refresh already covers a catalogue that grows.
+   */
+  private staleSources(key: string, config: Config): Provider[] {
+    const attempts = this.store.attemptsFor(key);
+    return activeProviders(config).filter((provider) => {
+      const attempt = attempts.get(provider.id);
+      if (!attempt) return true;
+      if (attempt.outcome !== 'unreachable') return false;
+      return Date.now() - attempt.at > RETRY_UNREACHABLE_MS;
+    });
+  }
+
+  /**
+   * Asks the sources a cached track never got an answer from, then re-merges.
+   *
+   * In the background, and never awaited: the cached answer has already gone back to the caller. The
+   * point is that the *next* play is better, not that this one is slower — asking six sources takes
+   * seconds, and a lookup that already had an answer in hand must not spend them.
+   */
+  private upgradeAfter(config: Config, key: string, track: TrackQuery): void {
+    void this.upgradeOnce(config, key, track);
+  }
+
+  private async upgradeOnce(config: Config, key: string, track: TrackQuery): Promise<void> {
+    // Once per key per run. Repeated plays of the same track must not each start a round of
+    // requests, and a track whose missing source is genuinely missing would otherwise be retried
+    // every time it came round.
+    if (this.upgraded.has(key)) return;
+
+    const stale = this.staleSources(key, config);
+    if (stale.length === 0) return;
+
+    this.upgraded.add(key);
+    // A memo rather than a record, same as `harvested`.
+    if (this.upgraded.size > 4_000) this.upgraded.clear();
+
+    const enriched = this.withKnownIdentity(key, track);
+    let gained = 0;
+
+    await Promise.all(
+      stale.map(async (provider) => {
+        try {
+          const answer = await provider.fetch(enriched, {
+            config,
+            log: (level, message) => this.store.log(level, provider.id, redact(message)),
+            unreachable: (detail) => {
+              this.store.recordAttempt(key, provider.id, 'unreachable');
+              this.store.log('warn', provider.id, redact(detail));
+            },
+            learn: () => {
+              // Left to the lookup and the harvest. An upgrade is about the words; identity and
+              // artwork have their own paths, and writing them from here would duplicate that
+              // logic in a place nobody would think to look for it.
+            },
+          });
+          if (!answer) {
+            this.store.recordAttempt(key, provider.id, 'none');
+            return;
+          }
+          this.store.recordAttempt(key, provider.id, 'lyrics');
+          this.store.putRaw({
+            key,
+            provider: provider.id,
+            body: answer.raw.body,
+            contentType: answer.raw.contentType,
+            ok: true,
+            note: answer.note ?? null,
+          });
+          gained++;
+        } catch (error) {
+          this.store.recordAttempt(key, provider.id, 'unreachable');
+          this.store.log(
+            'warn',
+            provider.id,
+            redact(error instanceof Error ? error.message : String(error)),
+          );
+        }
+      }),
+    );
+
+    if (gained === 0) return;
+
+    // Re-merged from the whole archive rather than merged with what just arrived, so the new source
+    // competes for the spine on the same terms as everything else. Whether it is an improvement is
+    // the merge's decision, which is the only place that knows.
+    if (this.remerge(key, config)) {
+      this.store.log(
+        'info',
+        null,
+        `upgraded ${key} with ${gained} source${gained === 1 ? '' : 's'} that had not answered before`,
+      );
+    }
   }
 
   private async harvestOnce(config: Config, key: string, track: TrackQuery): Promise<void> {
@@ -292,7 +418,18 @@ export class Resolver {
         };
         try {
           const answer = await provider.fetch(track, ctx);
-          if (!answer) return;
+          if (!answer) {
+            // Two very different silences, and the provider has already said which through
+            // `unreachable`. Recording them apart is what lets a later lookup re-ask the one that
+            // failed without pestering the one that simply has no lyrics for this track.
+            this.store.recordAttempt(
+              key,
+              provider.id,
+              unreachable.includes(provider.id) ? 'unreachable' : 'none',
+            );
+            return;
+          }
+          this.store.recordAttempt(key, provider.id, 'lyrics');
 
           this.store.putRaw({
             key,
@@ -313,6 +450,7 @@ export class Resolver {
           const message = error instanceof Error ? error.message : String(error);
           // A thrown error is never an answer about the track.
           unreachable.push(provider.id);
+          this.store.recordAttempt(key, provider.id, 'unreachable');
           this.store.log('error', provider.id, redact(message));
         }
       }),

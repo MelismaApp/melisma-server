@@ -43,6 +43,14 @@ export interface RawResponse {
   note: string | null;
 }
 
+/**
+ * How a source answered when it was last asked about a track.
+ *
+ * `none` is an answer and `unreachable` is not, which is the whole distinction: one is settled and
+ * the other is worth trying again.
+ */
+export type AttemptOutcome = 'lyrics' | 'none' | 'unreachable';
+
 /** A JSON column read back, or null if it was empty or unreadable. */
 function parseJson(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'string' || !value) return null;
@@ -223,6 +231,24 @@ export class Store {
         fetched_at   INTEGER NOT NULL,
         ok           INTEGER NOT NULL DEFAULT 1,
         note         TEXT,
+        PRIMARY KEY (key, provider)
+      );
+
+      -- What each source said last time it was asked about a track.
+      --
+      -- The archive above only holds answers, so it cannot distinguish a source that was asked and
+      -- had nothing from one that could not be reached — and those want opposite treatment. "No
+      -- lyrics here" is a real answer and re-asking it every play is six wasted requests; a timeout
+      -- or a refused token is worth another go, because the reason it failed may be gone.
+      --
+      -- Without this, a track cached during an outage kept the answer it managed to get for the full
+      -- thirty days, and nothing knew a better one had ever been missed.
+      CREATE TABLE IF NOT EXISTS attempts (
+        key      TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        -- 'lyrics' | 'none' | 'unreachable'
+        outcome  TEXT NOT NULL,
+        at       INTEGER NOT NULL,
         PRIMARY KEY (key, provider)
       );
 
@@ -800,6 +826,38 @@ export class Store {
       ok: Boolean(row.ok),
       note: (row.note as string | null) ?? null,
     }));
+  }
+
+  // ---- what each source said ---------------------------------------------
+
+  /**
+   * Records how a source answered, so a later lookup can tell a real "nothing here" from a failure.
+   *
+   * One row per source per track, overwritten: only the latest outcome matters, and keeping a history
+   * would grow without bound for a question nobody asks.
+   */
+  recordAttempt(key: string, provider: string, outcome: AttemptOutcome): void {
+    this.db
+      .prepare(
+        `INSERT INTO attempts (key, provider, outcome, at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(key, provider) DO UPDATE SET
+           outcome = excluded.outcome,
+           at = excluded.at`,
+      )
+      .run(key, provider, outcome, Date.now());
+  }
+
+  attemptsFor(key: string): Map<string, { outcome: AttemptOutcome; at: number }> {
+    const rows = this.db
+      .prepare('SELECT provider, outcome, at FROM attempts WHERE key = ?')
+      .all(key) as Record<string, unknown>[];
+    return new Map(
+      rows.map((row) => [
+        row.provider as string,
+        { outcome: row.outcome as AttemptOutcome, at: row.at as number },
+      ]),
+    );
   }
 
   // ---- log ---------------------------------------------------------------
