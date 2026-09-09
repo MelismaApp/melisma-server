@@ -45,6 +45,15 @@ export interface HarvestResult {
  */
 const MIN_TOKEN_LENGTH = 100;
 
+/**
+ * How long a token is assumed to last when the reply that issued it could not be read.
+ *
+ * Twenty minutes, under the twenty-nine measured from a live token, because the cost of being wrong is
+ * asymmetric: guess short and there is an extra harvest, guess long and every request in between uses
+ * a token that has already died. The same reasoning, and the same number, as the app's fallback.
+ */
+const ASSUMED_LIFETIME_MS = 20 * 60_000;
+
 /** What the player's `/api/token` reply says about the session it just got. */
 export interface TokenPayload {
   anonymous: boolean | null;
@@ -219,14 +228,19 @@ export async function harvestSpotifyToken(
     }
 
     if (headerToken) {
-      // The header without the reply. Usable, but nothing said when it dies or whether the session
-      // is signed in — so the refresher falls back to its interval.
+      // The header without the reply. Usable, but nothing said when it dies or whether the session is
+      // signed in.
+      //
+      // Given a short assumed lifetime rather than none, because "none" means the refresher falls back
+      // to its ceiling — fifty minutes by default — against tokens measured at twenty-nine. That is
+      // the stale-token window this whole change set exists to close, and leaving it open here would
+      // reopen it for exactly the case where least is known.
       return {
         token: headerToken,
-        expiresAt: null,
+        expiresAt: Date.now() + ASSUMED_LIFETIME_MS,
         detail:
           `harvested a token of ${headerToken.length} characters from the request header; the ` +
-          'token reply could not be read, so its expiry is unknown',
+          `token reply could not be read, so it is assumed to last ${ASSUMED_LIFETIME_MS / 60_000} min`,
       };
     }
 

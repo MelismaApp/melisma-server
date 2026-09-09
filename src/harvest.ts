@@ -85,7 +85,9 @@ export async function harvest(
   ).catch(() => null);
   if (spotify) results.push(spotify);
 
-  const apple = await fromApple(config, track).catch(() => null);
+  const apple = await fromApple(config, track, (level, message) =>
+    store.log(level, 'applemusic', message),
+  ).catch(() => null);
   if (apple) results.push(apple);
 
   for (const result of results) {
@@ -133,27 +135,34 @@ async function fromSpotify(
   log: (level: LogLevel, message: string) => void,
 ): Promise<Harvest | null> {
   const token = pastedToken(config.secrets.spotifyWebToken);
-  if (!token) return null;
 
-  // The player's own credential, for the player's own service.
-  const playerHeaders = {
-    Accept: 'application/json',
-    Authorization: `Bearer ${token}`,
-    'App-Platform': 'WebPlayer',
-    'User-Agent': WEB_UA,
-  };
-
-  // And a registered application's token for the public catalogue, when one is configured. This is
-  // the whole reason the ISRC is obtainable at all: `api.spotify.com` rate-limits a web-player token
-  // hard, so without an app token this call is a coin toss. With one it has documented quotas.
-  //
-  // Falls back to the player token rather than skipping the call — that is what it did before app
-  // credentials existed, and a coin toss beats nothing.
+  // A registered application's token for the public catalogue, when one is configured. This is the
+  // whole reason the ISRC is obtainable at all: `api.spotify.com` rate-limits a web-player token
+  // hard, so without an app token that call is a coin toss. With one it has documented quotas.
   const app = await spotifyAppToken(config);
   if (app.detail) log('warn', app.detail);
+
+  // Either credential is enough to be worth starting, and they buy different things — so requiring
+  // both was wrong. Configuring only a client id and secret left this returning immediately while the
+  // admin page said the application was in use, which is the most confusing pair of facts available.
+  if (!token && !app.token) return null;
+
+  // The player's own credential, for the player's own service. `spclient` does not accept an
+  // application token, so without this the analysis is simply not asked for.
+  const playerHeaders = token
+    ? {
+        Accept: 'application/json',
+        Authorization: `Bearer ${token}`,
+        'App-Platform': 'WebPlayer',
+        'User-Agent': WEB_UA,
+      }
+    : null;
+
+  // Falls back to the player token rather than skipping the call — that is what it did before app
+  // credentials existed, and a coin toss beats nothing.
   const catalogueHeaders = app.token
     ? { Accept: 'application/json', Authorization: `Bearer ${app.token}` }
-    : playerHeaders;
+    : playerHeaders!;
 
   // No id from the caller — a local file, or another music app. Searching for one is only reasonable
   // with an app token, since the endpoint is on the host that rate-limits a web-player token; without
@@ -183,12 +192,21 @@ async function fromSpotify(
     // The internal analysis endpoint, not the public one — the public `audio-features` was
     // restricted to apps that already had extended access, so this is the only way to it. A 404
     // here is an answer: Spotify has no analysis for plenty of tracks, and for those it never will.
-    json<Record<string, unknown>>(
-      `${SPOTIFY_INTERNAL}/audio-attributes/v1/audio-analysis/${spotifyId}?${query({
-        format: 'json',
-      })}`,
-      { headers: playerHeaders },
-    ),
+    //
+    // Skipped without a player token, since `spclient` will not take an application one. Reported as
+    // status 0 so the branches below read it as "did not answer" rather than as a definitive 404,
+    // which would retire the track's tempo on the strength of a call never made.
+    playerHeaders
+      ? json<Record<string, unknown>>(
+          `${SPOTIFY_INTERNAL}/audio-attributes/v1/audio-analysis/${spotifyId}?${query({
+            format: 'json',
+          })}`,
+          { headers: playerHeaders },
+        )
+      : Promise.resolve({
+          value: null,
+          result: { ok: false, status: 0, body: '', contentType: '', ms: 0 },
+        }),
   ]);
 
   const found = details.value;
@@ -208,7 +226,9 @@ async function fromSpotify(
   } else if (!found?.id) {
     log('debug', `spotify track lookup returned HTTP ${details.result.status}`);
   }
-  if (analysis.result.status === 429) {
+  if (analysis.result.status === 0 && !playerHeaders) {
+    log('debug', 'no Spotify web token, so the audio analysis was not asked for');
+  } else if (analysis.result.status === 429) {
     log('warn', 'spotify rate-limited the audio analysis (429) — no tempo for this track');
   } else if (analysis.result.status === 404) {
     // Not a fault: Spotify has no analysis for a great many recordings, and never will for those.
@@ -240,9 +260,14 @@ async function fromSpotify(
   // Spotify has no analysis for a great many recordings and never will, so the tempo is asked for
   // elsewhere when it has none. Both of these are free and unauthenticated; neither is asked at all
   // when Spotify already answered.
+  //
+  // Only on a **404**, which is Spotify saying it has nothing rather than failing to answer. That
+  // distinction decides whether Spotify is ever asked again: a stored `analysis` satisfies the
+  // harvest's skip guard, so recording features after a 429 or a dropped connection would retire the
+  // track with no beat grid for good. A 404 will not change, so retiring it there is correct.
   let features: Record<string, unknown> | null = null;
   let fallbackTempo: number | null = null;
-  if (tempo === null) {
+  if (tempo === null && analysis.result.status === 404) {
     const recco = await fromReccoBeats(spotifyId);
     if (recco) {
       fallbackTempo = recco.tempo;
@@ -332,8 +357,11 @@ export async function backfillIsrc(
   const headers = { Accept: 'application/json', Authorization: `Bearer ${app.token}` };
   let found = 0;
   let missing = 0;
+  let looked = 0;
+  let stopped: string | null = null;
 
   for (const entry of pending) {
+    looked++;
     const result = await json<SpotifyTrack>(`${SPOTIFY_API}/tracks/${entry.spotifyId}`, { headers });
 
     const isrc = result.value?.external_ids?.isrc;
@@ -357,16 +385,20 @@ export async function backfillIsrc(
 
     // Anything else stops the run rather than grinding through the rest against a closed door.
     const said = redact(result.result.body ?? '').slice(0, 160).replace(/\s+/g, ' ');
-    log('warn', `ISRC backfill stopped at HTTP ${result.result.status}: ${said}`);
+    stopped = `stopped at HTTP ${result.result.status}: ${said}`;
+    log('warn', `ISRC backfill ${stopped}`);
     break;
   }
 
   log(
     'info',
-    `ISRC backfill: ${found} of ${pending.length} tracks now have one` +
-      (missing > 0 ? `, ${missing} are not in the public catalogue` : ''),
+    `ISRC backfill: ${found} of ${looked} tracks now have one` +
+      (missing > 0 ? `, ${missing} are not in the public catalogue` : '') +
+      (looked < pending.length ? `, ${pending.length - looked} not reached` : ''),
   );
-  return { looked: pending.length, found, missing, skipped: null };
+  // `looked` is what was actually asked about rather than what was queued: reporting the queue length
+  // after breaking early presented an interrupted run as a finished one.
+  return { looked, found, missing, skipped: stopped };
 }
 
 /**
@@ -585,7 +617,11 @@ function compactAnalysis(analysis: Record<string, unknown>): Record<string, unkn
  * is not scored here — the caller has already decided which recording this is, and the lyrics
  * provider does the scoring where it matters. What this can get wrong is a cover, not a lyric.
  */
-async function fromApple(config: Config, track: TrackQuery): Promise<Harvest | null> {
+async function fromApple(
+  config: Config,
+  track: TrackQuery,
+  log: (level: LogLevel, message: string) => void,
+): Promise<Harvest | null> {
   const token = config.secrets.appleBearerToken?.trim();
   if (!token || !track.title) return null;
 
@@ -632,9 +668,11 @@ async function fromApple(config: Config, track: TrackQuery): Promise<Harvest | n
 
   if (!song?.attributes || best < MATCH_THRESHOLD) {
     if (candidates.length > 0) {
-      store.log(
+      // `store` was never a parameter here, so this threw a ReferenceError that the caller's `catch`
+      // swallowed — the branch still returned null, so the only casualty was the diagnostic it
+      // exists to produce.
+      log(
         'info',
-        'applemusic',
         `harvest: ${candidates.length} results for "${term}", best scored ${best.toFixed(2)} — ` +
           'not recording an identity from that',
       );

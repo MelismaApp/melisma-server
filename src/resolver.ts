@@ -104,8 +104,8 @@ export class Resolver {
   /** Tracks already harvested this run. See [harvestOnce]. */
   private readonly harvested = new Set<string>();
 
-  /** Tracks already re-asked this run. See [upgradeOnce]. */
-  private readonly upgraded = new Set<string>();
+  /** Tracks with an upgrade in flight right now. See [upgradeOnce]. */
+  private readonly upgrading = new Set<string>();
 
   private readonly store: Store;
   private readonly settings: Settings;
@@ -213,9 +213,16 @@ export class Resolver {
    */
   private staleSources(key: string, config: Config): Provider[] {
     const attempts = this.store.attemptsFor(key);
+
+    // The archive counts as an attempt. `attempts` began empty on every database that already had a
+    // cache, so the first hit after an upgrade treated every source as never asked — and re-fetched
+    // ones whose answers were sitting in `raw`, spending rate limit to learn what was already known.
+    // A stored body is proof the source answered with lyrics, which is exactly what the table records.
+    const archived = new Set(this.store.getRaw(key).map((raw) => raw.provider));
+
     return activeProviders(config).filter((provider) => {
       const attempt = attempts.get(provider.id);
-      if (!attempt) return true;
+      if (!attempt) return !archived.has(provider.id);
       if (attempt.outcome !== 'unreachable') return false;
       return Date.now() - attempt.at > RETRY_UNREACHABLE_MS;
     });
@@ -233,20 +240,39 @@ export class Resolver {
   }
 
   private async upgradeOnce(config: Config, key: string, track: TrackQuery): Promise<void> {
-    // Once per key per run. Repeated plays of the same track must not each start a round of
-    // requests, and a track whose missing source is genuinely missing would otherwise be retried
-    // every time it came round.
-    if (this.upgraded.has(key)) return;
+    // In flight, not "already tried". This used to be a memo held for the life of the process, which
+    // silently outranked the six-hour cooldown it was supposed to complement: a source that was still
+    // unreachable on the first attempt was never asked again until a restart, however long the server
+    // ran. The cooldown in `staleSources` is what stops repeated plays becoming repeated requests;
+    // this only stops two lookups for the same track overlapping.
+    if (this.upgrading.has(key)) return;
 
     const stale = this.staleSources(key, config);
     if (stale.length === 0) return;
 
-    this.upgraded.add(key);
-    // A memo rather than a record, same as `harvested`.
-    if (this.upgraded.size > 4_000) this.upgraded.clear();
+    this.upgrading.add(key);
+    try {
+      await this.runUpgrade(config, key, track, stale);
+    } finally {
+      this.upgrading.delete(key);
+    }
+  }
+
+  private async runUpgrade(
+    config: Config,
+    key: string,
+    track: TrackQuery,
+    stale: Provider[],
+  ): Promise<void> {
 
     const enriched = this.withKnownIdentity(key, track);
     let gained = 0;
+
+    // Which providers said they could not be reached, so the record is not overwritten below. Exactly
+    // as `fetchAndMerge` does it: a provider reports a failure through `unreachable` and *then*
+    // returns null, so writing 'none' on the null would turn every outage into a settled "no lyrics
+    // here" — and `staleSources` never retries those.
+    const unreachable = new Set<string>();
 
     await Promise.all(
       stale.map(async (provider) => {
@@ -255,6 +281,7 @@ export class Resolver {
             config,
             log: (level, message) => this.store.log(level, provider.id, redact(message)),
             unreachable: (detail) => {
+              unreachable.add(provider.id);
               this.store.recordAttempt(key, provider.id, 'unreachable');
               this.store.log('warn', provider.id, redact(detail));
             },
@@ -265,7 +292,9 @@ export class Resolver {
             },
           });
           if (!answer) {
-            this.store.recordAttempt(key, provider.id, 'none');
+            if (!unreachable.has(provider.id)) {
+              this.store.recordAttempt(key, provider.id, 'none');
+            }
             return;
           }
           this.store.recordAttempt(key, provider.id, 'lyrics');

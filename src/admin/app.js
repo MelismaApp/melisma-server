@@ -649,7 +649,10 @@ function cachedPills(row) {
   if (!row.extrasFields.includes('tempo')) {
     absent.push(['tempo', 'no tempo — Spotify is the only source for it']);
   }
-  if (!row.extrasFields.includes('analysis')) {
+  // By prefix, not equality: a full analysis is labelled `analysis + beats/bars/…`, so an exact
+  // match was false for precisely the richest records — which then showed a green analysis pill and a
+  // dashed "no analysis" pill at the same time.
+  if (!row.extrasFields.some((field) => field.startsWith('analysis'))) {
     absent.push(['analysis', 'no audio analysis — Spotify has none for many tracks, and never will']);
   }
   for (const [text, title] of absent) {

@@ -203,6 +203,104 @@ test('a source that could not be reached is recorded as such, not as an answer',
   assert.equal(wordLevelAsked, before, 'the retry is on a timer, not on the next play');
 });
 
+test('a source that could not be reached is not recorded as having no lyrics', async () => {
+  // The distinction the whole `attempts` table exists for, and the easiest one to lose: a provider
+  // reports a failure through `unreachable` and *then* returns null, so writing 'none' on the null
+  // turns every outage into a settled "no lyrics here" — which `staleSources` never retries.
+  const flaky: Provider = {
+    ...wordLevel,
+    fetch: async (_track, ctx) => {
+      wordLevelAsked++;
+      ctx.unreachable('a 502 from the source');
+      return null;
+    },
+  };
+  PROVIDERS.length = 0;
+  PROVIDERS.push(lineTimed, flaky);
+  settings.update({ 'provider.netease.enabled': '0' });
+
+  await resolver.resolve(TRACK);
+  settings.update({ 'provider.netease.enabled': '1' });
+  await resolver.resolve(TRACK);
+  assert.ok(await until(() => wordLevelAsked > 0), 'the upgrade should have asked it');
+
+  assert.equal(
+    store.attemptsFor(cacheKey(TRACK)).get('netease')?.outcome,
+    'unreachable',
+    'reporting unreachable and then returning null must not read as "nothing here"',
+  );
+});
+
+test('an upgrade attempt does not retire the track for the life of the process', async () => {
+  // The memo used to be held per key until restart, which silently outranked the six-hour cooldown it
+  // was meant to complement: one attempt and the track was never reconsidered, however long the
+  // server ran and whatever changed in the meantime.
+  let secondAsked = 0;
+  const second: Provider = {
+    ...wordLevel,
+    id: 'musixmatch',
+    fetch: async () => {
+      secondAsked++;
+      return { doc: syllableDoc(), match: 1, raw: { body: 'syllable', contentType: 'text/plain' } };
+    },
+  };
+  PROVIDERS.length = 0;
+  PROVIDERS.push(lineTimed, wordLevel, second);
+  settings.update({ 'provider.netease.enabled': '0', 'provider.musixmatch.enabled': '0' });
+
+  await resolver.resolve(TRACK);
+
+  // One source switched on, upgraded, done. Waiting for the *merge* rather than the request, because
+  // the in-flight guard makes a lookup during an upgrade a no-op — correctly, but it means asking
+  // again too early proves nothing.
+  settings.update({ 'provider.netease.enabled': '1' });
+  await resolver.resolve(TRACK);
+  const key = cacheKey(TRACK);
+  assert.ok(
+    await until(() => {
+      const merged = store.getEntry(key)?.merged;
+      return Boolean(merged && (JSON.parse(merged) as { kind: string }).kind === 'syllable');
+    }),
+    'the first upgrade should have finished',
+  );
+
+  // Now another. The key has already been through an upgrade, and that must not be the end of it.
+  settings.update({ 'provider.musixmatch.enabled': '1' });
+  await resolver.resolve(TRACK);
+  assert.ok(
+    await until(() => secondAsked > 0),
+    'a source enabled after an earlier upgrade should still be asked',
+  );
+});
+
+test('an archived answer counts as having been asked', async () => {
+  // Every database that already had a cache started with an empty `attempts` table, so the first hit
+  // after this upgrade treated every source as never asked — and re-fetched ones whose answers were
+  // already in `raw`, spending rate limit to learn what was on disk.
+  const key = cacheKey(TRACK);
+
+  // Disabled for the lookup, so no attempt is recorded for it: the state an older database is in.
+  settings.update({ 'provider.netease.enabled': '0' });
+  await resolver.resolve(TRACK);
+  assert.equal(store.attemptsFor(key).get('netease'), undefined, 'no attempt should exist yet');
+
+  // But its answer is on disk, as it would be for anything cached before the table existed.
+  store.putRaw({
+    key,
+    provider: 'netease',
+    body: 'syllable',
+    contentType: 'text/plain',
+    ok: true,
+    note: null,
+  });
+
+  settings.update({ 'provider.netease.enabled': '1' });
+  const before = wordLevelAsked;
+  await resolver.resolve(TRACK);
+  await until(() => wordLevelAsked > before, 300);
+  assert.equal(wordLevelAsked, before, 'a source with an archived answer must not be re-asked');
+});
+
 test('a cache-only lookup makes no requests', async () => {
   await resolver.resolve(TRACK);
   settings.update({ 'provider.netease.enabled': '1' });
