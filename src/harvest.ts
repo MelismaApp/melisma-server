@@ -28,12 +28,19 @@
 import type { Config } from './config.ts';
 import type { Store } from './db.ts';
 import { json, query } from './http.ts';
-import type { TrackQuery } from './match.ts';
+import { MATCH_THRESHOLD, score, type TrackQuery } from './match.ts';
 import { pastedToken } from './providers/spotify.ts';
 
 const SPOTIFY_API = 'https://api.spotify.com/v1';
 const SPOTIFY_INTERNAL = 'https://spclient.wg.spotify.com';
-const APPLE_API = 'https://amp-api.music.apple.com';
+/**
+ * Apple's default host.
+ *
+ * Only the default: `config.appleApiBase` is what is actually called, so an override set for a
+ * proxy or a test reaches the harvest too. The lyrics provider already honoured it, and a harvest
+ * that quietly went straight to production made the setting a half-truth.
+ */
+const APPLE_API_DEFAULT = 'https://amp-api.music.apple.com';
 
 const WEB_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ' +
@@ -233,10 +240,11 @@ async function fromApple(config: Config, track: TrackQuery): Promise<Harvest | n
     Referer: 'https://music.apple.com/',
   };
   const storefront = config.appleStorefront || 'us';
+  const base = config.appleApiBase || APPLE_API_DEFAULT;
 
   const term = `${track.title} ${track.artist}`.trim();
   const search = await json<AppleSearch>(
-    `${APPLE_API}/v1/catalog/${storefront}/search?${query({
+    `${base}/v1/catalog/${storefront}/search?${query({
       term,
       types: 'songs',
       limit: 5,
@@ -244,13 +252,44 @@ async function fromApple(config: Config, track: TrackQuery): Promise<Harvest | n
     { headers },
   );
 
-  const song = search.value?.results?.songs?.data?.[0];
-  if (!song?.attributes) return null;
+  // Scored, not taken on trust. An unscored first result is fine for artwork — a wrong cover is a
+  // cosmetic annoyance — but this call also reports an ISRC, and `noteIdentity` keeps the first
+  // ISRC it is given. A remaster, a live take or a cover sitting at the top of the results would
+  // pin the wrong recording permanently, and every later lookup would treat it as an exact match.
+  const candidates = search.value?.results?.songs?.data ?? [];
+  let song: (typeof candidates)[number] | undefined;
+  let best = 0;
+  for (const candidate of candidates) {
+    const attributes = candidate.attributes;
+    if (!attributes) continue;
+    const scored = score(
+      track,
+      attributes.name ?? '',
+      attributes.artistName ?? '',
+      attributes.durationInMillis ?? 0,
+    );
+    if (scored > best) {
+      best = scored;
+      song = candidate;
+    }
+  }
+
+  if (!song?.attributes || best < MATCH_THRESHOLD) {
+    if (candidates.length > 0) {
+      store.log(
+        'info',
+        'applemusic',
+        `harvest: ${candidates.length} results for "${term}", best scored ${best.toFixed(2)} — ` +
+          'not recording an identity from that',
+      );
+    }
+    return null;
+  }
   const attributes = song.attributes;
 
   const artistId = song.relationships?.artists?.data?.[0]?.id;
   const artistImageUrl = artistId
-    ? await appleArtistImage(storefront, artistId, headers).catch(() => null)
+    ? await appleArtistImage(base, storefront, artistId, headers).catch(() => null)
     : null;
 
   return {
@@ -283,13 +322,14 @@ async function fromApple(config: Config, track: TrackQuery): Promise<Harvest | n
 }
 
 async function appleArtistImage(
+  base: string,
   storefront: string,
   artistId: string,
   headers: Record<string, string>,
 ): Promise<string | null> {
   const artist = await json<{
     data?: Array<{ attributes?: { artwork?: { url?: string } } }>;
-  }>(`${APPLE_API}/v1/catalog/${storefront}/artists/${artistId}`, { headers });
+  }>(`${base}/v1/catalog/${storefront}/artists/${artistId}`, { headers });
   return artist.value?.data?.[0]?.attributes?.artwork?.url ?? null;
 }
 

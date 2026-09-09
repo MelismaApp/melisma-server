@@ -322,13 +322,20 @@ export class Store {
    * contribution must not blank a tempo an earlier Spotify one supplied. A field is only
    * overwritten when the new value is actually there.
    */
-  saveExtras(entry: Omit<ExtrasEntry, 'updatedAt'>): void {
+  saveExtras(entry: Partial<Omit<ExtrasEntry, 'updatedAt'>> & { key: string }): void {
     const now = Date.now();
     const blob = (value: unknown): string | null => {
       if (!value || typeof value !== 'object') return null;
       const keys = Object.keys(value as Record<string, unknown>);
       return keys.length ? JSON.stringify(value) : null;
     };
+
+    // Every optional field is normalised to null here rather than trusted to arrive.
+    // `node:sqlite` refuses to bind `undefined`, so a caller that reports only what it happens to
+    // know — which is every provider — threw. Inside a provider's `fetch` that throw was caught as
+    // a provider failure, so the source was marked unreachable and its lyrics discarded: a missing
+    // tempo silently cost a whole set of words. Six call sites can each forget; this cannot.
+    const value = <T>(given: T | null | undefined): T | null => given ?? null;
 
     this.db
       .prepare(
@@ -337,30 +344,51 @@ export class Store {
             palette, analysis, metadata, source, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET
+           -- Only ever filled in: whoever knew a field first keeps it, so write order does not
+           -- decide the answer.
+           title            = CASE WHEN excluded.title  <> '' THEN excluded.title
+                                   ELSE extras.title END,
+           artist           = CASE WHEN excluded.artist <> '' THEN excluded.artist
+                                   ELSE extras.artist END,
            cover_url        = COALESCE(excluded.cover_url, extras.cover_url),
            artist_image_url = COALESCE(excluded.artist_image_url, extras.artist_image_url),
            tempo            = COALESCE(excluded.tempo, extras.tempo),
            isrc             = COALESCE(extras.isrc, excluded.isrc),
            duration_ms      = COALESCE(extras.duration_ms, excluded.duration_ms),
-           palette          = COALESCE(excluded.palette, extras.palette),
-           analysis         = COALESCE(excluded.analysis, extras.analysis),
-           metadata         = COALESCE(excluded.metadata, extras.metadata),
-           source           = excluded.source,
+           -- Merged key by key, not replaced. The sources know different things — Spotify has the
+           -- tempo and the album ids, Apple the songwriter and the palette — and they finish in
+           -- parallel, so replacing the blob meant whichever landed last erased the other. Keys
+           -- already present win, for the same reason the scalars above do.
+           -- NULLIF because merging two absent blobs yields '{}', not null — which would read as
+           -- "an analysis is present" and hide the track from the list of ones still missing it.
+           palette          = NULLIF(json_patch(COALESCE(excluded.palette, '{}'),
+                                                COALESCE(extras.palette, '{}')), '{}'),
+           analysis         = NULLIF(json_patch(COALESCE(excluded.analysis, '{}'),
+                                                COALESCE(extras.analysis, '{}')), '{}'),
+           metadata         = NULLIF(json_patch(COALESCE(excluded.metadata, '{}'),
+                                                COALESCE(extras.metadata, '{}')), '{}'),
+           -- Every source that has contributed, rather than only the most recent one.
+           source           = CASE
+                                WHEN extras.source = '' THEN excluded.source
+                                WHEN excluded.source = '' THEN extras.source
+                                WHEN instr(extras.source, excluded.source) > 0 THEN extras.source
+                                ELSE extras.source || '+' || excluded.source
+                              END,
            updated_at       = excluded.updated_at`,
       )
       .run(
         entry.key,
-        entry.title,
-        entry.artist,
-        entry.coverUrl,
-        entry.artistImageUrl,
-        entry.tempo,
-        entry.isrc,
-        entry.durationMs,
+        entry.title ?? '',
+        entry.artist ?? '',
+        value(entry.coverUrl),
+        value(entry.artistImageUrl),
+        value(entry.tempo),
+        value(entry.isrc),
+        value(entry.durationMs),
         blob(entry.palette),
         blob(entry.analysis),
         blob(entry.metadata),
-        entry.source,
+        entry.source ?? '',
         now,
         now,
       );
@@ -722,6 +750,13 @@ export class Store {
       // Spotify withdrew this endpoint from the public API, so what is stored is the only copy.
       withAnalysis: count('SELECT COUNT(*) AS n FROM extras WHERE analysis IS NOT NULL'),
       bytes:
+        // The analysis blob alone can be hundreds of kilobytes a track, so leaving the extras out
+        // understated the whole cache.
+        count(
+          'SELECT COALESCE(SUM(' +
+            'LENGTH(COALESCE(palette, \'\')) + LENGTH(COALESCE(analysis, \'\')) + ' +
+            'LENGTH(COALESCE(metadata, \'\'))), 0) AS n FROM extras',
+        ) +
         count('SELECT COALESCE(SUM(LENGTH(merged)), 0) AS n FROM entries') +
         count('SELECT COALESCE(SUM(LENGTH(body)), 0) AS n FROM raw'),
     };

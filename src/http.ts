@@ -38,7 +38,9 @@ const MIN_INTERVAL_MS: Record<string, number> = {
   'lrclib.net': 350,
   'api.amll.dev': 350,
   'music.163.com': 250,
-  'apic-desktop.musixmatch.com': 500,
+  // The desktop host is discontinued; the Android player's is what works. Keyed by the host that
+  // is actually called, or the interval silently reverts to the default.
+  'apic.musixmatch.com': 500,
   'amp-api.music.apple.com': 200,
   'spclient.wg.spotify.com': 200,
   'open.spotify.com': 200,

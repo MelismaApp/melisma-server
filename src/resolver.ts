@@ -184,8 +184,16 @@ export class Resolver {
     if (this.harvested.size > 4_000) this.harvested.clear();
 
     try {
+      // What the harvest adds that a provider cannot: Spotify's audio analysis and an artist
+      // image, both of which need requests nobody makes while looking for words. So the question
+      // is whether *those* are present — not whether an extras row exists at all.
+      //
+      // Any provider reporting a palette or an album name creates that row mid-lookup, and Apple's
+      // report includes an ISRC, so the old guard treated the commonest successful path as already
+      // harvested and never collected the analysis at all. Which is the one thing here that cannot
+      // be fetched later: Spotify withdrew the endpoint.
       const already = this.store.extras(key);
-      if (already && this.store.isrcFor(key)) return;
+      if (already?.analysis && already.artistImageUrl && this.store.isrcFor(key)) return;
       await harvest(this.store, config, key, track);
     } catch {
       // Best effort by definition.
@@ -265,16 +273,18 @@ export class Resolver {
               extras.analysis ||
               extras.metadata
             ) {
+              // Only what this provider knows. Anything absent is left alone rather than written
+              // as null, so a source with a palette cannot erase another's tempo.
               this.store.saveExtras({
                 key,
                 title: track.title,
                 artist: track.artist,
-                coverUrl: extras.coverUrl ?? null,
-                artistImageUrl: extras.artistImageUrl ?? null,
-                tempo: extras.tempo ?? null,
-                palette: extras.palette ?? null,
-                analysis: extras.analysis ?? null,
-                metadata: extras.metadata ?? null,
+                coverUrl: extras.coverUrl,
+                artistImageUrl: extras.artistImageUrl,
+                tempo: extras.tempo,
+                palette: extras.palette,
+                analysis: extras.analysis,
+                metadata: extras.metadata,
                 source: provider.id,
               });
             }

@@ -103,14 +103,28 @@ export class Refresher {
    * next run.
    */
   start(): void {
-    if (this.mechanism === 'none') return;
     const minutes = Math.max(5, this.settings.read().tokenRefreshMinutes);
 
-    this.store.log('info', null, `token refresh every ${minutes} min via the ${this.mechanism}`);
-    void this.run('boot');
+    // The timer is installed whether or not anything can run yet, and each tick decides for
+    // itself. The documented setup is "boot the server, then paste a cookie into the admin page" —
+    // and returning early on a cookie-less boot meant that flow never scheduled anything. The
+    // status said "browser", a manual run worked, and the token then quietly expired an hour later.
+    if (this.mechanism === 'none') {
+      this.store.log(
+        'info',
+        null,
+        `token refresh armed for every ${minutes} min — ${this.unavailableReason}`,
+      );
+    } else {
+      this.store.log('info', null, `token refresh every ${minutes} min via the ${this.mechanism}`);
+      void this.run('boot');
+    }
 
     this.timer = setInterval(
       () => {
+        // Silent when there is still nothing to do: a log line every fifty minutes saying the same
+        // thing is noise that hides the line that matters.
+        if (this.mechanism === 'none') return;
         void this.run('schedule');
       },
       minutes * 60_000,
@@ -183,6 +197,22 @@ export class Refresher {
         const value = payload[name]?.trim();
         if (!value || value === current[name]) continue;
         this.settings.update({ [`secret.${name}`]: value });
+
+        // An environment variable normally outranks the stored value, which is right for a setting
+        // somebody chose deliberately and wrong for a token that has just been replaced: the
+        // refresh would report success while every provider carried on using the expired value
+        // from boot. Dropping it here makes the freshly stored one authoritative. The deployment
+        // sets `BL_SPOTIFY_WEB_TOKEN` as a starting value precisely so this happens.
+        const environmentName = `BL_${name.replace(/[A-Z]/g, (c) => `_${c}`).toUpperCase()}`;
+        if (process.env[environmentName]) {
+          delete process.env[environmentName];
+          this.store.log(
+            'info',
+            null,
+            `${environmentName} is now stale and has been dropped in favour of the refreshed value`,
+          );
+        }
+
         updated.push(name);
       }
 

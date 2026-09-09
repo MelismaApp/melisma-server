@@ -1107,6 +1107,55 @@ test('an external command overrides the built-in harvest', async () => {
   }
 });
 
+test('a refreshed token wins over the value the server booted with', async () => {
+  // The documented deployment sets BL_SPOTIFY_WEB_TOKEN as a starting value, and an environment
+  // variable normally outranks the stored one. Without dropping it, the refresh reported success
+  // while every provider carried on using the token that expired an hour ago.
+  process.env.BL_SPOTIFY_WEB_TOKEN = 'the-token-from-boot';
+  process.env.BL_TOKEN_REFRESH_COMMAND = 'echo \'{"spotifyWebToken":"the-fresh-one"}\'';
+  try {
+    assert.equal(app.settings.read().secrets.spotifyWebToken, 'the-token-from-boot');
+
+    const result = await (await authed('/admin/api/refresh', { method: 'POST' })).json();
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.updated, ['spotifyWebToken']);
+
+    // What the providers will actually send.
+    assert.equal(app.settings.read().secrets.spotifyWebToken, 'the-fresh-one');
+  } finally {
+    delete process.env.BL_SPOTIFY_WEB_TOKEN;
+    delete process.env.BL_TOKEN_REFRESH_COMMAND;
+    app.settings.update({ 'secret.spotifyWebToken': null });
+  }
+});
+
+test('the schedule exists before the cookie does', async (t) => {
+  const { Refresher } = await import('../src/refresher.ts');
+  const refresher = new Refresher(app.store, app.settings);
+
+  // The documented setup is "boot the server, then paste a cookie into the admin page". Returning
+  // early on a cookie-less boot meant that flow never scheduled anything: the status said
+  // "browser", a manual run worked, and the token quietly expired an hour later.
+  assert.equal(refresher.mechanism, 'none');
+  refresher.start();
+
+  const { chromiumAvailable } = await import('../src/browser/spotify.ts');
+  if (!chromiumAvailable()) {
+    refresher.stop();
+    t.skip('no Chromium here — the deployed image carries one');
+    return;
+  }
+
+  app.settings.update({ 'secret.spDcCookie': 'pasted-after-boot' });
+  try {
+    // Same object, no restart: the next tick now has something to do.
+    assert.equal(refresher.mechanism, 'browser');
+  } finally {
+    refresher.stop();
+    app.settings.update({ 'secret.spDcCookie': null });
+  }
+});
+
 test('a command that returns the same token is reported as a no-op, not a failure', async () => {
   process.env.BL_TOKEN_REFRESH_COMMAND = 'echo \'{"spotifyWebToken":"already-current"}\'';
   app.settings.update({ 'secret.spotifyWebToken': 'already-current' });
