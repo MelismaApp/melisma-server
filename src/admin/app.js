@@ -552,12 +552,24 @@ $('#cache-select-all').addEventListener('change', (event) => {
  * a readout that stops updating looks exactly like a job that has stalled, and telling those apart is
  * the entire point.
  */
+let relookupRun = null;
+let relookupTrack = '';
+
 function renderRelookup(progress) {
   const state = $('#relookup-state');
   const stop = $('#relookup-stop');
   const pause = $('#relookup-pause');
   // Both ways in, so a run cannot be started on top of one already going from the other button.
   const starts = [$('#cache-relookup'), $('#cache-relookup-selected')];
+
+  // The name is remembered for as long as the run lasts. The server reports `current` as null between
+  // lookups, which is the honest answer to "what is in the air" and a flickering readout if shown
+  // literally — it would drop the track name during every inter-track wait.
+  if (progress.startedAt !== relookupRun) {
+    relookupRun = progress.startedAt;
+    relookupTrack = '';
+  }
+  if (progress.current) relookupTrack = progress.current;
 
   if (progress.running) {
     const at = progress.done + progress.skipped;
@@ -569,9 +581,9 @@ function renderRelookup(progress) {
     state.textContent =
       (held ? 'paused, ' : progress.paused ? 'pausing, ' : '') +
       `${at} of ${progress.total}` +
-      (progress.current ? ` — ${progress.current}` : '') +
+      (relookupTrack ? ` — ${relookupTrack}` : '') +
       (progress.skipped ? ` (${progress.skipped} skipped)` : '');
-    state.title = progress.current ?? '';
+    state.title = relookupTrack;
     stop.hidden = false;
     pause.hidden = false;
     pause.textContent = progress.paused ? 'Resume' : 'Pause';

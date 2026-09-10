@@ -1294,3 +1294,77 @@ test('a path traversal in an asset request gets nothing', async () => {
     assert.ok(!(await response.text()).includes('better-lyrics-server'));
   }
 });
+
+// ---- the live stream ------------------------------------------------------
+
+/**
+ * Reads the admin stream for a while and returns the re-lookup snapshots it carried.
+ *
+ * The stream never ends by itself, so it is aborted rather than awaited to completion.
+ */
+async function relookupSnapshots(
+  during: () => void,
+  isDone: (snapshots: Array<Record<string, unknown>>) => boolean,
+  ms = 10_000,
+): Promise<Array<Record<string, unknown>>> {
+  const controller = new AbortController();
+  const response = await authed('/admin/api/stream', { signal: controller.signal });
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  const snapshots: Array<Record<string, unknown>> = [];
+  let buffer = '';
+
+  const pump = (async () => {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const event = JSON.parse(line.slice(6));
+        if (event.kind === 'relookup') snapshots.push(event);
+      }
+    }
+  })().catch(() => undefined);
+
+  during();
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline && !isDone(snapshots)) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  controller.abort();
+  await pump;
+  return snapshots;
+}
+
+test('the stream reports a re-lookup ending, not only its running', { timeout: 30_000 }, async () => {
+  // The failure this guards against is invisible from the server: the run finishes perfectly well and
+  // the page is simply never told, so it sits there showing a live job, its start buttons disabled,
+  // until somebody reloads. Keying the "has this changed" test on the start time alone does exactly
+  // that, because while the run goes that value is already the one on record.
+  const before = app.settings.read().relookupPauseMs;
+  // Long enough that the run spans a tick or two of the once-a-second stream: a run that begins and
+  // ends between ticks would be reported by the broken version too, and prove nothing.
+  app.settings.update({ 'cache.relookupPauseMs': '700' });
+  try {
+    const keys = ['q:stream-one|nobody|100', 'q:stream-two|nobody|100', 'q:stream-three|nobody|100'];
+    const snapshots = await relookupSnapshots(
+      () => void app.resolver.relookup(keys).catch(() => undefined),
+      (seen) => seen.some((s) => s.running === true) && seen.some((s) => s.running === false && s.startedAt),
+    );
+
+    assert.ok(
+      snapshots.some((s) => s.running === true),
+      'the stream should carry the run while it is going',
+    );
+    const final = snapshots.filter((s) => s.running === false && s.startedAt).at(-1);
+    assert.ok(final, 'and it must say when the run ended, or the page can never re-enable itself');
+    // Unknown keys, so every one is skipped — the point here is the reporting, not the lookups.
+    assert.equal(final.skipped, 3);
+    assert.equal(final.cancelled, false);
+  } finally {
+    app.settings.update({ 'cache.relookupPauseMs': String(before) });
+  }
+});

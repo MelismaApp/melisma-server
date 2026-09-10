@@ -79,6 +79,15 @@ const syllableDoc = () =>
     }),
   ]);
 
+/**
+ * How long the word-level source takes to answer.
+ *
+ * Zero for almost every test. The progress and pause tests need it non-zero: a lookup that begins and
+ * ends inside one poll of `until` has no observable in-flight moment, and "a request is in the air" is
+ * precisely what those tests are about.
+ */
+let wordLevelDelayMs = 0;
+
 const wordLevel: Provider = {
   id: 'netease',
   label: 'Fake word source',
@@ -88,6 +97,7 @@ const wordLevel: Provider = {
   isConfigured: () => true,
   fetch: async () => {
     wordLevelAsked++;
+    if (wordLevelDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, wordLevelDelayMs));
     return {
       doc: syllableDoc(),
       match: 1,
@@ -108,6 +118,7 @@ beforeEach(() => {
   PROVIDERS.length = 0;
   PROVIDERS.push(lineTimed, wordLevel);
   wordLevelAsked = 0;
+  wordLevelDelayMs = 0;
 
   store = new Store(':memory:');
   settings = new Settings(store);
@@ -688,6 +699,104 @@ test('a held run can still be stopped', { timeout: 20_000 }, async () => {
 test('pausing when nothing is running is not an error', () => {
   assert.equal(resolver.relookupProgress.running, false);
   assert.equal(resolver.pauseRelookup(true), false);
+});
+
+test('a stop during the wait between tracks is not sat out', { timeout: 20_000 }, async () => {
+  // The delay exists because a source was throttling, so it is set to whatever it takes — and the
+  // longer it is, the more a Stop that waits for it to elapse looks like a Stop that did nothing.
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '5000' });
+
+  const keys: string[] = [];
+  for (const title of ['W1', 'W2', 'W3'] ) {
+    const track: TrackQuery = { ...TRACK, title };
+    await resolver.resolve(track);
+    keys.push(cacheKey(track));
+  }
+
+  const run = resolver.relookup(keys);
+  // One track done means the run is now inside the five-second wait.
+  assert.ok(await until(() => resolver.relookupProgress.done >= 1), 'under way');
+
+  const asked = Date.now();
+  resolver.cancelRelookup();
+  const final = await run;
+  const took = Date.now() - asked;
+
+  assert.equal(final.cancelled, true);
+  assert.ok(took < 1_500, `it should answer within a moment, took ${took}ms of a 5000ms wait`);
+});
+
+test('a delay raised while held applies to the very next lookup', { timeout: 20_000 }, async () => {
+  // The whole sequence this is for: you see a source throttling, hold the run, raise the delay, let it
+  // go on. If the new delay only takes effect on the track after next, the first request after
+  // resuming goes out at the old pace — and that request is the entire reason you intervened.
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '200' });
+  wordLevelDelayMs = 200;
+
+  const keys: string[] = [];
+  for (const title of ['R1', 'R2', 'R3', 'R4', 'R5', 'R6']) {
+    const track: TrackQuery = { ...TRACK, title };
+    await resolver.resolve(track);
+    keys.push(cacheKey(track));
+  }
+
+  const run = resolver.relookup(keys);
+  // Asked for while a lookup is in the air, which is what makes the hold that follows unambiguous:
+  // the attempt finishes, `current` clears, and the very next thing in the loop is the gate.
+  assert.ok(
+    await until(() => resolver.relookupProgress.done >= 1 && resolver.relookupProgress.current !== null),
+    'a lookup in flight',
+  );
+  resolver.pauseRelookup(true);
+  assert.ok(
+    await until(() => resolver.relookupProgress.paused && !resolver.relookupProgress.current),
+    'held, with nothing in the air',
+  );
+
+  const held = resolver.relookupProgress.done;
+  settings.update({ 'cache.relookupPauseMs': '1200' });
+
+  const resumed = Date.now();
+  resolver.pauseRelookup(false);
+  assert.ok(await until(() => resolver.relookupProgress.done > held, 5_000), 'it should carry on');
+  const gap = Date.now() - resumed;
+
+  resolver.cancelRelookup();
+  await run;
+
+  assert.ok(gap >= 900, `the new delay should come before the next lookup, waited only ${gap}ms`);
+});
+
+test('the track in flight is named, and only while it is in flight', { timeout: 20_000 }, async () => {
+  // `current` is what separates "paused" from "pausing, one track to go", so a name left standing
+  // through the wait between tracks would report a request that is not in the air.
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '400' });
+  wordLevelDelayMs = 300;
+
+  const keys: string[] = [];
+  for (const title of ['N1', 'N2', 'N3', 'N4'] ) {
+    const track: TrackQuery = { ...TRACK, title };
+    await resolver.resolve(track);
+    keys.push(cacheKey(track));
+  }
+
+  const run = resolver.relookup(keys);
+  assert.ok(
+    await until(() => resolver.relookupProgress.done >= 1 && resolver.relookupProgress.current !== null),
+    'a track being asked about is named',
+  );
+  assert.ok(
+    await until(
+      () =>
+        resolver.relookupProgress.running &&
+        resolver.relookupProgress.done >= 1 &&
+        resolver.relookupProgress.current === null,
+    ),
+    'and between two of them, nothing is',
+  );
+
+  resolver.cancelRelookup();
+  await run;
 });
 
 test('a hold does not carry over to the next run', { timeout: 20_000 }, async () => {

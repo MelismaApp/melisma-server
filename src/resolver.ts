@@ -290,22 +290,35 @@ export class Resolver {
     // A resume re-reads it: see below.
     let pauseMs = Math.max(0, this.settings.read().relookupPauseMs);
 
+    // Holds or stops if it has been asked to, and says whether the run may go on.
+    const mayContinue = async (): Promise<boolean> => {
+      const gate = await this.holdOrStop();
+      if (gate === 'stop') {
+        this.progress = { ...this.progress, cancelled: true };
+        return false;
+      }
+      // The one place a changed pace is picked up. Reading it on every track would let a save move
+      // the goalposts mid-run, but a resume is deliberate, and it is the whole reason to hold: you
+      // saw a source throttling, so you held it, raised the delay, and let it go on.
+      if (gate === 'held') pauseMs = Math.max(0, this.settings.read().relookupPauseMs);
+      return true;
+    };
+
     try {
       for (const [index, key] of keys.entries()) {
+        // Asked before the wait as well as after it. A delay raised during a hold has to apply to the
+        // very next request rather than the one after it — that first request is the entire reason
+        // anyone intervened.
+        if (!(await mayContinue())) break;
+
         // Between tracks, not before the first. The per-host floors keep a single lookup polite and say
         // nothing about a hundred in a row, and a rate limit measured over a longer window than any
         // per-request gap is exactly what this is for.
-        if (index > 0 && pauseMs > 0) await sleep(pauseMs);
+        if (index > 0 && pauseMs > 0) await this.waitBetween(pauseMs);
 
-        const gate = await this.holdOrStop();
-        if (gate === 'stop') {
-          this.progress = { ...this.progress, cancelled: true };
-          break;
-        }
-        // The one place a changed pace is picked up. Reading it on every track would let a save move
-        // the goalposts mid-run, but a resume is deliberate, and it is the whole reason to hold: you
-        // saw a source throttling, so you stopped, raised the delay, and started it off again.
-        if (gate === 'held') pauseMs = Math.max(0, this.settings.read().relookupPauseMs);
+        // And again after it, because the wait is as long as someone set it to be: a Stop pressed
+        // during the wait should not go unanswered for the length of it.
+        if (!(await mayContinue())) break;
 
         const track = this.trackForKey(key);
         if (!track) {
@@ -332,6 +345,10 @@ export class Resolver {
             `re-lookup failed for ${key}: ${redact(error instanceof Error ? error.message : String(error))}`,
           );
         }
+        // Cleared as soon as the answer is in, so a name here means a request in the air and nothing
+        // else. That is exactly what separates "paused" from "pausing, one track to go", and leaving
+        // the last name standing through every inter-track wait would blur the two.
+        this.progress = { ...this.progress, current: null };
       }
     } finally {
       const { done, skipped, cancelled, total } = this.progress;
@@ -368,6 +385,22 @@ export class Resolver {
     if (this.cancelRequested) return 'stop';
     this.store.log('info', null, 're-lookup resumed');
     return 'held';
+  }
+
+  /**
+   * Waits between tracks, without sitting out the wait once asked to stop or hold.
+   *
+   * Polled rather than slept in one go, so the controls answer at the same speed whatever the delay is
+   * set to. Someone who raised it to half a minute because a source was throttling should not be left
+   * wondering for half a minute whether Stop registered.
+   */
+  private async waitBetween(ms: number): Promise<void> {
+    const until = Date.now() + ms;
+    while (!this.cancelRequested && !this.pauseRequested) {
+      const left = until - Date.now();
+      if (left <= 0) return;
+      await sleep(Math.min(PAUSE_POLL_MS, left));
+    }
   }
 
   /** Holds the run in progress after the track it is on, or lets it go on again. */

@@ -622,8 +622,13 @@ function stream(app: App, request: IncomingMessage, response: ServerResponse): v
 
   let lastId = 0;
   let lastRevision = '';
-  // So the final state of a run is sent once after it ends, and then not repeated forever.
-  let lastRelookupAt: number | null = null;
+  // What the page was last told about a re-lookup, so the final state goes out exactly once.
+  //
+  // The running flag has to be part of this. Keying on `startedAt` alone never sends the end of a run
+  // that was watched: while it goes, that value is already recorded, so the moment it finishes both
+  // tests fail and the page is left showing a live job with its controls disabled until it is
+  // reloaded.
+  let lastRelookupState = '';
   const push = () => {
     const events = app.store.recentEvents(50).filter((event) => event.id > lastId);
     for (const event of events.reverse()) {
@@ -635,8 +640,9 @@ function stream(app: App, request: IncomingMessage, response: ServerResponse): v
     // a readout that stops updating is indistinguishable from a job that has stalled, and the whole
     // point of this is to be able to tell.
     const relookup = app.resolver.relookupProgress;
-    if (relookup.running || relookup.startedAt !== lastRelookupAt) {
-      lastRelookupAt = relookup.startedAt;
+    const relookupState = `${relookup.startedAt}:${relookup.running}`;
+    if (relookup.running || relookupState !== lastRelookupState) {
+      lastRelookupState = relookupState;
       response.write(`data: ${JSON.stringify({ kind: 'relookup', ...relookup })}\n\n`);
     }
 
