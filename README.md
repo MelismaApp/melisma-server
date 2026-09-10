@@ -9,6 +9,7 @@ document, and remembers the answer.**
 ![Dependencies: none](https://img.shields.io/badge/dependencies-none-5fd7c4)
 ![SQLite built in](https://img.shields.io/badge/storage-node%3Asqlite-003B57?logo=sqlite&logoColor=white)
 ![Deploy: Kamal](https://img.shields.io/badge/deploy-Kamal%202-8b93a7)
+[![Licence AGPL-3.0](https://img.shields.io/badge/licence-AGPL--3.0-blue)](LICENSE)
 
 </div>
 
@@ -38,6 +39,7 @@ The app works well without it — this makes it better at the two things a phone
 - [How it works](#how-it-works)
 - [Sharing it](#sharing-it)
 - [Docs](#docs)
+- [Licence](#licence)
 
 ## What it does
 
@@ -290,6 +292,24 @@ of this that you would not put a password manager behind.
 | **[TOKENS.md](docs/TOKENS.md)** | Every token, step by step, and what each one buys |
 | **[DESIGN.md](docs/DESIGN.md)** | The merge, the cache, the token harvest, the security posture |
 | **[CACHE-SERVER.md](docs/CACHE-SERVER.md)** | The request/response contract, and why each call was settled that way |
+
+## Licence
+
+**AGPL-3.0** — see [LICENSE](LICENSE).
+
+Chosen for what it says about running this as a service rather than inherited from anywhere: §13
+means anyone who runs a *modified* version where others can reach it has to offer them the source.
+Plain GPL does not, and a lyrics server is precisely the case that gap was written for. It also
+matches the app.
+
+Unlike the app — which is AGPL because it is a genuine port of
+[Spicy Lyrics](https://github.com/Spikerko/spicy-lyrics), animation curves and all — nothing here
+derives from it. The server shares the app's TTML dialect and its line/syllable shape so the two can
+talk to each other, and a format and a data shape are not a port. There is no rendering code here at
+all.
+
+None of this touches the lyrics themselves: they belong to their writers and publishers, and no code
+licence changes what the sources' own terms allow. See [Sharing it](#sharing-it).
 
 ## Credits
 
