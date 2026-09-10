@@ -266,7 +266,11 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
         : app.store.allKeys();
 
       if (app.resolver.relookupProgress.running) {
-        return send(response, 409, { error: 'a re-lookup is already running' });
+        return send(response, 409, {
+          error: app.resolver.relookupProgress.paused
+            ? 'a re-lookup is already running, and paused — resume or stop it first'
+            : 'a re-lookup is already running',
+        });
       }
       app.store.log('info', null, `re-looking up ${keys.length} track(s) with what is known now`);
       // Not awaited: this asks six sources per track and the page has a live view of the result.
@@ -295,6 +299,15 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
 
     case 'GET /admin/api/relookup':
       return send(response, 200, app.resolver.relookupProgress);
+
+    case 'POST /admin/api/relookup/pause': {
+      const body = await readJson<{ paused?: boolean }>(request);
+      // Explicit rather than a toggle: two pages open on the same run would otherwise flip each
+      // other's state and neither would show what it asked for.
+      const paused = body?.paused !== false;
+      const changed = app.resolver.pauseRelookup(paused);
+      return send(response, 200, { changed, progress: app.resolver.relookupProgress });
+    }
 
     case 'POST /admin/api/relookup/cancel': {
       const stopping = app.resolver.cancelRelookup();

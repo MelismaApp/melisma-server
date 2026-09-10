@@ -53,6 +53,13 @@ export interface RelookupProgress {
   skipped: number;
   /** True when it stopped because it was asked to, rather than because it finished. */
   cancelled: boolean;
+  /**
+   * True while it is holding, or about to.
+   *
+   * `current` is what separates the two: a paused run that still names a track is finishing that one
+   * before it settles.
+   */
+  paused: boolean;
   startedAt: number | null;
   /** The track being asked about right now, or null between them. */
   current: string | null;
@@ -64,9 +71,17 @@ const IDLE_RELOOKUP: RelookupProgress = {
   done: 0,
   skipped: 0,
   cancelled: false,
+  paused: false,
   startedAt: null,
   current: null,
 };
+
+/**
+ * How often a held run looks up to see whether it may go on.
+ *
+ * Small enough that Resume and Stop feel immediate, and the cost of asking is two booleans.
+ */
+const PAUSE_POLL_MS = 200;
 
 export interface Resolution {
   document: MergedDocument | null;
@@ -156,6 +171,15 @@ export class Resolver {
   private progress: RelookupProgress = { ...IDLE_RELOOKUP };
 
   private cancelRequested = false;
+
+  /**
+   * Whether the run has been asked to hold.
+   *
+   * Worth having as well as cancel, because Stop loses your place: a re-lookup forces past the cache,
+   * so restarting a long run re-spends every request it had already made. When a source starts
+   * throttling halfway through, holding is what you actually want.
+   */
+  private pauseRequested = false;
 
   private readonly store: Store;
   private readonly settings: Settings;
@@ -248,36 +272,40 @@ export class Resolver {
     if (this.relooking) return this.relookupProgress;
     this.relooking = true;
     this.cancelRequested = false;
+    // Cleared here rather than when the last run ended: this is the precondition — every run starts
+    // unheld, whatever was asked of the one before it.
+    this.pauseRequested = false;
     this.progress = {
       running: true,
       total: keys.length,
       done: 0,
       skipped: 0,
       cancelled: false,
+      paused: false,
       startedAt: Date.now(),
       current: null,
     };
 
-    // Read once: a run that takes minutes should not change pace halfway because the page was saved.
-    const pauseMs = Math.max(0, this.settings.read().relookupPauseMs);
+    // Read once, so a run that takes minutes does not change pace halfway because the page was saved.
+    // A resume re-reads it: see below.
+    let pauseMs = Math.max(0, this.settings.read().relookupPauseMs);
 
     try {
       for (const [index, key] of keys.entries()) {
-        // Checked between tracks rather than mid-flight: a lookup already in the air is going to
-        // finish either way, and abandoning its result would waste the requests it has already spent.
-        if (this.cancelRequested) {
-          this.progress = { ...this.progress, cancelled: true };
-          break;
-        }
-
         // Between tracks, not before the first. The per-host floors keep a single lookup polite and say
         // nothing about a hundred in a row, and a rate limit measured over a longer window than any
         // per-request gap is exactly what this is for.
         if (index > 0 && pauseMs > 0) await sleep(pauseMs);
-        if (this.cancelRequested) {
+
+        const gate = await this.holdOrStop();
+        if (gate === 'stop') {
           this.progress = { ...this.progress, cancelled: true };
           break;
         }
+        // The one place a changed pace is picked up. Reading it on every track would let a save move
+        // the goalposts mid-run, but a resume is deliberate, and it is the whole reason to hold: you
+        // saw a source throttling, so you stopped, raised the delay, and started it off again.
+        if (gate === 'held') pauseMs = Math.max(0, this.settings.read().relookupPauseMs);
 
         const track = this.trackForKey(key);
         if (!track) {
@@ -322,6 +350,33 @@ export class Resolver {
     return this.relookupProgress;
   }
 
+  /**
+   * Waits out a pause, and says whether the run may carry on.
+   *
+   * Called between tracks rather than mid-flight: a lookup already in the air is going to finish
+   * either way, and abandoning its answer would waste the requests it has already spent. Stop is
+   * honoured while holding, so a pause can never trap a run.
+   */
+  private async holdOrStop(): Promise<'go' | 'held' | 'stop'> {
+    if (this.cancelRequested) return 'stop';
+    if (!this.pauseRequested) return 'go';
+
+    // Naming nothing while it holds is what lets the page tell "paused" from "pausing, one to go".
+    this.progress = { ...this.progress, current: null };
+    this.store.log('info', null, `re-lookup paused at ${this.progress.done} of ${this.progress.total}`);
+    while (this.pauseRequested && !this.cancelRequested) await sleep(PAUSE_POLL_MS);
+    if (this.cancelRequested) return 'stop';
+    this.store.log('info', null, 're-lookup resumed');
+    return 'held';
+  }
+
+  /** Holds the run in progress after the track it is on, or lets it go on again. */
+  pauseRelookup(paused: boolean): boolean {
+    if (!this.relooking) return false;
+    this.pauseRequested = paused;
+    return true;
+  }
+
   /** Asks the run in progress to stop after the track it is on. */
   cancelRelookup(): boolean {
     if (!this.relooking) return false;
@@ -331,7 +386,9 @@ export class Resolver {
   }
 
   get relookupProgress(): RelookupProgress {
-    return { ...this.progress };
+    // `paused` is derived rather than stored: a request to hold that outlived its run would be a
+    // readout nobody could clear.
+    return { ...this.progress, paused: this.pauseRequested && this.relooking };
   }
 
   /**

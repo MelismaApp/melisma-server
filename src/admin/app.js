@@ -555,24 +555,32 @@ $('#cache-select-all').addEventListener('change', (event) => {
 function renderRelookup(progress) {
   const state = $('#relookup-state');
   const stop = $('#relookup-stop');
+  const pause = $('#relookup-pause');
   // Both ways in, so a run cannot be started on top of one already going from the other button.
   const starts = [$('#cache-relookup'), $('#cache-relookup-selected')];
 
   if (progress.running) {
     const at = progress.done + progress.skipped;
+    // A held run that still names a track has one lookup left in the air, and saying so is the
+    // difference between "it is waiting for me" and "it is ignoring me".
+    const held = progress.paused && !progress.current;
     state.hidden = false;
-    state.className = 'pill';
+    state.className = progress.paused ? 'pill warn' : 'pill';
     state.textContent =
+      (held ? 'paused, ' : progress.paused ? 'pausing, ' : '') +
       `${at} of ${progress.total}` +
       (progress.current ? ` — ${progress.current}` : '') +
       (progress.skipped ? ` (${progress.skipped} skipped)` : '');
     state.title = progress.current ?? '';
     stop.hidden = false;
+    pause.hidden = false;
+    pause.textContent = progress.paused ? 'Resume' : 'Pause';
     for (const button of starts) button.disabled = true;
     return;
   }
 
   stop.hidden = true;
+  pause.hidden = true;
   starts[0].disabled = false;
   // Not enabled blindly: the selected-rows button is disabled when nothing is selected, and that rule
   // outlives the run.
@@ -591,6 +599,28 @@ function renderRelookup(progress) {
     : `looked up ${progress.done} of ${progress.total}` +
       (progress.skipped ? `, skipped ${progress.skipped}` : '');
 }
+
+$('#relookup-pause').addEventListener('click', async (event) => {
+  const button = event.target;
+  // Read off the label rather than kept in a variable: the stream is the only thing that knows the
+  // real state, and it has already written it here.
+  const paused = button.textContent === 'Pause';
+  button.disabled = true;
+  try {
+    const result = await api('/admin/api/relookup/pause', {
+      method: 'POST',
+      body: JSON.stringify({ paused }),
+    });
+    if (!result.changed) toast('Nothing was running');
+    // Resuming re-reads the delay, which is the point of pausing when a source starts throttling.
+    else if (!paused) toast('Carrying on, at the delay set now');
+    renderRelookup(result.progress);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $('#relookup-stop').addEventListener('click', async (event) => {
   const button = event.target;
@@ -621,7 +651,7 @@ async function runRelookup(keys) {
     toast(`Asking every source again for ${result.queued} track(s)`);
     // The stream will take over within the second; this fills the gap so the button state changes at
     // the moment it is pressed rather than a beat later.
-    renderRelookup({ running: true, total: result.queued, done: 0, skipped: 0, cancelled: false, startedAt: Date.now(), current: null });
+    renderRelookup({ running: true, total: result.queued, done: 0, skipped: 0, cancelled: false, paused: false, startedAt: Date.now(), current: null });
   } catch (error) {
     toast(error.message, true);
   } finally {

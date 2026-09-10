@@ -627,6 +627,97 @@ test('a run reports its progress and can be stopped', async () => {
   assert.equal(resolver.relookupProgress.current, null);
 });
 
+test('a run can be held and let go again, and keeps its place', { timeout: 20_000 }, async () => {
+  // Stop loses your place: a re-lookup forces past the cache, so restarting a long run re-spends every
+  // request it had already made. Holding is what you want when a source starts throttling halfway.
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '60' });
+
+  const keys: string[] = [];
+  for (const title of ['P1', 'P2', 'P3', 'P4', 'P5', 'P6']) {
+    const track: TrackQuery = { ...TRACK, title };
+    await resolver.resolve(track);
+    keys.push(cacheKey(track));
+  }
+
+  const run = resolver.relookup(keys);
+  assert.ok(await until(() => resolver.relookupProgress.done >= 1), 'under way');
+
+  assert.equal(resolver.pauseRelookup(true), true);
+  assert.ok(
+    await until(() => resolver.relookupProgress.paused && resolver.relookupProgress.current === null),
+    'it should settle, naming nothing, once the track in flight is finished',
+  );
+
+  const held = resolver.relookupProgress.done;
+  // The point of the whole thing: a held run does no more work, and does not end either.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(resolver.relookupProgress.done, held, 'no progress while held');
+  assert.equal(resolver.relookupProgress.running, true, 'and it is still the live run');
+
+  resolver.pauseRelookup(false);
+  const final = await run;
+  assert.equal(final.cancelled, false, 'a pause is not a stop');
+  assert.equal(final.done, 6, 'it carries on from where it was rather than starting over');
+});
+
+test('a held run can still be stopped', { timeout: 20_000 }, async () => {
+  // Otherwise a pause is a trap: nothing left to press, and a run that never ends. Bounded explicitly
+  // because that failure hangs rather than returning a wrong answer, and a hung suite says less than
+  // a failed one.
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '60' });
+
+  const keys: string[] = [];
+  for (const title of ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']) {
+    const track: TrackQuery = { ...TRACK, title };
+    await resolver.resolve(track);
+    keys.push(cacheKey(track));
+  }
+
+  const run = resolver.relookup(keys);
+  assert.ok(await until(() => resolver.relookupProgress.done >= 1));
+  resolver.pauseRelookup(true);
+  assert.ok(await until(() => resolver.relookupProgress.paused && !resolver.relookupProgress.current));
+
+  assert.equal(resolver.cancelRelookup(), true);
+  const final = await run;
+  assert.equal(final.running, false, 'it must actually end');
+  assert.equal(final.cancelled, true);
+  assert.ok(final.done < 6, `stopped partway, got ${final.done} of 6`);
+});
+
+test('pausing when nothing is running is not an error', () => {
+  assert.equal(resolver.relookupProgress.running, false);
+  assert.equal(resolver.pauseRelookup(true), false);
+});
+
+test('a hold does not carry over to the next run', { timeout: 20_000 }, async () => {
+  // The failure this guards against is silent and total: a run that starts out held does nothing at
+  // all, and the readout would say "paused" about a hold nobody asked for.
+  // Enough tracks, and enough delay between them, that there is a run left to hold by the time the
+  // hold is asked for.
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '60' });
+
+  const keys: string[] = [];
+  for (const title of ['C1', 'C2', 'C3', 'C4', 'C5', 'C6']) {
+    const track: TrackQuery = { ...TRACK, title };
+    await resolver.resolve(track);
+    keys.push(cacheKey(track));
+  }
+
+  // Hold one, then abandon it — the way you would after seeing a source throttle and giving up.
+  const abandoned = resolver.relookup(keys);
+  assert.ok(await until(() => resolver.relookupProgress.done >= 1));
+  resolver.pauseRelookup(true);
+  assert.ok(await until(() => resolver.relookupProgress.paused && !resolver.relookupProgress.current));
+  resolver.cancelRelookup();
+  await abandoned;
+
+  const second = await resolver.relookup(keys);
+  assert.equal(second.paused, false, 'the new run must not inherit the hold');
+  assert.equal(second.cancelled, false, 'nor the stop');
+  assert.equal(second.done, 6, 'and it must actually do the work, unprompted');
+});
+
 test('cancelling when nothing is running is not an error', () => {
   assert.equal(resolver.cancelRelookup(), false);
 });
