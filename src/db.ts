@@ -906,12 +906,41 @@ export class Store {
     ].join('.');
   }
 
-  /** Every cached track, newest first, for a bulk operation over the library. */
+  /**
+   * Every cached track, newest first, for a bulk operation over the library.
+   *
+   * Both tables, the same union the library view lists from. `entries` alone missed every extras-only
+   * row — which is what "Forget lyrics" leaves behind, since it drops the entry and the archive and
+   * keeps the artwork and tempo. Those rows showed in the library and were then skipped by the very
+   * action most likely to be aimed at them.
+   */
   allKeys(limit = 5_000): string[] {
     const rows = this.db
-      .prepare('SELECT key FROM entries ORDER BY updated_at DESC LIMIT ?')
+      .prepare(
+        `SELECT k.key AS key,
+                MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0)) AS touched
+           FROM (SELECT key FROM entries UNION SELECT key FROM extras) k
+           LEFT JOIN entries e ON e.key = k.key
+           LEFT JOIN extras  x ON x.key = k.key
+          ORDER BY touched DESC
+          LIMIT ?`,
+      )
       .all(Math.min(limit, 20_000)) as { key: string }[];
     return rows.map((row) => row.key);
+  }
+
+  /**
+   * Marks one provider's archived body as no longer fit to merge from.
+   *
+   * Not a delete, because the archive is the point of this server — a body kept is a body a better
+   * algorithm can revisit. But a body matched to the *wrong recording* is not differently-merged data,
+   * it is wrong data, and re-merging from it would keep producing the wrong words. So it stays on disk,
+   * flagged, with the reason attached, and `remerge` passes over it.
+   */
+  supersedeRaw(key: string, provider: string, note: string): void {
+    this.db
+      .prepare('UPDATE raw SET ok = 0, note = ? WHERE key = ? AND provider = ?')
+      .run(note, key, provider);
   }
 
   // ---- what each source said ---------------------------------------------

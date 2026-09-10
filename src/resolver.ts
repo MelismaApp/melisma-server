@@ -158,6 +158,30 @@ export class Resolver {
     const existing = this.inFlight.get(key);
     if (existing) return existing;
 
+    // Registered before anything is awaited, and covering the identity step as well as the fetch.
+    //
+    // With the harvest awaited *outside* this, a prefetch spent seconds resolving identity with
+    // nothing in `inFlight` — so a live lookup for the same track arrived, saw no work in progress,
+    // and started its own name-only fetch. Two lookups, both writing the same entry, and the one that
+    // had bothered to learn the ISRC could lose.
+    const work = this.lookup(track, key, config, started, options).finally(() => {
+      this.inFlight.delete(key);
+      // After the words, not before. The harvest records the ISRC and the authoritative duration onto
+      // the cache entry, and until the lookup has run there is no entry to record them on. Skipped
+      // when the identity was resolved up front, which has already done this.
+      if (!options.identityFirst) this.harvestAfter(config, key, track);
+    });
+    this.inFlight.set(key, work);
+    return work;
+  }
+
+  private async lookup(
+    track: TrackQuery,
+    key: string,
+    config: Config,
+    started: number,
+    options: ResolveOptions,
+  ): Promise<Resolution> {
     // Learn what this recording is, before asking anybody what it says.
     //
     // Only on the prefetch. `harvestOnce` writes the ISRC through `noteIdentity`, which upserts the
@@ -172,17 +196,7 @@ export class Resolver {
     // abstain. Deliberately after the key is computed: `cacheKey` prefers an ISRC, so enriching
     // first would file the result under an identity the next caller will not have.
     const enriched = this.withKnownIdentity(key, track);
-
-    const work = this.fetchAndMerge(enriched, key, config, started).finally(() => {
-      this.inFlight.delete(key);
-      // After, not before. The harvest records the ISRC and the authoritative duration onto the
-      // cache entry, and until the lookup has run there is no entry to record them on — so
-      // harvesting first threw away the two most valuable fields it collects. Every path through
-      // fetchAndMerge writes an entry, including the one that found nothing.
-      this.harvestAfter(config, key, track);
-    });
-    this.inFlight.set(key, work);
-    return work;
+    return this.fetchAndMerge(enriched, key, config, started);
   }
 
   /**
@@ -254,23 +268,64 @@ export class Resolver {
    */
   private trackForKey(key: string): TrackQuery | null {
     const entry = this.store.getEntry(key);
-    if (!entry || !entry.title) return null;
+    const extras = this.store.extras(key);
 
+    // Extras as well as the entry, because "Forget lyrics" leaves the entry and the archive deleted and
+    // the artwork and tempo behind. Those rows show in the library — it lists the union of both tables
+    // — so a re-lookup aimed at one has to be able to find its title.
+    const title = entry?.title || extras?.title || '';
+    const artist = entry?.artist || extras?.artist || '';
+    if (!title) return null;
+
+    const known = this.store.identityFor(key);
     const base: TrackQuery = {
-      title: entry.title,
-      artist: entry.artist,
-      album: entry.album,
-      durationMs: entry.durationMs,
-      spotifyId: entry.spotifyId ?? undefined,
-      isrc: entry.isrc ?? undefined,
+      title,
+      artist,
+      album: entry?.album ?? '',
+      durationMs: entry?.durationMs || known.durationMs || 0,
+      spotifyId: entry?.spotifyId ?? undefined,
+      isrc: known.isrc ?? undefined,
     };
-    if (cacheKey(base) === key) return base;
 
-    const withoutIsrc: TrackQuery = { ...base, isrc: undefined };
-    if (cacheKey(withoutIsrc) === key) return withoutIsrc;
+    // The care in this whole operation is the key, not the loop. `cacheKey` prefers a Spotify id, then
+    // an ISRC, then the name and a two-second duration bucket — so a query rebuilt from what is known
+    // *now* can hash to somewhere else entirely, and the re-lookup then writes a second entry while the
+    // original sits there stale. Two ways that happens, and both are commonest on exactly the tracks
+    // worth revisiting:
+    //
+    // - an ISRC learned after the track was first filed under its name, and
+    // - a duration learned after it was filed with none, which moves the bucket.
+    //
+    // So candidates are tried in order of how much they preserve, and the key itself is the authority
+    // on its own identifying fields — it is the only record of what they were.
+    const candidates: TrackQuery[] = [base, { ...base, isrc: undefined }];
 
-    // Neither shape reproduces it — the key predates a change in how keys are made, or the entry was
-    // written by hand. Refusing is right: a duplicate is worse than a track left alone.
+    if (key.startsWith('sp:')) {
+      candidates.push({ ...base, spotifyId: key.slice(3) });
+    } else if (key.startsWith('isrc:')) {
+      candidates.push({ ...base, spotifyId: undefined, isrc: key.slice(5) });
+    } else if (key.startsWith('q:')) {
+      // The bucket is the only surviving trace of the duration this was filed under. Multiplying it
+      // back is exact for keying — `floor(bucket * 2000 / 2000)` is the bucket — and at most two
+      // seconds out for matching, which is inside the band the matcher scores as a perfect duration.
+      // Tried last, so a real duration that still lands in the same bucket is preferred.
+      const bucket = Number(key.slice(2).split('|').at(-1));
+      if (Number.isFinite(bucket)) {
+        candidates.push({
+          ...base,
+          spotifyId: undefined,
+          isrc: undefined,
+          durationMs: bucket * 2_000,
+        });
+      }
+    }
+
+    for (const candidate of candidates) {
+      if (cacheKey(candidate) === key) return candidate;
+    }
+
+    // Nothing reproduces it. Refusing is right: a duplicate is worse than a track left alone, and
+    // `withKnownIdentity` would have put the identity back for matching anyway.
     this.store.log('warn', null, `cannot re-look up ${key}: no query reproduces that key`);
     return null;
   }
@@ -329,11 +384,21 @@ export class Resolver {
   private staleSources(key: string, config: Config): Provider[] {
     const attempts = this.store.attemptsFor(key);
 
-    // The archive counts as an attempt. `attempts` began empty on every database that already had a
-    // cache, so the first hit after an upgrade treated every source as never asked — and re-fetched
-    // ones whose answers were sitting in `raw`, spending rate limit to learn what was already known.
-    // A stored body is proof the source answered with lyrics, which is exactly what the table records.
-    const archived = new Set(this.store.getRaw(key).map((raw) => raw.provider));
+    // The archive counts as an attempt — but only as much of one as it can honestly prove.
+    //
+    // `attempts` began empty on every database that already had a cache, so without this the first hit
+    // after the upgrade treated every source as never asked and re-fetched ones whose answers were
+    // sitting in `raw`. Inferred as a record rather than a bare "seen", because two details matter:
+    // a body that was superseded or never usable is not an answer, and an archived body says nothing
+    // about whether an ISRC was in hand — so it must count as name-searched, or every legacy Apple and
+    // AMLL row would look already-exact and the ISRC rule below could never fire for the caches that
+    // most need it.
+    const inferred = new Map(attempts);
+    for (const raw of this.store.getRaw(key)) {
+      if (!raw.ok) continue;
+      if (inferred.has(raw.provider)) continue;
+      inferred.set(raw.provider, { outcome: 'lyrics', at: raw.fetchedAt, hadIsrc: false });
+    }
 
     // Whether the question itself has improved since the source was asked. An ISRC learned after the
     // fact is exactly that: the same source, asked exactly rather than by a title that might belong
@@ -342,8 +407,8 @@ export class Resolver {
     const isrc = this.store.isrcFor(key);
 
     return activeProviders(config).filter((provider) => {
-      const attempt = attempts.get(provider.id);
-      if (!attempt) return !archived.has(provider.id);
+      const attempt = inferred.get(provider.id);
+      if (!attempt) return true;
 
       // Asked by name, and an ISRC is known now. Only for the two sources that can use one — for the
       // rest nothing has changed, and re-asking them would be requests spent to receive the same
@@ -402,6 +467,23 @@ export class Resolver {
     // here" — and `staleSources` never retries those.
     const unreachable = new Set<string>();
 
+    // Which of these are being re-asked *because* an ISRC turned up — meaning they answered before on a
+    // title alone, and are about to be asked exactly. If one of those now says it has nothing, the body
+    // it gave earlier was matched to some other recording: the same source, asked properly, does not
+    // have this song. That body is why the merge is wrong, and nothing else would ever remove it.
+    const before = this.store.attemptsFor(key);
+    const supersedable = new Set(
+      stale
+        .filter((provider) => {
+          const attempt = before.get(provider.id);
+          return Boolean(
+            provider.usesIsrc && attempt?.outcome === 'lyrics' && attempt.hadIsrc === false,
+          );
+        })
+        .map((provider) => provider.id),
+    );
+    let superseded = 0;
+
     await Promise.all(
       stale.map(async (provider) => {
         try {
@@ -422,6 +504,23 @@ export class Resolver {
           if (!answer) {
             if (!unreachable.has(provider.id)) {
               this.store.recordAttempt(key, provider.id, 'none', hadIsrc);
+
+              // Asked exactly, and it has nothing. Its earlier name-matched body is not merely older,
+              // it is about a different recording — so it stops being merged from. Flagged rather than
+              // deleted: the archive is the point of this server, and the evidence is worth keeping.
+              if (supersedable.has(provider.id)) {
+                this.store.supersedeRaw(
+                  key,
+                  provider.id,
+                  'superseded: asked again by ISRC and this source has no such recording',
+                );
+                superseded++;
+                this.store.log(
+                  'info',
+                  provider.id,
+                  `dropped an earlier name match for ${key}: asked by ISRC, it has nothing`,
+                );
+              }
             }
             return;
           }
@@ -446,7 +545,8 @@ export class Resolver {
       }),
     );
 
-    if (gained === 0) return;
+    // Withdrawing a body changes the merge as surely as adding one does.
+    if (gained === 0 && superseded === 0) return;
 
     // Re-merged from the whole archive rather than merged with what just arrived, so the new source
     // competes for the spine on the same terms as everything else. Whether it is an improvement is
@@ -455,7 +555,8 @@ export class Resolver {
       this.store.log(
         'info',
         null,
-        `upgraded ${key} with ${gained} source${gained === 1 ? '' : 's'} that had not answered before`,
+        `upgraded ${key}: ${gained} source${gained === 1 ? '' : 's'} that had not answered before` +
+          (superseded > 0 ? `, ${superseded} withdrawn as the wrong recording` : ''),
       );
     }
   }
@@ -694,6 +795,8 @@ export class Resolver {
     const candidates: Candidate[] = [];
 
     for (const raw of raws) {
+      // Superseded: kept on disk as evidence, never merged from again. See `supersedeRaw`.
+      if (!raw.ok) continue;
       const contributed = raw.provider.startsWith('app:');
       const baseId = contributed ? raw.provider.slice(4) : raw.provider;
 

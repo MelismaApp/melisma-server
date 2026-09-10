@@ -393,3 +393,165 @@ test('two bulk re-lookups do not run at once', async () => {
     `expected one to stand down, got ${JSON.stringify([first, second])}`,
   );
 });
+
+// ---- what the review found -------------------------------------------------
+
+/** A source that can be asked *by* ISRC, which is what makes it worth re-asking. */
+function exactSource(answer: () => Promise<unknown>): Provider {
+  return {
+    id: 'amll',
+    label: 'Fake exact source',
+    description: 'test',
+    requires: [],
+    wordLevel: true,
+    usesIsrc: true,
+    isConfigured: () => true,
+    fetch: answer as Provider['fetch'],
+    test: async () => ({ ok: true, detail: 'fake' }),
+    reparse: () => syllableDoc(),
+  };
+}
+
+test('a second lookup joins the first instead of racing it', async () => {
+  // The identity-first path awaited the harvest before registering anything in `inFlight`, so a live
+  // lookup arriving during those seconds saw no work in progress and started its own name-only fetch.
+  // Two lookups, both writing the same entry, and the one that had bothered to learn the ISRC could
+  // lose the race.
+  settings.update({ 'provider.netease.enabled': '1' });
+
+  const [a, b] = await Promise.all([
+    resolver.resolve(TRACK, { identityFirst: true }),
+    resolver.resolve(TRACK),
+  ]);
+
+  assert.equal(wordLevelAsked, 1, 'the sources should have been asked once, not twice');
+  assert.equal(a.document?.kind, b.document?.kind, 'both callers should get the same answer');
+  assert.equal(store.allKeys().length, 1);
+});
+
+test('an exact re-ask that finds nothing withdraws the earlier name match', async () => {
+  // The reported case, on the server side. A source answers by title alone with the wrong recording's
+  // words; an ISRC turns up later; asked exactly, the same source has no such recording. Its earlier
+  // body is why the merge is wrong, and before this nothing would ever have removed it — the attempt
+  // was marked settled, so it would not even be asked again.
+  let asked = 0;
+  const wrongThenNothing = exactSource(async () => {
+    asked++;
+    // First time (by name) it hands over a match. Second time (by ISRC) it has nothing.
+    if (asked === 1) {
+      return { doc: syllableDoc(), match: 1, raw: { body: 'name-matched', contentType: 'text/plain' } };
+    }
+    return null;
+  });
+
+  PROVIDERS.length = 0;
+  PROVIDERS.push(lineTimed, wrongThenNothing);
+  settings.update({ 'provider.amll.enabled': '1', 'provider.netease.enabled': '0' });
+
+  const named: TrackQuery = { ...TRACK };
+  const key = cacheKey(named);
+  await resolver.resolve(named);
+  assert.equal(asked, 1);
+  assert.ok(
+    store.getRaw(key).some((raw) => raw.provider === 'amll' && raw.ok),
+    'its name match should be archived and usable',
+  );
+
+  // Learned afterwards, as the harvest or the backfill would.
+  store.noteIdentity(key, { isrc: 'USUG11904206' });
+  await resolver.resolve(named);
+  assert.ok(await until(() => asked > 1), 'it should be re-asked once an ISRC is known');
+
+  await until(() => store.getRaw(key).some((raw) => raw.provider === 'amll' && !raw.ok));
+  const body = store.getRaw(key).find((raw) => raw.provider === 'amll');
+  assert.equal(body?.ok, false, 'the superseded body must not be merged from again');
+  assert.match(body?.note ?? '', /superseded/);
+  // Kept rather than deleted: the archive is the point of this server.
+  assert.ok(body?.body, 'and it should still be on disk');
+});
+
+test('a legacy archived body is re-asked once an ISRC is known', async () => {
+  // Caches that predate the attempts table have a body and no record of how it was obtained. Inferring
+  // "answered, with an ISRC" would make every legacy Apple and AMLL row look already-exact, so the ISRC
+  // rule could never fire for the caches that most need it.
+  let asked = 0;
+  PROVIDERS.length = 0;
+  PROVIDERS.push(
+    lineTimed,
+    exactSource(async () => {
+      asked++;
+      return { doc: syllableDoc(), match: 1, raw: { body: 'x', contentType: 'text/plain' } };
+    }),
+  );
+  settings.update({ 'provider.amll.enabled': '0' });
+
+  const key = cacheKey(TRACK);
+  await resolver.resolve(TRACK);
+
+  // An archived body with no attempt beside it, which is exactly what an older database holds.
+  store.putRaw({ key, provider: 'amll', body: 'legacy', contentType: 'text/plain', ok: true, note: null });
+  assert.ok(!store.attemptsFor(key).get('amll'), 'no attempt should be recorded yet');
+
+  settings.update({ 'provider.amll.enabled': '1' });
+  store.noteIdentity(key, { isrc: 'USUG11904206' });
+  await resolver.resolve(TRACK);
+
+  assert.ok(await until(() => asked > 0), 'a legacy body counts as name-searched, so ask again');
+});
+
+test('a track filed before its duration was known is still re-lookupable', async () => {
+  // `cacheKey` buckets the duration in two-second steps, so an entry filed with none and given an
+  // authoritative one later no longer hashes to its own key. Rebuilding from what is known now missed,
+  // and bulk re-lookup skipped the track silently.
+  const noDuration: TrackQuery = {
+    title: 'Blinding Lights',
+    artist: 'The Weeknd',
+    album: 'After Hours',
+    durationMs: 0,
+  };
+  const key = cacheKey(noDuration);
+  assert.ok(key.endsWith('|0'), `expected a zero bucket, got ${key}`);
+
+  settings.update({ 'provider.netease.enabled': '1' });
+  await resolver.resolve(noDuration);
+
+  // As the harvest does once Spotify or Apple answers.
+  store.noteIdentity(key, { durationMs: 200_046 });
+
+  const asked = wordLevelAsked;
+  const result = await resolver.relookup([key]);
+  assert.deepEqual(result, { done: 1, skipped: 0 }, 'it should not have been skipped');
+  assert.ok(wordLevelAsked > asked);
+  assert.deepEqual(store.allKeys(), [key], 'and it must not have been re-keyed');
+});
+
+test('a track with only extras left is still re-lookupable', async () => {
+  // What "Forget lyrics" leaves: the entry and the archive gone, the artwork and tempo kept. The library
+  // lists those rows — it reads the union of both tables — so the action most likely to be aimed at one
+  // must be able to find it.
+  settings.update({ 'provider.netease.enabled': '1' });
+  const key = cacheKey(TRACK);
+  await resolver.resolve(TRACK);
+  store.saveExtras({
+    key,
+    title: TRACK.title,
+    artist: TRACK.artist,
+    tempo: 171,
+    coverUrl: null,
+    artistImageUrl: null,
+    palette: null,
+    analysis: null,
+    metadata: null,
+    source: 'test',
+  });
+
+  store.deleteEntry(key);
+  assert.ok(!store.getEntry(key), 'the entry is gone');
+  assert.ok(store.extras(key), 'the extras remain');
+  assert.ok(store.allKeys().includes(key), 'and the row is still listed');
+
+  const asked = wordLevelAsked;
+  const result = await resolver.relookup([key]);
+  assert.equal(result.done, 1, 'an extras-only row should be re-lookupable');
+  assert.ok(wordLevelAsked > asked);
+});
