@@ -30,6 +30,14 @@ export interface Config {
   negativeTtlHours: number;
   /** How long before a found document is re-fetched to pick up newly added sources. */
   refreshDays: number;
+  /**
+   * How long to wait between tracks during a bulk re-lookup.
+   *
+   * The per-host floors in `http.ts` keep one lookup polite; they say nothing about a hundred lookups
+   * in a row. Musixmatch's guest token is rate-limited over a longer window than any per-request gap
+   * covers, so this is the knob for it — raise it if a source starts refusing partway through a run.
+   */
+  relookupPauseMs: number;
 
   /**
    * How often to run `BL_TOKEN_REFRESH_COMMAND`, in minutes.
@@ -119,6 +127,7 @@ const DEFAULTS = {
   translationLang: 'en',
   negativeTtlHours: 48,
   refreshDays: 30,
+  relookupPauseMs: 1_000,
   tokenRefreshMinutes: 50,
   allowLocalNetwork: true,
   lrclibBaseUrl: 'https://lrclib.net',
@@ -184,6 +193,7 @@ export class Settings {
       translationLang: value('merge.translationLang', 'BL_TRANSLATION_LANG') ?? DEFAULTS.translationLang,
       negativeTtlHours: int(raw['cache.negativeTtlHours'], DEFAULTS.negativeTtlHours),
       refreshDays: int(raw['cache.refreshDays'], DEFAULTS.refreshDays),
+      relookupPauseMs: int(raw['cache.relookupPauseMs'], DEFAULTS.relookupPauseMs),
       tokenRefreshMinutes: int(
         value('refresh.everyMinutes', 'BL_TOKEN_REFRESH_MINUTES'),
         DEFAULTS.tokenRefreshMinutes,
@@ -274,6 +284,7 @@ function isWritable(key: string): boolean {
     'merge.translationLang',
     'cache.negativeTtlHours',
     'cache.refreshDays',
+    'cache.relookupPauseMs',
     'refresh.everyMinutes',
     'endpoint.lrclib',
     'endpoint.netease',

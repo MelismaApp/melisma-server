@@ -15,13 +15,24 @@
  * collapsing to "not found": when this breaks, the useful question is *which* call broke.
  */
 
-import { isUnavailable, json, query, request } from '../http.ts';
+import { backOff, isUnavailable, json, query, request } from '../http.ts';
 import { MATCH_THRESHOLD, cleanTitleOf, primaryArtistOf, score, type TrackQuery } from '../match.ts';
 import { parseRichSync } from '../format/musixmatch.ts';
 import { parseLrc } from '../format/lrc.ts';
 import type { Provider, ProviderAnswer, ProviderContext } from './types.ts';
 
 const API = 'https://apic.musixmatch.com/ws/1.1';
+
+/**
+ * Body statuses that mean "I will not answer", not "there is nothing to answer with".
+ *
+ * Musixmatch replies HTTP 200 and puts the real status here. 401 is the guest token being rate-limited
+ * — the commonest of these by far — and 429 and the 5xx range are the obvious rest.
+ */
+const REFUSALS = new Set([401, 402, 429, 500, 502, 503]);
+
+/** How long to leave Musixmatch alone once it has refused. Its guest-token limit is per-hour-ish. */
+const THROTTLED_BACKOFF_MS = 10 * 60_000;
 const APP_ID = 'android-player-v1.0';
 
 /**
@@ -107,6 +118,20 @@ export const musixmatch: Provider = {
     const found = matched.value?.message?.body?.track;
     if (!found?.track_id) {
       const hint = matched.value?.message?.header?.status_code;
+
+      // The transport saw a 200; the refusal is in the body. Which is the whole trap here: without
+      // this, a throttled token looked exactly like a source that had nothing for the track, and
+      // "nothing for the track" is recorded as settled and never asked again. A bulk re-lookup would
+      // quietly write that against every song in the library.
+      if (hint && REFUSALS.has(hint)) {
+        ctx.unreachable(`matcher refused the token (${hint} in the body, HTTP 200)`);
+        // And stop asking for a while. The status is the guest token being rate-limited, so the next
+        // request would be refused too — and each one that is refused *while looking like an answer*
+        // costs another track its record.
+        backOff(API, THROTTLED_BACKOFF_MS);
+        return null;
+      }
+
       if (hint && hint !== 200) ctx.log('info', `musixmatch: matcher returned ${hint}`);
       return null;
     }

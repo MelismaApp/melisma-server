@@ -555,3 +555,38 @@ test('a track with only extras left is still re-lookupable', async () => {
   assert.equal(result.done, 1, 'an extras-only row should be re-lookupable');
   assert.ok(wordLevelAsked > asked);
 });
+
+test('the pause between tracks is honoured', async () => {
+  // The knob for a rate limit measured over a longer window than any per-request gap covers. The
+  // per-host floors keep a single lookup polite and say nothing at all about a hundred in a row.
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '260' });
+
+  const keys: string[] = [];
+  for (const title of ['One', 'Two', 'Three']) {
+    const track: TrackQuery = { ...TRACK, title };
+    await resolver.resolve(track);
+    keys.push(cacheKey(track));
+  }
+
+  const started = Date.now();
+  const result = await resolver.relookup(keys);
+  const took = Date.now() - started;
+
+  assert.equal(result.done, 3);
+  // Two gaps for three tracks: the pause goes between them, not before the first.
+  assert.ok(took >= 500, `expected at least two pauses, took ${took}ms`);
+});
+
+test('a pause of zero does not wait', async () => {
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '0' });
+  const keys: string[] = [];
+  for (const title of ['Four', 'Five']) {
+    const track: TrackQuery = { ...TRACK, title };
+    await resolver.resolve(track);
+    keys.push(cacheKey(track));
+  }
+
+  const started = Date.now();
+  await resolver.relookup(keys);
+  assert.ok(Date.now() - started < 250, 'zero should mean zero, not a default');
+});

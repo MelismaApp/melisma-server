@@ -417,6 +417,7 @@ $('#refresh-save-minutes').addEventListener('click', async () => {
 function fillSettings(config) {
   $('#set-translationLang').value = config.translationLang ?? '';
   $('#set-refreshDays').value = config.refreshDays ?? '';
+  $('#set-relookupPauseMs').value = config.relookupPauseMs ?? '';
   $('#set-negativeTtlHours').value = config.negativeTtlHours ?? '';
   $('#set-endpoint-amll').value = config.amllBaseUrl ?? '';
   $('#set-endpoint-lrclib').value = config.lrclibBaseUrl ?? '';
@@ -443,6 +444,7 @@ $('#settings-save').addEventListener('click', async () => {
   await save({
     'merge.translationLang': $('#set-translationLang').value,
     'cache.refreshDays': $('#set-refreshDays').value,
+    'cache.relookupPauseMs': $('#set-relookupPauseMs').value,
     'cache.negativeTtlHours': $('#set-negativeTtlHours').value,
     'endpoint.amll': $('#set-endpoint-amll').value,
     'endpoint.lrclib': $('#set-endpoint-lrclib').value,

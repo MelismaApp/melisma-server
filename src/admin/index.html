@@ -424,6 +424,18 @@
                 <input type="number" id="set-refreshDays" />
                 <span class="note">Sources add tracks; this is how long before asking again.</span>
               </label>
+
+            <label class="field">
+              <span>Pause between tracks when looking the library up again</span>
+              <input type="number" id="set-relookupPauseMs" />
+              <span class="note">
+                Milliseconds. The per-source spacing keeps one lookup polite; this is for a hundred in
+                a row. Musixmatch's anonymous token is limited over a longer window than any
+                per-request gap covers — if a source starts refusing partway through a run, raise this.
+                A refusal is now recorded as "could not ask" rather than "nothing here", so a throttled
+                run no longer writes itself into the cache, but it still wastes the run.
+              </span>
+            </label>
               <label class="field">
                 <span>Re-check "no lyrics" after (hours)</span>
                 <input type="number" id="set-negativeTtlHours" />

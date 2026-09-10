@@ -15,7 +15,7 @@
 import { MERGE_VERSION, merge, type Candidate, type MergeResult } from './merge.ts';
 import { activeProviders, providerById, type Provider } from './providers/index.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
-import { redact } from './http.ts';
+import { redact, sleep } from './http.ts';
 import type { Config, Settings } from './config.ts';
 import type { Store } from './db.ts';
 import { document, line, type LyricsDocument, type MergedDocument } from './model.ts';
@@ -217,8 +217,16 @@ export class Resolver {
 
     let done = 0;
     let skipped = 0;
+    // Read once: a run that takes minutes should not change pace halfway because the page was saved.
+    const pauseMs = Math.max(0, this.settings.read().relookupPauseMs);
+
     try {
-      for (const key of keys) {
+      for (const [index, key] of keys.entries()) {
+        // Between tracks, not before the first. The per-host floors keep a single lookup polite and say
+        // nothing about a hundred in a row, and a rate limit measured over a longer window than any
+        // per-request gap is exactly what this is for.
+        if (index > 0 && pauseMs > 0) await sleep(pauseMs);
+
         const track = this.trackForKey(key);
         if (!track) {
           skipped++;

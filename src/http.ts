@@ -189,6 +189,24 @@ function hostOf(url: string): string {
   }
 }
 
+/**
+ * Stops asking a host for a while, at a provider's request.
+ *
+ * `run` already backs off on an HTTP 429, but some services answer 200 and put the real status in the
+ * body — Musixmatch does, which means the transport cannot see the refusal at all and only the provider
+ * that parsed it knows. This lets it say so, and every later request to that host then short-circuits
+ * with a synthetic 429 rather than adding to the pile.
+ *
+ * Which matters more than the wasted requests: a short-circuited request is `isUnavailable`, so the
+ * lookup records "could not ask" and tries again later. Without it, a throttled source looks like a
+ * source with nothing to say, and that answer is recorded as settled.
+ */
+export function backOff(url: string, ms: number): void {
+  const host = hostOf(url);
+  const until = Date.now() + ms;
+  backoffUntil.set(host, Math.max(backoffUntil.get(host) ?? 0, until));
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
