@@ -90,6 +90,7 @@ export const apple: Provider = {
     'web player’s bearer token.',
   requires: ['appleBearerToken', 'appleMediaUserToken'],
   wordLevel: true,
+  usesIsrc: true,
 
   isConfigured(config) {
     return Boolean(config.secrets.appleBearerToken && config.secrets.appleMediaUserToken);

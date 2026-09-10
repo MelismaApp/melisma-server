@@ -339,3 +339,57 @@ test('the library fingerprint moves for each thing the view shows', () => {
   });
   assert.notEqual(store.cacheRevision(), afterRaw, 'extras should move it');
 });
+
+test('a re-lookup updates the entry it was asked about, rather than filing a second one', async () => {
+  // The trap in this operation. `cacheKey` prefers a Spotify id, then an ISRC, then name and duration
+  // — so a track first filed under its name, which has since learned its ISRC, would be re-keyed by
+  // that ISRC and written as a *second* entry while the original sat there stale. And those are
+  // precisely the tracks worth revisiting, so it would have happened to all of them.
+  const named: TrackQuery = {
+    title: 'Blinding Lights',
+    artist: 'The Weeknd',
+    album: 'After Hours',
+    durationMs: 200_046,
+  };
+  const key = cacheKey(named);
+  assert.ok(key.startsWith('q:'), `expected a name-based key, got ${key}`);
+
+  settings.update({ 'provider.netease.enabled': '1' });
+  await resolver.resolve(named);
+  assert.equal(store.allKeys().length, 1);
+
+  // Learned afterwards, exactly as the harvest or the ISRC backfill would.
+  store.noteIdentity(key, { isrc: 'USUG11904206' });
+  assert.equal(store.isrcFor(key), 'USUG11904206');
+
+  await resolver.relookup([key]);
+
+  const keys = store.allKeys();
+  assert.deepEqual(keys, [key], `re-lookup should not have re-keyed the entry; got ${keys}`);
+});
+
+test('a re-lookup asks the sources again rather than serving the cache', async () => {
+  settings.update({ 'provider.netease.enabled': '1' });
+  await resolver.resolve(TRACK);
+  const asked = wordLevelAsked;
+  assert.ok(asked > 0);
+
+  await resolver.relookup([cacheKey(TRACK)]);
+  assert.ok(wordLevelAsked > asked, 'the whole point is that it asks again');
+});
+
+test('two bulk re-lookups do not run at once', async () => {
+  settings.update({ 'provider.netease.enabled': '1' });
+  await resolver.resolve(TRACK);
+  const key = cacheKey(TRACK);
+
+  const [first, second] = await Promise.all([
+    resolver.relookup([key]),
+    resolver.relookup([key]),
+  ]);
+  // One of them declines rather than both racing every source into its rate limit.
+  assert.ok(
+    (first.done === 0 && first.skipped > 0) || (second.done === 0 && second.skipped > 0),
+    `expected one to stand down, got ${JSON.stringify([first, second])}`,
+  );
+});

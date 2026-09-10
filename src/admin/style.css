@@ -105,6 +105,13 @@ p.hint { color: var(--muted); margin: 0 0 14px; max-width: 70ch; }
   border-style: dashed;
 }
 
+/* The checkbox column in select mode: as narrow as a checkbox, and not a click target for the row. */
+th.pick,
+td.pick {
+  width: 28px;
+  padding-right: 0;
+}
+
 /* The level, in the log. Coloured by the row's own class, so this only has to size it. */
 .lvl { font-size: 10px; opacity: 0.75; letter-spacing: 0.04em; }
 

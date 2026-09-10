@@ -29,6 +29,20 @@ export interface ResolveOptions {
   force?: boolean;
   /** Do not fetch; answer only if it is already cached. */
   cacheOnly?: boolean;
+  /**
+   * Find out what the recording *is* before asking anyone for its words.
+   *
+   * For the prefetch, which is fire-and-forget and has no latency budget. An ISRC turns AMLL and
+   * Apple from a search for a common title into an exact lookup, and the ordering used to be the
+   * other way round: every source was asked by name, and the harvest learned the identity a moment
+   * too late to have helped. So the first play of a track matched worse than every play after it —
+   * and a wrong-but-accepted match is not revisited, so "worse" could mean another artist's song for
+   * thirty days.
+   *
+   * Not for `GET /v1/lyrics`: somebody is waiting for that one, and this costs a round trip before
+   * any words come back.
+   */
+  identityFirst?: boolean;
 }
 
 export interface Resolution {
@@ -107,6 +121,9 @@ export class Resolver {
   /** Tracks with an upgrade in flight right now. See [upgradeOnce]. */
   private readonly upgrading = new Set<string>();
 
+  /** One bulk re-lookup at a time: two would race each other into every rate limit at once. */
+  private relooking = false;
+
   private readonly store: Store;
   private readonly settings: Settings;
 
@@ -141,6 +158,14 @@ export class Resolver {
     const existing = this.inFlight.get(key);
     if (existing) return existing;
 
+    // Learn what this recording is, before asking anybody what it says.
+    //
+    // Only on the prefetch. `harvestOnce` writes the ISRC through `noteIdentity`, which upserts the
+    // extras row rather than only updating the entry — so it lands even though no entry exists yet,
+    // and `withKnownIdentity` below reads extras as well as entries. That mirror is what makes this
+    // ordering possible at all; before it existed, harvesting first threw the identity away.
+    if (options.identityFirst) await this.harvestOnce(config, key, track);
+
     // Ask with everything known about this recording, not only what the caller sent. An ISRC
     // learned on a previous lookup turns AMLL and Apple from a name search into an exact one, and
     // a duration recorded from Spotify makes the matcher's duration term decide rather than
@@ -158,6 +183,96 @@ export class Resolver {
     });
     this.inFlight.set(key, work);
     return work;
+  }
+
+  /**
+   * Asks every source again for tracks already cached, with everything since learned about them.
+   *
+   * The point is the identity. A track first looked up before its ISRC was known was matched on a
+   * title, and a source that answered is never re-asked — so a poor match, or the wrong recording
+   * entirely, sits there until the thirty-day expiry. This is the button that says "you know more now,
+   * go and ask again".
+   *
+   * Sequential rather than parallel: `http.ts` already spaces requests per host, and a hundred tracks
+   * asking six sources at once is a good way to be rate-limited by all of them. Nothing waits for
+   * this — the caller gets a count and watches the log and the library, both of which update live.
+   */
+  async relookup(keys: string[]): Promise<{ done: number; skipped: number }> {
+    if (this.relooking) return { done: 0, skipped: keys.length };
+    this.relooking = true;
+
+    let done = 0;
+    let skipped = 0;
+    try {
+      for (const key of keys) {
+        const track = this.trackForKey(key);
+        if (!track) {
+          skipped++;
+          continue;
+        }
+        try {
+          // `force` to bypass the cache, and no `identityFirst`: the identity is already on record,
+          // and `withKnownIdentity` puts it back into the question.
+          await this.resolve(track, { force: true });
+          done++;
+        } catch (error) {
+          skipped++;
+          this.store.log(
+            'warn',
+            null,
+            `re-lookup failed for ${key}: ${redact(error instanceof Error ? error.message : String(error))}`,
+          );
+        }
+      }
+    } finally {
+      this.relooking = false;
+      this.store.log(
+        'info',
+        null,
+        `re-looked up ${done} track${done === 1 ? '' : 's'}` +
+          (skipped > 0 ? `, skipped ${skipped}` : ''),
+      );
+    }
+    return { done, skipped };
+  }
+
+  get relookupRunning(): boolean {
+    return this.relooking;
+  }
+
+  /**
+   * The query that reproduces a stored key, so a re-lookup updates the entry instead of duplicating it.
+   *
+   * This is the whole care in this operation. `cacheKey` prefers a Spotify id, then an ISRC, then the
+   * name and duration — so handing it an ISRC the track did not have when it was first filed produces
+   * a *different* key, and the re-lookup writes a second entry while the original sits there stale.
+   * Exactly the tracks that learned their ISRC afterwards are the ones this would happen to, which is
+   * to say the ones worth revisiting.
+   *
+   * So the ISRC is offered and then withdrawn if it moves the key. Nothing is lost by leaving it out:
+   * `withKnownIdentity` reads it back from the store by key, which is why that step exists.
+   */
+  private trackForKey(key: string): TrackQuery | null {
+    const entry = this.store.getEntry(key);
+    if (!entry || !entry.title) return null;
+
+    const base: TrackQuery = {
+      title: entry.title,
+      artist: entry.artist,
+      album: entry.album,
+      durationMs: entry.durationMs,
+      spotifyId: entry.spotifyId ?? undefined,
+      isrc: entry.isrc ?? undefined,
+    };
+    if (cacheKey(base) === key) return base;
+
+    const withoutIsrc: TrackQuery = { ...base, isrc: undefined };
+    if (cacheKey(withoutIsrc) === key) return withoutIsrc;
+
+    // Neither shape reproduces it — the key predates a change in how keys are made, or the entry was
+    // written by hand. Refusing is right: a duplicate is worse than a track left alone.
+    this.store.log('warn', null, `cannot re-look up ${key}: no query reproduces that key`);
+    return null;
   }
 
   /**
@@ -220,9 +335,21 @@ export class Resolver {
     // A stored body is proof the source answered with lyrics, which is exactly what the table records.
     const archived = new Set(this.store.getRaw(key).map((raw) => raw.provider));
 
+    // Whether the question itself has improved since the source was asked. An ISRC learned after the
+    // fact is exactly that: the same source, asked exactly rather than by a title that might belong
+    // to a dozen recordings. The app has had this idea for a while, under the name `freshen`; the
+    // server only ever asked "did it answer?", never "was it answering something worse?".
+    const isrc = this.store.isrcFor(key);
+
     return activeProviders(config).filter((provider) => {
       const attempt = attempts.get(provider.id);
       if (!attempt) return !archived.has(provider.id);
+
+      // Asked by name, and an ISRC is known now. Only for the two sources that can use one — for the
+      // rest nothing has changed, and re-asking them would be requests spent to receive the same
+      // answer.
+      if (isrc && provider.usesIsrc && !attempt.hadIsrc) return true;
+
       if (attempt.outcome !== 'unreachable') return false;
       return Date.now() - attempt.at > RETRY_UNREACHABLE_MS;
     });
@@ -266,6 +393,7 @@ export class Resolver {
   ): Promise<void> {
 
     const enriched = this.withKnownIdentity(key, track);
+    const hadIsrc = Boolean(enriched.isrc?.trim());
     let gained = 0;
 
     // Which providers said they could not be reached, so the record is not overwritten below. Exactly
@@ -282,7 +410,7 @@ export class Resolver {
             log: (level, message) => this.store.log(level, provider.id, redact(message)),
             unreachable: (detail) => {
               unreachable.add(provider.id);
-              this.store.recordAttempt(key, provider.id, 'unreachable');
+              this.store.recordAttempt(key, provider.id, 'unreachable', hadIsrc);
               this.store.log('warn', provider.id, redact(detail));
             },
             learn: () => {
@@ -293,11 +421,11 @@ export class Resolver {
           });
           if (!answer) {
             if (!unreachable.has(provider.id)) {
-              this.store.recordAttempt(key, provider.id, 'none');
+              this.store.recordAttempt(key, provider.id, 'none', hadIsrc);
             }
             return;
           }
-          this.store.recordAttempt(key, provider.id, 'lyrics');
+          this.store.recordAttempt(key, provider.id, 'lyrics', hadIsrc);
           this.store.putRaw({
             key,
             provider: provider.id,
@@ -308,7 +436,7 @@ export class Resolver {
           });
           gained++;
         } catch (error) {
-          this.store.recordAttempt(key, provider.id, 'unreachable');
+          this.store.recordAttempt(key, provider.id, 'unreachable', hadIsrc);
           this.store.log(
             'warn',
             provider.id,
@@ -395,6 +523,8 @@ export class Resolver {
     config: Config,
     started: number,
   ): Promise<Resolution> {
+    // Recorded against every attempt below: what was asked matters as much as what came back.
+    const hadIsrc = Boolean(track.isrc?.trim());
     const providers = activeProviders(config);
     if (providers.length === 0) {
       this.store.log('warn', null, 'no sources are both enabled and configured');
@@ -455,10 +585,11 @@ export class Resolver {
               key,
               provider.id,
               unreachable.includes(provider.id) ? 'unreachable' : 'none',
+              hadIsrc,
             );
             return;
           }
-          this.store.recordAttempt(key, provider.id, 'lyrics');
+          this.store.recordAttempt(key, provider.id, 'lyrics', hadIsrc);
 
           this.store.putRaw({
             key,
@@ -479,7 +610,7 @@ export class Resolver {
           const message = error instanceof Error ? error.message : String(error);
           // A thrown error is never an answer about the track.
           unreachable.push(provider.id);
-          this.store.recordAttempt(key, provider.id, 'unreachable');
+          this.store.recordAttempt(key, provider.id, 'unreachable', hadIsrc);
           this.store.log('error', provider.id, redact(message));
         }
       }),

@@ -292,6 +292,14 @@
               <button class="action" id="cache-remerge">Re-merge stale</button>
               <button
                 class="action"
+                id="cache-relookup"
+                title="Ask every source again for every cached track, using the ISRC and ids learned since. A track first looked up before its ISRC was known was matched on its title alone, and a source that answered is never asked again on its own."
+              >
+                Look up again
+              </button>
+              <button class="action" id="cache-select-mode">Select</button>
+              <button
+                class="action"
                 id="cache-backfill-isrc"
                 title="Every track here that already has a Spotify id can have its exact ISRC looked up, fifty at a time. Needs the Spotify client id and secret."
               >
@@ -301,9 +309,31 @@
           </div>
 
           <div class="card" style="padding: 0; overflow: hidden">
+            <div class="card" id="cache-selection" hidden style="margin-bottom: 10px">
+              <div class="inline">
+                <label class="inline" style="color: var(--muted); font-size: 13px">
+                  <input type="checkbox" id="cache-select-all" style="width: auto" />
+                  all on this page
+                </label>
+                <span class="pill" id="cache-selected-count">none selected</span>
+                <span class="spacer"></span>
+                <button class="action" id="cache-relookup-selected">Look up again</button>
+                <button class="action" id="cache-forget-selected">Forget lyrics</button>
+                <button class="action" id="cache-forget-everything-selected">Forget everything</button>
+                <button class="action" id="cache-select-cancel">Done</button>
+              </div>
+              <div class="desc" style="margin-top: 6px">
+                <strong>Forget lyrics</strong> keeps the artwork, tempo and audio analysis, so the next
+                lookup starts from what is already known. <strong>Forget everything</strong> drops those
+                too — and the audio analysis came from an endpoint Spotify has withdrawn, so it cannot
+                be fetched again.
+              </div>
+            </div>
+
             <table id="cache-table">
               <thead>
                 <tr>
+                  <th class="pick" hidden></th>
                   <th>Song</th>
                   <th>Lyrics</th>
                   <th>What else is cached</th>

@@ -73,6 +73,16 @@ export interface Provider {
   requires: SecretName[];
   /** True when it can supply syllable timings, not just line timings. */
   wordLevel: boolean;
+
+  /**
+   * True when this source can be asked *by* ISRC rather than searched by name.
+   *
+   * Only two can — this database and Apple — and it is the difference between an exact lookup and a
+   * guess at a common title. Declared here so a track that has since learned its ISRC can re-ask the
+   * sources that would now answer a better question, without spending requests on the ones for which
+   * nothing has changed.
+   */
+  usesIsrc?: boolean;
   isConfigured(config: Config): boolean;
   fetch(query: TrackQuery, ctx: ProviderContext): Promise<ProviderAnswer | null>;
   test(ctx: ProviderContext): Promise<ProviderTest>;

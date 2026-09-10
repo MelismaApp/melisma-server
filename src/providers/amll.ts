@@ -44,6 +44,7 @@ export const amll: Provider = {
     'Community-timed word-by-word TTML, public domain. Indexed by Spotify, Apple, NetEase and ISRC.',
   requires: [],
   wordLevel: true,
+  usesIsrc: true,
   isConfigured: () => true,
 
   async fetch(track: TrackQuery, ctx: ProviderContext): Promise<ProviderAnswer | null> {

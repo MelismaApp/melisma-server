@@ -330,6 +330,18 @@ export class Store {
         // Already there.
       }
     }
+
+    // Whether an ISRC was in hand when a source was asked.
+    //
+    // Because "did this source answer?" is not the whole question. A source asked by name, before any
+    // ISRC was known, was answering a worse question than the same source asked exactly — and the
+    // answer it gave is not evidence that asking properly would give the same one. Defaults to 0, so
+    // every attempt recorded before this existed counts as name-searched, which is the safe reading.
+    try {
+      this.db.exec('ALTER TABLE attempts ADD COLUMN had_isrc INTEGER NOT NULL DEFAULT 0');
+    } catch {
+      // Already there.
+    }
   }
 
   // ---- extras ------------------------------------------------------------
@@ -894,6 +906,14 @@ export class Store {
     ].join('.');
   }
 
+  /** Every cached track, newest first, for a bulk operation over the library. */
+  allKeys(limit = 5_000): string[] {
+    const rows = this.db
+      .prepare('SELECT key FROM entries ORDER BY updated_at DESC LIMIT ?')
+      .all(Math.min(limit, 20_000)) as { key: string }[];
+    return rows.map((row) => row.key);
+  }
+
   // ---- what each source said ---------------------------------------------
 
   /**
@@ -902,26 +922,39 @@ export class Store {
    * One row per source per track, overwritten: only the latest outcome matters, and keeping a history
    * would grow without bound for a question nobody asks.
    */
-  recordAttempt(key: string, provider: string, outcome: AttemptOutcome): void {
+  recordAttempt(
+    key: string,
+    provider: string,
+    outcome: AttemptOutcome,
+    hadIsrc = false,
+  ): void {
     this.db
       .prepare(
-        `INSERT INTO attempts (key, provider, outcome, at)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO attempts (key, provider, outcome, at, had_isrc)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(key, provider) DO UPDATE SET
            outcome = excluded.outcome,
-           at = excluded.at`,
+           at = excluded.at,
+           -- Sticky: once a source has been asked with an ISRC, a later name-search does not undo
+           -- that. Otherwise a lookup that lost the identity would make the track eligible for
+           -- re-asking all over again.
+           had_isrc = MAX(attempts.had_isrc, excluded.had_isrc)`,
       )
-      .run(key, provider, outcome, Date.now());
+      .run(key, provider, outcome, Date.now(), hadIsrc ? 1 : 0);
   }
 
-  attemptsFor(key: string): Map<string, { outcome: AttemptOutcome; at: number }> {
+  attemptsFor(key: string): Map<string, { outcome: AttemptOutcome; at: number; hadIsrc: boolean }> {
     const rows = this.db
-      .prepare('SELECT provider, outcome, at FROM attempts WHERE key = ?')
+      .prepare('SELECT provider, outcome, at, had_isrc FROM attempts WHERE key = ?')
       .all(key) as Record<string, unknown>[];
     return new Map(
       rows.map((row) => [
         row.provider as string,
-        { outcome: row.outcome as AttemptOutcome, at: row.at as number },
+        {
+          outcome: row.outcome as AttemptOutcome,
+          at: row.at as number,
+          hadIsrc: Boolean(row.had_isrc),
+        },
       ]),
     );
   }

@@ -159,8 +159,9 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
     case 'POST /v1/warm': {
       const track = trackFromJson(await readJson(request));
       if (!track) return send(response, 400, { error: 'need at least a title' });
-      // Fire and forget: the app is prefetching, and it is not waiting for an answer.
-      void app.resolver.resolve(track).catch(() => undefined);
+      // Fire and forget: the app is prefetching, and it is not waiting for an answer — which is
+      // exactly what buys the room to find out what the recording is before asking for its words.
+      void app.resolver.resolve(track, { identityFirst: true }).catch(() => undefined);
       return send(response, 202, { ok: true });
     }
 
@@ -254,6 +255,42 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
         app.store.log(level, 'spotify', message),
       );
       return send(response, 200, result);
+    }
+
+    case 'POST /admin/api/relookup': {
+      const body = await readJson<{ keys?: string[] }>(request);
+      // No keys means the whole library. Bounded by `allKeys`, which is a personal cache rather than
+      // a catalogue.
+      const keys = Array.isArray(body?.keys) && body.keys.length > 0
+        ? body.keys.filter((key) => typeof key === 'string')
+        : app.store.allKeys();
+
+      if (app.resolver.relookupRunning) {
+        return send(response, 409, { error: 'a re-lookup is already running' });
+      }
+      app.store.log('info', null, `re-looking up ${keys.length} track(s) with what is known now`);
+      // Not awaited: this asks six sources per track and the page has a live view of the result.
+      void app.resolver.relookup(keys).catch(() => undefined);
+      return send(response, 202, { queued: keys.length });
+    }
+
+    case 'POST /admin/api/forget': {
+      const body = await readJson<{ keys?: string[]; everything?: boolean }>(request);
+      const keys = (Array.isArray(body?.keys) ? body.keys : []).filter(
+        (key) => typeof key === 'string' && key,
+      );
+      if (keys.length === 0) return send(response, 400, { error: 'nothing selected' });
+
+      // Opt in for the extras, the same as the single-entry delete: they hold the audio analysis,
+      // which came from an endpoint Spotify has withdrawn and cannot be fetched again.
+      const includeExtras = body?.everything === true;
+      for (const key of keys) app.store.deleteEntry(key, { includeExtras });
+      app.store.log(
+        'warn',
+        null,
+        `deleted ${includeExtras ? 'everything for' : 'the lyrics of'} ${keys.length} track(s)`,
+      );
+      return send(response, 200, { deleted: keys.length });
     }
 
     case 'GET /admin/api/refresh':

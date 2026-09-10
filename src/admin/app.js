@@ -477,6 +477,121 @@ function libraryQuery() {
   }).toString();
 }
 
+// ---- selecting rows -------------------------------------------------------
+
+/** Whether the checkbox column is showing, and which keys are ticked. */
+let selecting = false;
+const selected = new Set();
+
+/** The keys on screen, so "all on this page" means exactly that. */
+let visibleKeys = [];
+
+function toggleSelected(key) {
+  if (selected.has(key)) selected.delete(key);
+  else selected.add(key);
+  renderSelection();
+  void loadCache();
+}
+
+/**
+ * Reflects the selection into the page.
+ *
+ * The count is a pill rather than part of the button labels, because those buttons are destructive and
+ * should say what they do — "Forget 41" reads like a track number.
+ */
+function renderSelection() {
+  $('#cache-selection').hidden = !selecting;
+  $$('#cache-table th.pick').forEach((cell) => {
+    cell.hidden = !selecting;
+  });
+  $('#cache-select-mode').textContent = selecting ? 'Stop selecting' : 'Select';
+
+  const count = selected.size;
+  $('#cache-selected-count').textContent = count === 0 ? 'none selected' : `${count} selected`;
+  for (const id of [
+    '#cache-relookup-selected',
+    '#cache-forget-selected',
+    '#cache-forget-everything-selected',
+  ]) {
+    $(id).disabled = count === 0;
+  }
+}
+
+$('#cache-select-mode').addEventListener('click', () => {
+  selecting = !selecting;
+  if (!selecting) selected.clear();
+  renderSelection();
+  void loadCache();
+});
+
+$('#cache-select-cancel').addEventListener('click', () => {
+  selecting = false;
+  selected.clear();
+  renderSelection();
+  void loadCache();
+});
+
+$('#cache-select-all').addEventListener('change', (event) => {
+  // This page only, deliberately. "Everything matching the filter", behind one checkbox, next to a
+  // delete button, is not something to offer casually.
+  for (const key of visibleKeys) {
+    if (event.target.checked) selected.add(key);
+    else selected.delete(key);
+  }
+  renderSelection();
+  void loadCache();
+});
+
+async function runRelookup(keys) {
+  const button = keys ? $('#cache-relookup-selected') : $('#cache-relookup');
+  button.disabled = true;
+  try {
+    const result = await api('/admin/api/relookup', {
+      method: 'POST',
+      body: JSON.stringify(keys ? { keys } : {}),
+    });
+    // It runs in the background and the library updates itself, so this reports what was started
+    // rather than pretending to describe a finished job.
+    toast(`Asking every source again for ${result.queued} track(s) — watch the log`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$('#cache-relookup').addEventListener('click', () => void runRelookup(null));
+$('#cache-relookup-selected').addEventListener('click', () => void runRelookup([...selected]));
+
+for (const [id, everything, label] of [
+  ['#cache-forget-selected', false, 'the lyrics of'],
+  ['#cache-forget-everything-selected', true, 'everything for'],
+]) {
+  $(id).addEventListener('click', async () => {
+    const keys = [...selected];
+    if (keys.length === 0) return;
+    // Confirmed, because it cannot be undone — and `everything` includes the audio analysis, which
+    // Spotify will not serve again.
+    const detail = everything
+      ? '\n\nThis also drops the artwork, tempo and audio analysis. The analysis came from an endpoint Spotify has withdrawn and cannot be fetched again.'
+      : '';
+    if (!confirm(`Forget ${label} ${keys.length} track(s)?${detail}`)) return;
+
+    try {
+      const result = await api('/admin/api/forget', {
+        method: 'POST',
+        body: JSON.stringify({ keys, everything }),
+      });
+      toast(`Forgot ${result.deleted} track(s)`);
+      selected.clear();
+      renderSelection();
+      await loadCache();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+}
+
 /**
  * The counter row and the header line, from one stats reply.
  *
@@ -517,7 +632,26 @@ async function loadCache() {
 
   for (const row of page.rows) {
     body.append(
-      el('tr', { class: 'clickable', onclick: () => showEntry(row.key) }, [
+      el('tr', {
+        class: 'clickable',
+        // In select mode the row toggles its own checkbox rather than opening the detail: aiming for a
+        // checkbox and getting a detail pane is the sort of thing that makes a bulk delete dangerous.
+        onclick: () => (selecting ? toggleSelected(row.key) : showEntry(row.key)),
+      }, [
+        selecting
+          ? el('td', { class: 'pick' }, [
+              el('input', {
+                type: 'checkbox',
+                style: 'width: auto',
+                ...(selected.has(row.key) ? { checked: 'checked' } : {}),
+                onclick: (event) => {
+                  // Otherwise the row handler toggles it straight back.
+                  event.stopPropagation();
+                  toggleSelected(row.key);
+                },
+              }),
+            ])
+          : null,
         el('td', {}, [
           el('div', { text: row.title || '(no title)' }),
           el('div', { class: 'desc', text: [row.artist, row.album].filter(Boolean).join(' — ') }),
@@ -553,13 +687,21 @@ async function loadCache() {
   if (page.rows.length === 0) {
     body.append(
       el('tr', {}, [
-        el('td', { colspan: '5', class: 'desc', text: 'Nothing here yet — or nothing matches.' }),
+        el('td', {
+          colspan: selecting ? '6' : '5',
+          class: 'desc',
+          text: 'Nothing here yet — or nothing matches.',
+        }),
       ]),
     );
   }
 
   // Paging rather than an endless scroll: the point of this view is to answer "what do I have
   // for X", and a count you can read beats a list you have to fall through.
+  visibleKeys = page.rows.map((row) => row.key);
+  $('#cache-select-all').checked =
+    visibleKeys.length > 0 && visibleKeys.every((key) => selected.has(key));
+
   const shown = page.rows.length;
   const from = page.total === 0 ? 0 : libraryOffset + 1;
   // Filtered, because `replaceChildren` takes nodes *or strings* — so a `null` argument is coerced
