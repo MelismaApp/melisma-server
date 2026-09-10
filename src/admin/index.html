@@ -386,20 +386,25 @@
             Live. Tokens are stripped before anything is written here, but provider errors
             sometimes quote your request back, so it is still worth not screenshotting.
           </p>
-          <div class="inline" style="margin-bottom: 10px">
-            <input
-              type="search"
-              id="log-search"
-              class="mono"
-              placeholder="Search the log — a word, or a source name"
-            />
-            <select id="log-level" style="width: auto">
-              <option value="debug">everything</option>
-              <option value="info" selected>info and worse</option>
-              <option value="warn">warnings and errors</option>
-              <option value="error">errors only</option>
-            </select>
-            <span class="pill" id="log-live">live</span>
+          <!--
+            In a card, like the library's controls. Both pages do the same thing — search, filter, then
+            a panel of results — and looked unrelated mainly because this row was left bare.
+          -->
+          <div class="card">
+            <div class="inline">
+              <input
+                type="search"
+                id="log-search"
+                placeholder="Search the log — a word, or a source name"
+              />
+              <select id="log-level" style="width: auto">
+                <option value="debug">everything</option>
+                <option value="info" selected>info and worse</option>
+                <option value="warn">warnings and errors</option>
+                <option value="error">errors only</option>
+              </select>
+              <span class="pill" id="log-live">live</span>
+            </div>
           </div>
           <div class="card" id="log"></div>
         </section>
