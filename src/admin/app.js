@@ -544,6 +544,70 @@ $('#cache-select-all').addEventListener('change', (event) => {
   void loadCache();
 });
 
+/**
+ * Shows how a bulk re-lookup is getting on.
+ *
+ * Fed by the stream, which already ticks once a second — the right cadence for this, and no new polling.
+ * The server sends it every tick while a run is going rather than only when the numbers change, because
+ * a readout that stops updating looks exactly like a job that has stalled, and telling those apart is
+ * the entire point.
+ */
+function renderRelookup(progress) {
+  const state = $('#relookup-state');
+  const stop = $('#relookup-stop');
+  // Both ways in, so a run cannot be started on top of one already going from the other button.
+  const starts = [$('#cache-relookup'), $('#cache-relookup-selected')];
+
+  if (progress.running) {
+    const at = progress.done + progress.skipped;
+    state.hidden = false;
+    state.className = 'pill';
+    state.textContent =
+      `${at} of ${progress.total}` +
+      (progress.current ? ` — ${progress.current}` : '') +
+      (progress.skipped ? ` (${progress.skipped} skipped)` : '');
+    state.title = progress.current ?? '';
+    stop.hidden = false;
+    for (const button of starts) button.disabled = true;
+    return;
+  }
+
+  stop.hidden = true;
+  starts[0].disabled = false;
+  // Not enabled blindly: the selected-rows button is disabled when nothing is selected, and that rule
+  // outlives the run.
+  renderSelection();
+
+  // Nothing has run this session: no readout rather than a row of zeroes.
+  if (!progress.startedAt) {
+    state.hidden = true;
+    return;
+  }
+
+  state.hidden = false;
+  state.className = progress.cancelled ? 'pill warn' : 'pill good';
+  state.textContent = progress.cancelled
+    ? `stopped after ${progress.done} of ${progress.total}`
+    : `looked up ${progress.done} of ${progress.total}` +
+      (progress.skipped ? `, skipped ${progress.skipped}` : '');
+}
+
+$('#relookup-stop').addEventListener('click', async (event) => {
+  const button = event.target;
+  button.disabled = true;
+  try {
+    const result = await api('/admin/api/relookup/cancel', { method: 'POST' });
+    // It stops after the track it is on rather than mid-flight: a lookup already in the air will
+    // finish either way, and throwing its answer away would waste the requests it has spent.
+    toast(result.stopping ? 'Stopping after the current track' : 'Nothing was running');
+    renderRelookup(result.progress);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 async function runRelookup(keys) {
   const button = keys ? $('#cache-relookup-selected') : $('#cache-relookup');
   button.disabled = true;
@@ -554,7 +618,10 @@ async function runRelookup(keys) {
     });
     // It runs in the background and the library updates itself, so this reports what was started
     // rather than pretending to describe a finished job.
-    toast(`Asking every source again for ${result.queued} track(s) — watch the log`);
+    toast(`Asking every source again for ${result.queued} track(s)`);
+    // The stream will take over within the second; this fills the gap so the button state changes at
+    // the moment it is pressed rather than a beat later.
+    renderRelookup({ running: true, total: result.queued, done: 0, skipped: 0, cancelled: false, startedAt: Date.now(), current: null });
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -1330,6 +1397,11 @@ function startStream() {
       return;
     }
 
+    if (event.kind === 'relookup') {
+      renderRelookup(event);
+      return;
+    }
+
     // A log line. Rendered even when the log tab is hidden, so switching to it shows what happened
     // rather than only what happens next.
     if (!logVisible(event, logFilter())) return;
@@ -1430,6 +1502,9 @@ function debounce(fn, ms) {
 async function boot() {
   await loadConfig();
   await refreshCounters();
+  // A run started before this page was opened, or before it was reloaded, still has a readout — and the
+  // readout is in the header, so it is worth having before a tab is even chosen.
+  await api('/admin/api/relookup').then(renderRelookup).catch(() => {});
   // Before the first tab is chosen, so the page is live wherever it opens.
   startStream();
   selectTab(location.hash.slice(1) || 'sources');

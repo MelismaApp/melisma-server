@@ -383,15 +383,19 @@ test('two bulk re-lookups do not run at once', async () => {
   await resolver.resolve(TRACK);
   const key = cacheKey(TRACK);
 
+  const asked = wordLevelAsked;
   const [first, second] = await Promise.all([
     resolver.relookup([key]),
     resolver.relookup([key]),
   ]);
-  // One of them declines rather than both racing every source into its rate limit.
+
+  // One of them declines rather than both racing every source into its rate limit. The declining call
+  // gets a snapshot of the run that is *still going*, which is how a caller tells the two apart.
   assert.ok(
-    (first.done === 0 && first.skipped > 0) || (second.done === 0 && second.skipped > 0),
-    `expected one to stand down, got ${JSON.stringify([first, second])}`,
+    first.running || second.running,
+    `expected one to see a run in progress, got ${JSON.stringify([first, second])}`,
   );
+  assert.equal(wordLevelAsked, asked + 1, 'the track should have been looked up once, not twice');
 });
 
 // ---- what the review found -------------------------------------------------
@@ -520,7 +524,8 @@ test('a track filed before its duration was known is still re-lookupable', async
 
   const asked = wordLevelAsked;
   const result = await resolver.relookup([key]);
-  assert.deepEqual(result, { done: 1, skipped: 0 }, 'it should not have been skipped');
+  assert.equal(result.done, 1, 'it should not have been skipped');
+  assert.equal(result.skipped, 0);
   assert.ok(wordLevelAsked > asked);
   assert.deepEqual(store.allKeys(), [key], 'and it must not have been re-keyed');
 });
@@ -589,4 +594,50 @@ test('a pause of zero does not wait', async () => {
   const started = Date.now();
   await resolver.relookup(keys);
   assert.ok(Date.now() - started < 250, 'zero should mean zero, not a default');
+});
+
+test('a run reports its progress and can be stopped', async () => {
+  // A job that takes minutes with no readout and no way out is a job you daren't start.
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '120' });
+
+  const keys: string[] = [];
+  for (const title of ['A', 'B', 'C', 'D', 'E', 'F']) {
+    const track: TrackQuery = { ...TRACK, title };
+    await resolver.resolve(track);
+    keys.push(cacheKey(track));
+  }
+
+  assert.equal(resolver.relookupProgress.running, false, 'nothing running to begin with');
+
+  const run = resolver.relookup(keys);
+  assert.ok(await until(() => resolver.relookupProgress.running), 'it should report itself running');
+  assert.equal(resolver.relookupProgress.total, 6);
+
+  // Wait until it is genuinely under way, then stop it.
+  assert.ok(await until(() => resolver.relookupProgress.done >= 1));
+  assert.equal(resolver.cancelRelookup(), true);
+
+  const final = await run;
+  assert.equal(final.running, false);
+  assert.equal(final.cancelled, true, 'it should say it was stopped rather than finished');
+  assert.ok(final.done >= 1 && final.done < 6, `stopped partway, got ${final.done} of 6`);
+
+  // The readout survives the end of the run, so the page can say how it went.
+  assert.equal(resolver.relookupProgress.cancelled, true);
+  assert.equal(resolver.relookupProgress.current, null);
+});
+
+test('cancelling when nothing is running is not an error', () => {
+  assert.equal(resolver.cancelRelookup(), false);
+});
+
+test('a finished run is not marked as cancelled', async () => {
+  settings.update({ 'provider.netease.enabled': '1', 'cache.relookupPauseMs': '0' });
+  const track: TrackQuery = { ...TRACK, title: 'Solo' };
+  await resolver.resolve(track);
+
+  const final = await resolver.relookup([cacheKey(track)]);
+  assert.equal(final.cancelled, false);
+  assert.equal(final.done, 1);
+  assert.equal(final.running, false);
 });

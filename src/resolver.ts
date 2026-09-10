@@ -45,6 +45,29 @@ export interface ResolveOptions {
   identityFirst?: boolean;
 }
 
+/** How a bulk re-lookup is getting on, for the admin page. */
+export interface RelookupProgress {
+  running: boolean;
+  total: number;
+  done: number;
+  skipped: number;
+  /** True when it stopped because it was asked to, rather than because it finished. */
+  cancelled: boolean;
+  startedAt: number | null;
+  /** The track being asked about right now, or null between them. */
+  current: string | null;
+}
+
+const IDLE_RELOOKUP: RelookupProgress = {
+  running: false,
+  total: 0,
+  done: 0,
+  skipped: 0,
+  cancelled: false,
+  startedAt: null,
+  current: null,
+};
+
 export interface Resolution {
   document: MergedDocument | null;
   key: string;
@@ -123,6 +146,16 @@ export class Resolver {
 
   /** One bulk re-lookup at a time: two would race each other into every rate limit at once. */
   private relooking = false;
+
+  /**
+   * What the run in progress is doing, and whether it has been asked to stop.
+   *
+   * A job that takes minutes with no readout and no way out is a job you daren't start. The count is
+   * kept here rather than derived, because only the loop knows how far it has got.
+   */
+  private progress: RelookupProgress = { ...IDLE_RELOOKUP };
+
+  private cancelRequested = false;
 
   private readonly store: Store;
   private readonly settings: Settings;
@@ -211,34 +244,60 @@ export class Resolver {
    * asking six sources at once is a good way to be rate-limited by all of them. Nothing waits for
    * this — the caller gets a count and watches the log and the library, both of which update live.
    */
-  async relookup(keys: string[]): Promise<{ done: number; skipped: number }> {
-    if (this.relooking) return { done: 0, skipped: keys.length };
+  async relookup(keys: string[]): Promise<RelookupProgress> {
+    if (this.relooking) return this.relookupProgress;
     this.relooking = true;
+    this.cancelRequested = false;
+    this.progress = {
+      running: true,
+      total: keys.length,
+      done: 0,
+      skipped: 0,
+      cancelled: false,
+      startedAt: Date.now(),
+      current: null,
+    };
 
-    let done = 0;
-    let skipped = 0;
     // Read once: a run that takes minutes should not change pace halfway because the page was saved.
     const pauseMs = Math.max(0, this.settings.read().relookupPauseMs);
 
     try {
       for (const [index, key] of keys.entries()) {
+        // Checked between tracks rather than mid-flight: a lookup already in the air is going to
+        // finish either way, and abandoning its result would waste the requests it has already spent.
+        if (this.cancelRequested) {
+          this.progress = { ...this.progress, cancelled: true };
+          break;
+        }
+
         // Between tracks, not before the first. The per-host floors keep a single lookup polite and say
         // nothing about a hundred in a row, and a rate limit measured over a longer window than any
         // per-request gap is exactly what this is for.
         if (index > 0 && pauseMs > 0) await sleep(pauseMs);
+        if (this.cancelRequested) {
+          this.progress = { ...this.progress, cancelled: true };
+          break;
+        }
 
         const track = this.trackForKey(key);
         if (!track) {
-          skipped++;
+          this.progress = { ...this.progress, skipped: this.progress.skipped + 1 };
           continue;
         }
+
+        // Named while it is being asked about, so the page can say what it is waiting on rather than
+        // only how far along it is.
+        this.progress = {
+          ...this.progress,
+          current: [track.artist, track.title].filter(Boolean).join(' — ') || key,
+        };
         try {
           // `force` to bypass the cache, and no `identityFirst`: the identity is already on record,
           // and `withKnownIdentity` puts it back into the question.
           await this.resolve(track, { force: true });
-          done++;
+          this.progress = { ...this.progress, done: this.progress.done + 1 };
         } catch (error) {
-          skipped++;
+          this.progress = { ...this.progress, skipped: this.progress.skipped + 1 };
           this.store.log(
             'warn',
             null,
@@ -247,19 +306,32 @@ export class Resolver {
         }
       }
     } finally {
+      const { done, skipped, cancelled, total } = this.progress;
       this.relooking = false;
+      this.cancelRequested = false;
+      // Kept rather than reset, so the page can show how it ended instead of the readout vanishing at
+      // the moment the answer arrives.
+      this.progress = { ...this.progress, running: false, current: null };
       this.store.log(
         'info',
         null,
-        `re-looked up ${done} track${done === 1 ? '' : 's'}` +
+        (cancelled ? `re-lookup stopped after ${done} of ${total}` : `re-looked up ${done} track${done === 1 ? '' : 's'}`) +
           (skipped > 0 ? `, skipped ${skipped}` : ''),
       );
     }
-    return { done, skipped };
+    return this.relookupProgress;
   }
 
-  get relookupRunning(): boolean {
-    return this.relooking;
+  /** Asks the run in progress to stop after the track it is on. */
+  cancelRelookup(): boolean {
+    if (!this.relooking) return false;
+    this.cancelRequested = true;
+    this.store.log('info', null, 're-lookup asked to stop');
+    return true;
+  }
+
+  get relookupProgress(): RelookupProgress {
+    return { ...this.progress };
   }
 
   /**

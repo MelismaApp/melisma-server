@@ -265,7 +265,7 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
         ? body.keys.filter((key) => typeof key === 'string')
         : app.store.allKeys();
 
-      if (app.resolver.relookupRunning) {
+      if (app.resolver.relookupProgress.running) {
         return send(response, 409, { error: 'a re-lookup is already running' });
       }
       app.store.log('info', null, `re-looking up ${keys.length} track(s) with what is known now`);
@@ -291,6 +291,16 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
         `deleted ${includeExtras ? 'everything for' : 'the lyrics of'} ${keys.length} track(s)`,
       );
       return send(response, 200, { deleted: keys.length });
+    }
+
+    case 'GET /admin/api/relookup':
+      return send(response, 200, app.resolver.relookupProgress);
+
+    case 'POST /admin/api/relookup/cancel': {
+      const stopping = app.resolver.cancelRelookup();
+      // 200 either way: "there was nothing to stop" is an answer, not a failure, and the page may
+      // simply be a second later than the run finishing.
+      return send(response, 200, { stopping, progress: app.resolver.relookupProgress });
     }
 
     case 'GET /admin/api/refresh':
@@ -599,11 +609,22 @@ function stream(app: App, request: IncomingMessage, response: ServerResponse): v
 
   let lastId = 0;
   let lastRevision = '';
+  // So the final state of a run is sent once after it ends, and then not repeated forever.
+  let lastRelookupAt: number | null = null;
   const push = () => {
     const events = app.store.recentEvents(50).filter((event) => event.id > lastId);
     for (const event of events.reverse()) {
       lastId = Math.max(lastId, event.id);
       response.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+
+    // Progress on a bulk re-lookup, while there is one. Sent every tick rather than only on a change:
+    // a readout that stops updating is indistinguishable from a job that has stalled, and the whole
+    // point of this is to be able to tell.
+    const relookup = app.resolver.relookupProgress;
+    if (relookup.running || relookup.startedAt !== lastRelookupAt) {
+      lastRelookupAt = relookup.startedAt;
+      response.write(`data: ${JSON.stringify({ kind: 'relookup', ...relookup })}\n\n`);
     }
 
     // And whether the library changed, so the page can refresh itself instead of being reloaded.

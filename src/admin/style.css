@@ -125,6 +125,17 @@ td.pick {
   white-space: nowrap;
 }
 
+/*
+ * The re-lookup readout, in the header. It names the track being asked about, and track names are
+ * arbitrarily long, so it is truncated rather than allowed to push the header around — the full text
+ * is on the title attribute.
+ */
+#relookup-state {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .pill.good { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
 .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
 .pill.bad  { color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
