@@ -31,7 +31,7 @@ export interface FetchResult {
 }
 
 const USER_AGENT =
-  'BetterLyricsServer/0.1 (personal cache; https://github.com/MangoTornado/better-lyrics-server)';
+  'MelismaServer/0.1 (personal cache; https://github.com/MelismaApp/melisma-server)';
 
 /** Politeness per host: one request at a time, with a floor on the gap between them. */
 const MIN_INTERVAL_MS: Record<string, number> = {

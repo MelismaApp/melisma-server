@@ -388,7 +388,7 @@ export function writeTtml(doc: LyricsDocument | MergedDocument, indent = '  '): 
     // Not part of the TTML vocabulary, but a comment costs nothing and answers "where did
     // this file come from" for anyone who opens it later.
     out.push(
-      `${indent.repeat(3)}<!-- merged by better-lyrics-server v${doc.algorithmVersion}: ` +
+      `${indent.repeat(3)}<!-- merged by melisma-server v${doc.algorithmVersion}: ` +
         `timing=${doc.provenance.timing}` +
         (doc.provenance.translation ? `, translation=${doc.provenance.translation}` : '') +
         (doc.provenance.romanization ? `, romanization=${doc.provenance.romanization}` : '') +

@@ -1,4 +1,4 @@
-# Better Lyrics Server — operational commands.
+# Melisma Server — operational commands.
 #
 # Most targets delegate to Kamal. Requires Kamal 2.x (gem install kamal).
 #
@@ -38,10 +38,10 @@ new-key: ## Rotate the local API key
 	node scripts/key.ts --new
 
 docker-build: ## Build the image locally
-	docker build -t better-lyrics-server:local .
+	docker build -t melisma-server:local .
 
 docker-run: ## Run the image locally on :8787 with a persistent volume
-	docker run --rm -p 8787:8787 -v better-lyrics-data:/data better-lyrics-server:local
+	docker run --rm -p 8787:8787 -v better-lyrics-data:/data melisma-server:local
 
 setup: ## First-time Kamal bootstrap on the target host
 	kamal setup
@@ -75,5 +75,5 @@ stop: ## Stop the app (leaves the proxy up)
 
 backup: ## Copy the deployed database here, timestamped
 	@# The one piece of state worth keeping: every archived provider response, and the tokens.
-	kamal app exec --reuse "cat /data/better-lyrics.db" > "better-lyrics-$$(date +%Y%m%d-%H%M%S).db"
-	@echo "Wrote better-lyrics-$$(date +%Y%m%d-%H%M%S).db"
+	kamal app exec --reuse "cat /data/better-lyrics.db" > "melisma-$$(date +%Y%m%d-%H%M%S).db"
+	@echo "Wrote melisma-$$(date +%Y%m%d-%H%M%S).db"

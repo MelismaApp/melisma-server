@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import type { AddressInfo } from 'node:net';
+import { readFile } from 'node:fs/promises';
+import { connect } from 'node:net';
 
 import { createApp, isLocalAddress, start, type App } from '../src/server.ts';
 import { MERGE_VERSION } from '../src/merge.ts';
@@ -1287,11 +1289,47 @@ test('an unknown route is a 404, not a crash', async () => {
   assert.equal((await authed('/v1/nothing-here')).status, 404);
 });
 
+/**
+ * Sends a request line exactly as given, without a client tidying it up first.
+ *
+ * `fetch` resolves `..` segments before anything goes out, so a traversal written into a `fetch` URL
+ * never reaches the server as a traversal — it arrives already collapsed to a path that was always
+ * safe. A test built on it passes whatever the server does, which is how this one passed for a long
+ * time while checking nothing. The only way to aim a `..` at the server is to write the bytes.
+ */
+async function rawGet(path: string): Promise<string> {
+  const { port } = server.address() as AddressInfo;
+  return await new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1', () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+    });
+    let seen = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      seen += chunk;
+    });
+    socket.on('end', () => resolve(seen));
+    socket.on('error', reject);
+  });
+}
+
 test('a path traversal in an asset request gets nothing', async () => {
-  for (const path of ['/assets/..%2f..%2fpackage.json', '/assets/../../package.json']) {
-    const response = await fetch(`${base}${path}`);
-    assert.notEqual(response.status, 200);
-    assert.ok(!(await response.text()).includes('better-lyrics-server'));
+  // The needle is read out of the file rather than written here. Hardcoded, renaming the package
+  // quietly turned this into an assertion that passes on a *full* leak — worse than no test, because
+  // it reports safety it is no longer checking.
+  const { name } = JSON.parse(
+    await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as { name: string };
+
+  for (const path of [
+    '/assets/../../package.json',
+    '/assets/..%2f..%2fpackage.json',
+    '/assets/....//....//package.json',
+    '/assets/..\\..\\package.json',
+  ]) {
+    const raw = await rawGet(path);
+    assert.ok(!raw.includes(name), `leaked package.json via ${path}`);
+    assert.ok(!raw.startsWith('HTTP/1.1 200'), `served something for ${path}`);
   }
 });
 

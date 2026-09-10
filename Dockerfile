@@ -36,6 +36,8 @@ ENV BL_PORT=8787
 # The database holds the cache *and* the credentials, so it lives on a volume rather than in the
 # image layer. Created here with the right owner: a fresh named volume inherits the ownership of
 # the directory it shadows, which is the only way the unprivileged user can write to it.
+# Still better-lyrics.db, and deliberately: this path names an existing file inside a volume that
+# already holds a cache and a set of pasted tokens. Renaming it would start an empty database.
 ENV BL_DATA=/data/better-lyrics.db
 RUN mkdir -p /data && chown node:node /data
 VOLUME ["/data"]

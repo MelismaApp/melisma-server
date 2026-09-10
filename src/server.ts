@@ -81,7 +81,7 @@ export function start(
     const where = `http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${port}`;
     const say = overrides.quiet ? () => {} : (line: string) => console.log(line);
 
-    say(`better-lyrics-server listening on ${where}`);
+    say(`melisma-server listening on ${where}`);
     say(`admin:   ${where}/`);
     say(`api key: ${app.settings.read().apiKey}`);
 

@@ -9,6 +9,10 @@
 #
 # Then: cp .kamal/secrets.sample .kamal/secrets, fill it in, and `make setup`.
 
+# Renamed to Melisma everywhere a person reads it, but *not* here. Kamal identifies the whole
+# deployment by `service`: change it and Kamal sees an entirely new app, so `deploy` no longer knows
+# what is running and `setup` has to be run again, leaving the old containers behind to remove by
+# hand. The name is invisible to users, and none of that hassle buys anything.
 service: better-lyrics-server
 image: mangotornado/better-lyrics-server   # TODO(registry path)
 
@@ -51,6 +55,10 @@ proxy:
 
 # The cache *and* the credentials live in this volume. Losing it means re-fetching every track and
 # re-pasting every token, so it is the one piece of state worth backing up.
+#
+# Which is exactly why the name still says better-lyrics: renaming a volume does not move it. Docker
+# would create a new empty one, and the server would come up with no cache and no tokens while the
+# real data sat in an orphan nobody was looking at. Same for the filename below.
 volumes:
   - "better-lyrics-data:/data"
 

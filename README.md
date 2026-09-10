@@ -1,6 +1,6 @@
 <div align="center">
 
-# Better Lyrics Server
+# Melisma Server
 
 **A personal lyrics server: holds the tokens your phone shouldn't, merges every source into one
 document, and remembers the answer.**
@@ -13,7 +13,7 @@ document, and remembers the answer.**
 
 </div>
 
-Built for [**Better Lyrics**](https://github.com/MangoTornado/better-lyrics), an Android lyrics app.
+Built for [**Melisma**](https://github.com/MelismaApp/melisma), an Android lyrics app.
 The app works well without it — this makes it better at the two things a phone cannot do itself:
 
 1. **It holds the credentials.** Apple Music has the best lyrics that exist: syllable timings with
@@ -78,13 +78,13 @@ region-locked endpoint, or a rate limit the server hit — archived so they merg
 Needs **Node 24 or newer** and nothing else. TypeScript runs directly; SQLite is built into Node.
 
 ```sh
-git clone https://github.com/MangoTornado/better-lyrics-server
-cd better-lyrics-server
+git clone https://github.com/MelismaApp/melisma-server
+cd melisma-server
 npm start
 ```
 
 ```
-better-lyrics-server listening on http://127.0.0.1:8787
+melisma-server listening on http://127.0.0.1:8787
 admin:   http://127.0.0.1:8787/
 api key: 41edb5cc…
 ```
@@ -120,7 +120,7 @@ app needs the new value.
 
 ## Point the app at it
 
-In Better Lyrics: **Settings → Developer**
+In Melisma: **Settings → Developer**
 
 | Field | Value |
 |---|---|
@@ -169,7 +169,7 @@ make deploy                               # every time after that
 
 | | |
 |---|---|
-| `image` | your registry path, e.g. `you/better-lyrics-server` |
+| `image` | your registry path, e.g. `you/melisma-server` |
 | `servers.web` | the VM's IP or hostname |
 | `ssh.user` | a user with Docker access on that VM |
 | `registry` | Docker Hub, GHCR, OCIR — server and credentials |
@@ -203,7 +203,8 @@ stage, no lockfile to keep in step.
 
 > [!WARNING]
 > **Back up the volume.** `better-lyrics-data:/data` holds the cache *and* the credentials. Lose it
-> and you re-fetch every track and re-paste every token. That is what `make backup` is for.
+> and you re-fetch every track and re-paste every token. That is what `make backup` is for. It keeps
+> the old name on purpose — renaming a volume does not move it, it creates an empty one.
 
 > [!CAUTION]
 > **Leave `BL_ALLOW_LOCAL_NETWORK: "0"` alone.** The local-network exception exists so a phone on your
@@ -223,7 +224,7 @@ An environment variable overrides the stored value and shows read-only in the pa
 | `BL_API_KEY` | generated | the one key, for the app and the admin page |
 | `BL_HOST` | `127.0.0.1` | `0.0.0.0` in a container |
 | `BL_PORT` | `8787` | |
-| `BL_DATA` | `./data/better-lyrics.db` | database path |
+| `BL_DATA` | `./data/better-lyrics.db` | database path (old name kept: it points at existing data) |
 | `BL_ALLOW_LOCAL_NETWORK` | `1` | let this machine and the LAN look up without a key |
 | `BL_TRANSLATION_LANG` | `en` | which translation to prefer when a source ships several |
 | `BL_TOKEN_REFRESH_MINUTES` | `50` | how often to renew the Spotify token |
