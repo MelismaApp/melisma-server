@@ -1,28 +1,85 @@
+<div align="center">
+
 # Better Lyrics Server
 
-A personal caching and merging lyrics server for [Better Lyrics](https://github.com/MangoTornado/better-lyrics).
+**A personal lyrics server: holds the tokens your phone shouldn't, merges every source into one
+document, and remembers the answer.**
 
-It does two things the phone cannot:
+![Node 24+](https://img.shields.io/badge/Node-24%2B-5FA04E?logo=nodedotjs&logoColor=white)
+![Dependencies: none](https://img.shields.io/badge/dependencies-none-5fd7c4)
+![SQLite built in](https://img.shields.io/badge/storage-node%3Asqlite-003B57?logo=sqlite&logoColor=white)
+![Deploy: Kamal](https://img.shields.io/badge/deploy-Kamal%202-8b93a7)
 
-1. **Holds the credentials.** Apple Music has the best lyrics that exist — syllable timings
-   with official romanizations and translations — and getting them needs two tokens that have
-   no business being inside an APK. They live here instead.
-2. **Merges the sources instead of racing them.** No provider is best at everything. One
-   source supplies the timing; the rest lend translations, readings, background vocals and
-   credits. The result is a document better than any single source returned.
+</div>
 
-It is built to be run by one person for themselves. See [Sharing it](#sharing-it).
+Built for [**Better Lyrics**](https://github.com/MangoTornado/better-lyrics), an Android lyrics app.
+The app works well without it — this makes it better at the two things a phone cannot do itself:
 
-## Running it
+1. **It holds the credentials.** Apple Music has the best lyrics that exist: syllable timings with
+   official romanizations and translations. Getting them needs two tokens that have no business
+   being inside an APK, so they live here instead.
+2. **It merges instead of racing.** No source is best at everything. One supplies the timing, the
+   rest lend translations, readings, background vocals and credits. The result is better than any
+   single source returned.
 
-Needs Node 24 or newer, and nothing else — no dependencies, no build step, no container.
-TypeScript runs directly, and SQLite is built into Node.
+> [!IMPORTANT]
+> Run this for yourself, with your own accounts. It is not built to be shared, and sharing it is
+> what gets accounts terminated — see [Sharing it](#sharing-it).
+
+## Contents
+
+- [What it does](#what-it-does)
+- [Quick start](#quick-start)
+- [Point the app at it](#point-the-app-at-it)
+- [Tokens](#tokens)
+- [Deploying it](#deploying-it)
+- [Configuration](#configuration)
+- [API](#api)
+- [How it works](#how-it-works)
+- [Sharing it](#sharing-it)
+- [Docs](#docs)
+
+## What it does
+
+🎼 **Merges six sources into one document.** Apple Music, AMLL, NetEase, Musixmatch, Spotify and
+LRCLIB, all asked at once — then one is chosen to own the timing and the rest are borrowed from, a
+field at a time.
+
+🔁 **Renews the Spotify token by itself.** The image carries a Chromium and drives it, because
+Spotify closed the endpoint that used to trade a cookie for a token. Paste one cookie, once.
+
+🗃️ **Archives every raw response.** Improving the merge is then a local recompute rather than
+thousands of fresh requests to services doing this for free.
+
+🎨 **Fetches everything that is not the words.** Cover art, a colour palette, tempo, and Spotify's
+audio analysis — down the same request, so the app's now-playing screen needs no second lookup.
+
+🩹 **Never files an outage as an answer.** A 404 means "no lyrics here" and is remembered; a
+timeout or a 429 means the question never got through, so the cache is left as it was.
+
+📚 **Has an admin page** for pasting tokens, testing each source against a real track, browsing
+everything cached, and watching a live log — with a bulk re-lookup that can be paused mid-run
+when a source starts throttling.
+
+⚙️ **Installs nothing.** Node 24 and zero dependencies. No build step, no lockfile, no container
+required to run it.
+
+### What it gives the app
+
+One request, one finished document — no fan-out from the phone and no tokens on it. It is ranked
+**first** in the app's source list by default, because an answer it already has cost nobody a
+request. Lyrics the phone found and the server could not can be **contributed back** — a
+region-locked endpoint, or a rate limit the server hit — archived so they merge in from then on.
+
+## Quick start
+
+Needs **Node 24 or newer** and nothing else. TypeScript runs directly; SQLite is built into Node.
 
 ```sh
-npm start           # or: node src/main.ts
+git clone https://github.com/MangoTornado/better-lyrics-server
+cd better-lyrics-server
+npm start
 ```
-
-It prints the admin URL and an API key it generated on first boot:
 
 ```
 better-lyrics-server listening on http://127.0.0.1:8787
@@ -30,164 +87,151 @@ admin:   http://127.0.0.1:8787/
 api key: 41edb5cc…
 ```
 
-Open the admin page, paste the key, and paste tokens into the **Tokens** tab. Every source
-has a **Test** button that says what is actually wrong rather than just failing.
+Open the admin page, paste that key to sign in, and it already works: **LRCLIB, AMLL, NetEase and
+Musixmatch need no account**, and between them cover most music including word-by-word timing.
+[Tokens](#tokens) add to that.
 
-The **Library** tab is every song the server has been asked about and everything it holds on each —
-the merged lyrics, every provider's raw response, and the artwork, palette, tempo and analysis the
-tokens turned up. Ordered by artist and title, searchable by name *or by the words themselves*, and
-filterable down to what is missing: no lyrics, no word timings, no translation, no artwork.
+| Command | |
+|---|---|
+| `npm start` | run it |
+| `npm run dev` | run it, restarting on change |
+| `npm test` | the suite — no network required |
+| `npm run key` | print the API key |
+| `node scripts/key.ts --new` | rotate it |
+| `node scripts/key.ts --set <value>` | use one you chose |
 
-`npm test` runs the suite. `npm run dev` restarts on change.
+Prefer a container? `make docker-build && make docker-run` runs it on :8787 with a volume.
 
-### The key
+<details>
+<summary><b>About the API key</b></summary>
 
-One key does both jobs: the admin page asks for it, and the app sends it. It is generated on
-first boot and printed — but a printed key is no use once the terminal has scrolled, so:
+One key does both jobs: the admin page asks for it, the app sends it. It is generated on first boot
+and printed once — and a printed key is no use once the terminal has scrolled, hence `npm run key`.
+
+`BL_API_KEY` in the environment overrides the stored one, which is how the deployment sets it. When
+that is in play `npm run key` says so, rather than confidently printing a key the running server is
+not using.
+
+Rotating invalidates the old key immediately: the admin page asks again on its next visit, and the
+app needs the new value.
+</details>
+
+## Point the app at it
+
+In Better Lyrics: **Settings → Developer**
+
+| Field | Value |
+|---|---|
+| **Cache server URL** | `http://<your-machine>:8787` — no trailing slash, no `/v1` |
+| **Cache server key** | only needed if the server is **not** on your own network |
+
+A lookup from your own machine or your own Wi-Fi is let through without a key, because a lookup can
+only cause a lyric fetch. Anything [deployed](#deploying-it) off your network always wants the key.
+
+To check it end to end, use **Try a track** in the admin page: it runs a real lookup for any track
+you name and shows what every source returned, including why a candidate lost.
+
+## Tokens
+
+All optional. A source with no credential is skipped rather than queried, so leaving one enabled
+while you go and find its token costs nothing.
+
+| I want… | Paste this | Lasts |
+|---|---|---|
+| Apple's word-by-word lyrics, romanizations and translations | [Apple developer + media user token](docs/TOKENS.md#apple-music) | months / session |
+| The lyrics the Spotify app shows | [Spotify `sp_dc` cookie](docs/TOKENS.md#spotify-sp_dc-cookie) | ~1 year |
+| Reliable ISRCs and cover art | [Spotify client id + secret](docs/TOKENS.md#spotify-application) | forever |
+| A wider Musixmatch catalogue | [Musixmatch user token](docs/TOKENS.md#musixmatch) | months |
+| Regional NetEase catalogues | [NetEase cookie](docs/TOKENS.md#netease) | months |
+
+**→ [docs/TOKENS.md](docs/TOKENS.md) has step-by-step instructions for every one**, including why the
+`sp_dc` cookie is the only Spotify setup worth doing.
+
+Paste them into the **Tokens** tab, then check them in **Sources**: each source has a **Test**
+button, and *Test the sources* runs a real lookup through every one and reports what each said. Or
+set them as [environment variables](#configuration), in which case the page shows them read-only.
+
+## Deploying it
+
+Docker plus [Kamal 2](https://kamal-deploy.org) (`gem install kamal`). `kamal-proxy` listens on :80;
+put a Cloudflare Tunnel or another TLS terminator in front of it — TLS is not terminated here.
 
 ```sh
-npm run key                       # print it
-node scripts/key.ts --new         # rotate it
-node scripts/key.ts --set <value> # use one you chose
-make remote-key                   # print it on a deployed host
+cp .kamal/secrets.sample .kamal/secrets   # registry login, BL_API_KEY, any tokens
+$EDITOR config/deploy.yml                 # replace the TODO(...) markers
+make setup                                # one-time bootstrap and first deploy
+make deploy                               # every time after that
 ```
 
-`BL_API_KEY` in the environment overrides the stored one, which is how the deployment sets it.
-When that is in play `npm run key` says so, rather than confidently printing a key the running
-server is not using.
+**1. `config/deploy.yml`** — four markers:
 
-Rotating invalidates the old one immediately: the admin page asks again on its next visit, and
-the app needs the new value in **Settings → Developer → Cache server key**.
-
-## The tokens
-
-Everything works with no tokens at all — LRCLIB, the AMLL community database, NetEase and
-Musixmatch need no account, and between them cover most music including word-by-word timing.
-Tokens add to that.
-
-### Apple Music, without a developer membership
-
-Two tokens, and a subscription only gets you one:
-
-- **Developer token** — a JWT. Normally from an Apple Developer Program membership ($99/yr)
-  and a MusicKit key. You do not need one: the web player's own token works. Open
-  music.apple.com → DevTools → Network → click a song → find a request to
-  `amp-api.music.apple.com` → copy the `Authorization: Bearer eyJ…` value. It is shared by
-  every web listener and lasts months. The admin page decodes it and shows the expiry, so
-  "the server broke" and "paste a fresh token" are distinguishable.
-- **Media user token** — this is the one your subscription gets you. Signed in at
-  music.apple.com → DevTools → Application → Cookies → `media-user-token`. It dies with the
-  browser session, so if lyrics start returning 403 this is what to replace.
-
-### The rest
-
-| Token | What it adds |
+| | |
 |---|---|
-| Spotify `sp_dc` cookie | Spotify's own lyrics — line-timed, but matched to the exact track id, so it is a text reference the merge can trust |
-| Musixmatch user token | Optional; the server mints an anonymous one, yours reaches more of the catalogue |
-| NetEase cookie | Optional; raises the per-IP limits and unlocks some regional catalogues |
+| `image` | your registry path, e.g. `you/better-lyrics-server` |
+| `servers.web` | the VM's IP or hostname |
+| `ssh.user` | a user with Docker access on that VM |
+| `registry` | Docker Hub, GHCR, OCIR — server and credentials |
 
-Any of these can also come from the environment (`BL_APPLE_BEARER_TOKEN`,
-`BL_SP_DC_COOKIE`, …), in which case the admin page shows them as read-only.
+Also check `builder.arch`. It is `arm64` for an Oracle Ampere host; change it if your VM is x86.
 
-## Keeping the short-lived tokens alive
+**2. `.kamal/secrets`** — the registry login is required, and `BL_API_KEY` is strongly recommended so
+the key is known before first boot and survives a rebuilt volume:
 
-Spotify closed the endpoint that turned an `sp_dc` cookie into an access token — it answers `400
-usage of this endpoint is not permitted under the Spotify Developer Terms`, cookie or no cookie. The
-token the web player itself uses still works on everything here, and it lasts about an hour.
-
-Only a browser can mint one, so **the image carries a Chromium and the server drives it**. Paste an
-`sp_dc` cookie into the admin page and that is the entire setup: every fifty minutes the server
-opens the player, reads the `Authorization` header off the player's own request, and stores it. One
-deployment, nothing to point at, no second container.
-
-```
-Tokens → Spotify sp_dc cookie → paste → done
+```sh
+node -e "console.log(crypto.randomBytes(24).toString('hex'))"
 ```
 
-A cookie rather than a password, deliberately. `sp_dc` still authenticates the *player* even though
-it can no longer be traded for a token, so nothing stores a password and there is no login form for
-two-factor auth or a CAPTCHA to interrupt — the difference between a job that runs for a year and
-one that breaks the first time Spotify shows a challenge. The cookie lasts about a year; paste a new
-one when it stops working, which the admin page will tell you.
+Tokens can go here *or* be pasted into the admin page afterwards — the database is on a volume, so
+they persist either way, and pasting needs no redeploy. Anything left blank is simply not passed to
+the container.
 
-Nothing here defeats a protection: it signs in as you, with your own cookie, and takes a header your
-browser would have received anyway.
+**3. Day to day:**
 
-### No Playwright
+| Target | |
+|---|---|
+| `make deploy` | rebuild and ship |
+| `make logs` / `make app-logs` | tail |
+| `make remote-key` | print the deployed API key |
+| `make console` | shell inside the container |
+| `make backup` | copy the database here, timestamped |
+| `make rollback` | previous image |
 
-The harvest talks to Chromium over the DevTools protocol directly — `src/harvest/cdp.ts` is about
-two hundred lines and Node 24 already has the WebSocket client it needs. Playwright would bundle its
-own Chromium and a native toolchain on top of Alpine's, and be the server's only npm dependency, for
-a job with no forms to fill in and no elements to wait for. If the harvest ever *does* need to drive
-a login form, that trade is worth revisiting — a form is where a real library earns its size.
+There is nothing to compile, so the image is `node:24-alpine` plus the source — no `npm ci`, no build
+stage, no lockfile to keep in step.
 
-### The override
+> [!WARNING]
+> **Back up the volume.** `better-lyrics-data:/data` holds the cache *and* the credentials. Lose it
+> and you re-fetch every track and re-paste every token. That is what `make backup` is for.
 
-`BL_TOKEN_REFRESH_COMMAND` replaces the built-in harvest with an external command whose stdout is
-JSON of token name to value:
+> [!CAUTION]
+> **Leave `BL_ALLOW_LOCAL_NETWORK: "0"` alone.** The local-network exception exists so a phone on your
+> own Wi-Fi needs no key. Behind `kamal-proxy` every request arrives from the Docker bridge, which
+> *is* a private address — so leaving it on would hand that exception to the whole internet. The
+> server independently refuses the exception whenever it sees an `X-Forwarded-For` header, which
+> `kamal-proxy` always sets, so there are two locks. The consequence is that a deployed server always
+> wants the key, including from the app, which is the right way round.
 
-```json
-{"spotifyWebToken": "BQD…", "appleMediaUserToken": "Aq…"}
-```
+## Configuration
 
-For renewing something the built-in harvest knows nothing about, or for driving a browser on a
-machine with a residential IP — challenged far less often than a datacenter one.
-`examples/refresh-spotify-token.mjs` is a Playwright script that does exactly this, including the
-username-and-password path.
+All of this is editable in the admin page and stored in the database, so none of it needs a restart.
+An environment variable overrides the stored value and shows read-only in the page.
 
-It comes from the environment and **cannot be set from the admin page**: an admin session should not
-get to choose what the host executes, or one stolen key becomes arbitrary code on the machine
-holding your Apple tokens.
+| Variable | Default | |
+|---|---|---|
+| `BL_API_KEY` | generated | the one key, for the app and the admin page |
+| `BL_HOST` | `127.0.0.1` | `0.0.0.0` in a container |
+| `BL_PORT` | `8787` | |
+| `BL_DATA` | `./data/better-lyrics.db` | database path |
+| `BL_ALLOW_LOCAL_NETWORK` | `1` | let this machine and the LAN look up without a key |
+| `BL_TRANSLATION_LANG` | `en` | which translation to prefer when a source ships several |
+| `BL_TOKEN_REFRESH_MINUTES` | `50` | how often to renew the Spotify token |
+| `BL_TOKEN_REFRESH_COMMAND` | — | replace the built-in browser harvest with your own command |
+| `BL_LRCLIB_URL` `BL_NETEASE_URL` `BL_AMLL_URL` `BL_APPLE_API` `BL_APPLE_STOREFRONT` | | endpoint overrides |
+| `BL_APPLE_BEARER_TOKEN` `BL_APPLE_MEDIA_USER_TOKEN` `BL_SP_DC_COOKIE` `BL_SPOTIFY_WEB_TOKEN` `BL_SPOTIFY_CLIENT_ID` `BL_SPOTIFY_CLIENT_SECRET` `BL_MUSIXMATCH_USER_TOKEN` `BL_NETEASE_COOKIE` | | the [tokens](docs/TOKENS.md) |
 
-## How the merge works
-
-The timing is not negotiable. Mixing two sources' timings produces something worse than
-either, because a lyric half a second out is harder to sing to than one with no timing at
-all. So one source is chosen to own it, and everything else is borrowed.
-
-1. **Ask every enabled source at once.** In parallel, not in turn — a fallback chain stops at
-   the first answer, and the first answer is rarely the best one.
-2. **Pick the backbone.** Word-timed beats line-timed beats unsynced. Within a tier, the
-   user's priority breaks the tie. A candidate holding far fewer lines than the others is
-   passed over — a six-line file for a forty-line song is a fragment or a wrong match, and
-   letting it win because it is word-timed would throw away most of the song.
-3. **Line the others up against it.** Needleman–Wunsch over the line sequences, scoring each
-   pair on text similarity and timing proximity. Order-preserving by construction: two
-   sources may disagree about how many lines a chorus is, but never about what comes before
-   what.
-4. **Borrow, one field at a time.**
-   - *Syllables*, for lines the backbone has none for — accepted only when the words match and
-     a uniform shift of under 1.5 s puts them inside the line's window. Never stretched.
-   - *Translations*, preferring a source whose declared language matches yours. Otherwise a
-     Chinese translation of a Japanese song wins by being first, which is no use to an
-     English reader.
-   - *Readings*, per-syllable when the two sources split the line identically, whole-line
-     otherwise.
-   - *Background vocals*, *duet parts*, *songwriters*, *language*.
-5. **Check after every borrow.** Monotonic lines, ordered syllables inside their line's
-   window. Anything that breaks an invariant is rolled back, so a bad source can leave the
-   result no better than the backbone but never worse.
-
-Text is never overwritten from another source. Only blanks are filled.
-
-## Why keep every raw response
-
-Because the merge will get better, and a merged document is only as good as the algorithm
-that produced it. Every provider's raw body is archived next to the merged result, so
-improving the merge is a local recompute over data already on disk rather than thousands of
-fresh requests to services doing this for free. Bump `MERGE_VERSION` and everything is
-rebuilt on the next boot, offline.
-
-It is also good manners. LRCLIB asks people not to hammer it, and the AMLL endpoint is one
-volunteer's server. A cache turns one query per track *ever* into the steady state.
-
-**An outage is never written down as an answer.** A 404 means this track has no lyrics here and
-is worth remembering; a timeout, a 429, a 5xx or an expired token means the question never got
-through. Recording the second as the first would hide the track for the whole negative TTL, and
-on a refresh it would replace a document that was perfectly good — so when nothing is found and
-something was unreachable, the cache is left exactly as it was and whatever was already there is
-served.
+Admin page only, with no environment override: how long to trust "no lyrics exist" (48 h), how long
+before a found document is refreshed (30 days), the pause between tracks in a bulk re-lookup (1 s),
+and each source's on/off switch and priority.
 
 ## API
 
@@ -199,94 +243,53 @@ POST /v1/warm        {title, artist, album, durationMs, spotifyId?}
 POST /v1/contribute  {track:{…}, provider, format:"lrc"|"ttml"|"json", body}
 ```
 
-`GET /v1/lyrics` returns the merged document as TTML in an envelope —
-`{status, data:{format, lyrics, source, providerName}}` — which is what the app expects, and
-which any other lyrics server could also produce. `providerName` names the sources that
-actually did the work, so attribution survives the hop through the cache. `format=json` gives
-the structured model with its provenance and candidate list instead; `format=ttml` gives the
-bare file. `404` means nothing was found, with every candidate and why it lost in the body.
-`X-Cache` is `cache`, `remerge`, `network` or `absent`.
+A lookup returns TTML in an envelope — `{status, data:{format, lyrics, source, providerName}}` —
+which is what the app expects and any other lyrics server could produce. `format=json` gives the
+structured model with its provenance and candidate list; `format=ttml` the bare file. `X-Cache` is
+`cache`, `remerge`, `network` or `absent`.
 
-**Authentication is split by what a route can reach.** `/admin/*` always needs the API key, or a
-session cookie obtained by presenting it — it is the only surface that can read a credential. A
-*lookup* (`/v1/lyrics`, `/v1/health`, `/v1/warm`) can only cause a lyric fetch, so a request from
-this machine or the private network is allowed through without one; that is what lets the app
-work while sending no authentication at all. `POST /v1/contribute` writes to the archive
-permanently, so it sits on the admin side and always wants the key. A wrong key is still an error
-rather than a fallback. If anything public proxies to this server, turn off **Allow the local
-network to look lyrics up without the key** in Settings and give the app the key — the check
-reads the connecting socket, and a proxy on the same host looks local whoever is really behind
-it.
+Authentication follows what a route can reach: `/admin/*` always needs the key, since it is the only
+surface that can read a credential, while a lookup is let through from your own network.
 
-`POST /v1/contribute` accepts lyrics the app found and the server could not: the phone can
-reach a region-locked endpoint or a provider whose rate limit the server hit. Archived under
-`app:<provider>` so it can never overwrite a real fetch, and merged in from then on.
+**Full contract → [docs/CACHE-SERVER.md](docs/CACHE-SERVER.md).**
 
-The full contract, and why each disagreement with the app was settled the way it was, is in
-[docs/CACHE-SERVER.md](docs/CACHE-SERVER.md).
+## How it works
+
+Ask every enabled source at once, pick **one** to own the timing, then borrow everything else onto it
+a field at a time, checking after each borrow that nothing broke. Timing is never averaged: a lyric
+half a second out is harder to sing to than one with no timing at all. Identity comes first where it
+can — the Spotify id or ISRC is established before the others are searched, because a title matches
+the wrong song far more often than an ISRC does.
+
+**The merge, the cache, the token harvest and the security posture →
+[docs/DESIGN.md](docs/DESIGN.md).**
 
 ## Sharing it
 
-Don't — at least not the Apple part.
+**Don't** — at least not the Apple part.
 
 Caching solves the rate limit. It does not solve the licence: lyrics fetched with your
-`media-user-token` are licensed to *you*, and a server that answers for other people is
-redistributing Apple's content regardless of how the bytes got there. One person, their own
-tokens, their own device is a defensible line. Anything past that is not, and account
-termination is the ordinary outcome.
+`media-user-token` are licensed to *you*, and a server answering for other people is redistributing
+Apple's content however the bytes got there. One person, their own tokens, their own device is a
+defensible line. Account termination is the ordinary outcome of the alternative.
 
-The version of this idea that does help other people already exists: the
-[AMLL TTML Database](https://github.com/amll-dev/amll-ttml-db) is CC0, community-made, and
-exactly this cache built in the open. `format=ttml` exists so timings from here can be
-contributed back to it.
+The version of this idea that *does* help other people already exists: the
+[AMLL TTML Database](https://github.com/amll-dev/amll-ttml-db) is CC0, community-made, and exactly
+this cache built in the open. `format=ttml` exists so timings from here can be contributed back to it.
 
-If you do expose the server anyway, note what is at stake. The database holds your Spotify
-cookie and Apple tokens **in the clear** — not encrypted at rest, because a passphrase on every
-boot is the wrong trade for a personal service. It is `chmod 600`, it binds to `127.0.0.1` by
-default, the admin surface always demands the key, and secrets are masked in the admin API and
-stripped from the log. That is the whole of it. Put nothing in front of it that you would not
-put a password manager behind.
+If you expose it anyway, know what is at stake: the database holds your Spotify cookie and Apple
+tokens **in the clear**. The file is `chmod 600`, the server binds to `127.0.0.1` by default, the
+admin surface always demands the key, and secrets are masked in the API and stripped from the log —
+that is the whole of it ([the full posture](docs/DESIGN.md#security-posture)). Put nothing in front
+of this that you would not put a password manager behind.
 
-## Deploying it
+## Docs
 
-Docker + **Kamal 2**, set up the same way as the flight-search deploy: `kamal-proxy` on :80 with
-TLS terminated in front of it by a Cloudflare Tunnel or equivalent.
-
-```sh
-cp .kamal/secrets.sample .kamal/secrets   # fill in the registry and BL_API_KEY
-$EDITOR config/deploy.yml                 # replace the TODO(...) markers
-make setup                                # one-time bootstrap and first deploy
-make deploy                               # every time after that
-```
-
-There is nothing to compile, so the image is `node:24-alpine` plus the source — no `npm ci`, no
-build stage, no lockfile to keep in step. Node 24 is a hard floor rather than a preference:
-`node:sqlite` and TypeScript type stripping both come from it.
-
-| Target | |
+| | |
 |---|---|
-| `make deploy` | rebuild and ship |
-| `make logs` / `make app-logs` | tail |
-| `make remote-key` | print the deployed API key |
-| `make console` | shell inside the container |
-| `make backup` | copy the database here, timestamped |
-| `make rollback` | previous image |
-
-### Two things to get right
-
-**The volume.** `better-lyrics-data:/data` holds the cache *and* the credentials. Lose it and you
-re-fetch every track and re-paste every token — so it is the one thing worth `make backup`.
-
-**`BL_ALLOW_LOCAL_NETWORK: "0"`, which the shipped config sets.** The local-network exception
-exists so a phone on your own Wi-Fi can look lyrics up without a key. Behind `kamal-proxy` every
-request arrives from the Docker bridge, which *is* a private address — so leaving it on would hand
-that exception to the whole internet. The server independently refuses the exception whenever it
-sees an `X-Forwarded-For` header, which `kamal-proxy` always sets, so there are two locks: the
-header check covers anything proxied, and the setting covers anything reaching the container
-directly. Either alone would do; both is cheap.
-
-The consequence is that a deployed server always wants the key, including from the app. That is
-the right way round for something reachable off your own network.
+| **[TOKENS.md](docs/TOKENS.md)** | Every token, step by step, and what each one buys |
+| **[DESIGN.md](docs/DESIGN.md)** | The merge, the cache, the token harvest, the security posture |
+| **[CACHE-SERVER.md](docs/CACHE-SERVER.md)** | The request/response contract, and why each call was settled that way |
 
 ## Credits
 
