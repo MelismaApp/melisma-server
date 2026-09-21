@@ -30,6 +30,8 @@ import {
   type Provenance,
   type Syllable,
 } from './model.ts';
+import { crossCheck } from './agreement.ts';
+import { alignTo } from './align.ts';
 import { foldTight, similarity } from './text.ts';
 import { honestKind, wordTimedLines } from './timing.ts';
 
@@ -90,7 +92,41 @@ export function merge(candidates: Candidate[], options: MergeOptions = {}): Merg
 
   if (usable.length === 0) return { document: null, summaries };
 
-  const ranked = rankForSpine(usable, summaries);
+  // What the sources make of each other. Nothing inside one document can tell a perfect transcription
+  // of the wrong song from a perfect transcription of this one; four answers to the same question can.
+  // Silent below three candidates, because two that disagree do not say which is wrong.
+  const judged = crossCheck(usable.map((c) => ({ provider: c.provider, doc: c.doc })));
+  const trusted: Candidate[] = [];
+  for (const candidate of usable) {
+    const verdict = judged.find((j) => j.provider === candidate.provider)?.verdict ?? { kind: 'ok' };
+    const summary = summaries.find((s) => s.provider === candidate.provider);
+
+    if (verdict.kind === 'wrong-song') {
+      // Dropped rather than demoted. There is nothing to salvage from another song's words, and the
+      // merge borrows text — a translation or a reading grafted from here would splice that song into
+      // this one, line by line, and look deliberate.
+      if (summary) summary.rejected = verdict.detail;
+      continue;
+    }
+
+    if (verdict.kind === 'wrong-recording' && candidate.doc.kind !== 'static') {
+      // Kept, because the words are right and may be the only copy of them. It just may not own the
+      // clock: one tier down is enough to lose the backbone to anyone the others corroborate.
+      const kind = candidate.doc.kind === 'syllable' ? 'line' : 'static';
+      if (summary) {
+        summary.note = verdict.detail;
+        summary.kind = kind;
+      }
+      trusted.push({ ...candidate, doc: { ...candidate.doc, kind } });
+      continue;
+    }
+
+    trusted.push(candidate);
+  }
+
+  if (trusted.length === 0) return { document: null, summaries };
+
+  const ranked = rankForSpine(trusted, summaries);
   const spine = ranked[0];
   if (!spine) return { document: null, summaries };
 
@@ -324,94 +360,9 @@ function leadCount(doc: LyricsDocument): number {
   return doc.lines.filter((l) => l.role !== 'background').length;
 }
 
-// ---- alignment ------------------------------------------------------------
-
-const PAIR_ACCEPT = 0.55;
-const GAP_PENALTY = 0.35;
-
-/**
- * Lines up another source's lines against the spine's, in order.
- *
- * Needleman–Wunsch over the two line sequences, scoring a pair on how similar its text is
- * and how close its timings are. Order-preserving by construction, which is the property
- * that matters: two sources may disagree about how many lines a chorus is, but never about
- * what comes before what, so an aligner that can reorder would only ever be wrong.
- *
- * Returns, for each spine line, the other source's line that corresponds to it.
- */
-export function alignTo(
-  spine: LyricLine[],
-  other: LyricLine[],
-): (LyricLine | undefined)[] {
-  const left = spine.map((l, index) => ({ line: l, index })).filter((e) => e.line.role !== 'background');
-  const right = other.filter((l) => l.role !== 'background');
-
-  const out = new Array<LyricLine | undefined>(spine.length).fill(undefined);
-  if (left.length === 0 || right.length === 0) return out;
-
-  const n = left.length;
-  const m = right.length;
-  // score[i][j] is the best alignment of the first i left lines with the first j right ones.
-  const score: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
-  for (let i = 1; i <= n; i++) score[i][0] = -i * GAP_PENALTY;
-  for (let j = 1; j <= m; j++) score[0][j] = -j * GAP_PENALTY;
-
-  const pairCache: number[][] = Array.from({ length: n }, () => new Array<number>(m).fill(-1));
-  const pair = (i: number, j: number): number => {
-    if (pairCache[i][j] < 0) pairCache[i][j] = pairScore(left[i].line, right[j]);
-    return pairCache[i][j];
-  };
-
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      // Centred on the accept threshold so a plausible pair is worth taking and an
-      // implausible one is worth skipping.
-      const diagonal = score[i - 1][j - 1] + (pair(i - 1, j - 1) - PAIR_ACCEPT);
-      const up = score[i - 1][j] - GAP_PENALTY;
-      const leftward = score[i][j - 1] - GAP_PENALTY;
-      score[i][j] = Math.max(diagonal, up, leftward);
-    }
-  }
-
-  let i = n;
-  let j = m;
-  while (i > 0 && j > 0) {
-    const diagonal = score[i - 1][j - 1] + (pair(i - 1, j - 1) - PAIR_ACCEPT);
-    if (score[i][j] === diagonal) {
-      if (pair(i - 1, j - 1) >= PAIR_ACCEPT) out[left[i - 1].index] = right[j - 1];
-      i--;
-      j--;
-    } else if (score[i][j] === score[i - 1][j] - GAP_PENALTY) {
-      i--;
-    } else {
-      j--;
-    }
-  }
-
-  return out;
-}
-
-/**
- * How likely two lines are to be the same line.
- *
- * Text carries most of it, because two sources of the same song agree on the words far more
- * reliably than on the clock. Timing is the tiebreak that separates a repeated chorus line
- * from the identical one forty seconds later.
- */
-function pairScore(a: LyricLine, b: LyricLine): number {
-  const bothTimed = (a.endMs > 0 || a.startMs > 0) && (b.endMs > 0 || b.startMs > 0);
-  const text = a.text && b.text ? similarity(a.text, b.text) : 0;
-
-  if (!bothTimed) return text;
-  if (!a.text || !b.text) return timeScore(a, b);
-  return text * 0.7 + timeScore(a, b) * 0.3;
-}
-
-function timeScore(a: LyricLine, b: LyricLine): number {
-  const delta = Math.abs(a.startMs - b.startMs);
-  // Five seconds apart is no evidence either way; anything closer is worth something.
-  return Math.max(0, 1 - delta / 5_000);
-}
+// Alignment lives in `align.ts` so `agreement.ts` can use it without importing this module, which
+// would be a cycle. Re-exported because callers and tests already know it by this name.
+export { alignTo } from './align.ts';
 
 // ---- grafts ---------------------------------------------------------------
 

@@ -15,7 +15,7 @@
 
 .PHONY: help install dev test key new-key \
         docker-build docker-run setup deploy redeploy logs app-logs \
-        console remote-key restart rollback stop backup
+        console remote-key restart rollback stop backup restore
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?##' Makefile | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
@@ -72,6 +72,39 @@ rollback: ## Roll back to the previous image version
 
 stop: ## Stop the app (leaves the proxy up)
 	kamal app stop
+
+restore: ## Load a backup into the LOCAL database (FILE=melisma-....db)
+	@test -n "$(FILE)" || { echo "Usage: make restore FILE=melisma-YYYYMMDD-HHMMSS.db"; exit 1; }
+	@test -f "$(FILE)" || { echo "No such file: $(FILE)"; exit 1; }
+	@# Whatever is here already is a cache and a set of tokens. Moved aside, never overwritten: the
+	@# whole point of a restore is that you are unsure, and an unsure operation must not destroy.
+	@mkdir -p data
+	@if [ -f data/better-lyrics.db ]; then \
+	  aside="data/replaced-$$(date +%Y%m%d-%H%M%S).db"; \
+	  mv data/better-lyrics.db "$$aside"; \
+	  echo "Moved the current local database to $$aside"; \
+	fi
+	@cp "$(FILE)" data/better-lyrics.db
+	@chmod 600 data/better-lyrics.db
+	@echo "Restored $(FILE). It holds real tokens — it is chmod 600 and gitignored."
+	@echo "Run 'npm start' to serve it."
+
+# Restoring onto the *deployed* server is deliberately not a target.
+#
+# It replaces the live cache and every pasted credential at once, from a file whose provenance only you
+# know, on the one machine where getting it wrong means re-pasting an Apple token you may not be able to
+# read again. That deserves typing out, not a word. If you mean it:
+#
+#   make backup                                    # first, so there is a way back
+#   kamal app stop
+#   ssh <user>@<host>
+#   docker run --rm -v better-lyrics-data:/data -v "$PWD:/in" alpine \
+#     sh -c 'cp /in/<backup>.db /data/better-lyrics.db && chmod 600 /data/better-lyrics.db'
+#   exit
+#   kamal app boot
+#
+# The container must be stopped for it: SQLite will not thank you for swapping the file underneath a
+# process that has it open.
 
 backup: ## Copy the deployed database here, timestamped
 	@# The one piece of state worth keeping: every archived provider response, and the tokens.

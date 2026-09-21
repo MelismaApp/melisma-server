@@ -138,11 +138,43 @@ export interface NeteaseLyricPayload {
  * that hands over hand-checked readings *and* translations for free, so it is worth the
  * extra requests.
  */
+/**
+ * What NetEase returns *instead of* lyrics for a track it has none for.
+ *
+ * "Pure music, please enjoy" — a sentence, in the lyric field, at a timestamp, with nothing marking it
+ * as a placeholder. Nothing downstream can tell it from a one-line song, so it was cached as lyrics and
+ * then shown as lyrics: 14 of the 316 NetEase documents in the archive, including NewJeans' *OMG* and
+ * RADWIMPS' *Suzume*, neither of which is an instrumental.
+ *
+ * Caught here rather than by cross-checking sources, because this needs no second opinion and must work
+ * when NetEase is the only source that answered — which is exactly when a placeholder would be served
+ * as the whole answer.
+ */
+const NO_LYRICS_MARKERS = [
+  '纯音乐，请欣赏', // "pure music, please enjoy"
+  '纯音乐,请欣赏', // the same, with an ASCII comma
+  '此歌曲为没有填词的纯音乐', // "this song is pure music with no lyrics written"
+];
+
+function isPlaceholder(doc: LyricsDocument): boolean {
+  // The whole document has to *be* the marker, not contain it. Every one of the 14 in the archive is a
+  // single line, and a substring test fails the obvious way: 这是纯音乐，请欣赏吧 is a lyric containing
+  // the phrase, and throwing that song away would be the same bug pointing the other direction.
+  const written = doc.lines.map((line) => line.text.trim()).filter(Boolean);
+  if (written.length !== 1) return false;
+
+  const only = written[0].replace(/\s+/g, '');
+  return NO_LYRICS_MARKERS.some((marker) => only.startsWith(marker.replace(/\s+/g, '')));
+}
+
 export function parseNeteasePayload(payload: NeteaseLyricPayload): LyricsDocument | null {
   const wordTimed = payload.yrc?.lyric ? parseYrc(payload.yrc.lyric) : null;
   const lineTimed = payload.lrc?.lyric ? parseLrc(payload.lrc.lyric) : null;
   const base = wordTimed ?? lineTimed;
   if (!base) return null;
+  // "It has none" rather than "here is one line", which is the honest answer and the one the resolver
+  // already knows how to record.
+  if (isPlaceholder(base)) return null;
 
   let lines = base.lines;
 
