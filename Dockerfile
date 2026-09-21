@@ -19,6 +19,7 @@ ENV NODE_ENV=production
 # `chromium` pulls its own libraries; the fonts are separate and without them a page renders as
 # empty boxes. `ca-certificates` because it talks to Spotify over TLS.
 RUN apk add --no-cache \
+      tini \
       chromium \
       ca-certificates \
       font-noto \
@@ -54,4 +55,12 @@ EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD node -e "fetch('http://127.0.0.1:8787/').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
 
+# `tini` rather than node as PID 1, and not for signal handling — for reaping.
+#
+# PID 1 inherits every orphaned process in the namespace and is responsible for reaping them. Node
+# does not: it reaps its own children and ignores the strays it adopts, so anything Chromium left
+# behind became a permanent zombie holding a PID slot until the container was restarted. Killing the
+# process group (see `src/browser/cdp.ts`) stops them being orphaned in the first place; this is the
+# backstop for the ones that still slip through, and it is one package.
+ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "src/main.ts"]

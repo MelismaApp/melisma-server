@@ -46,7 +46,7 @@ builder:
 proxy:
   ssl: false
   app_port: 8787
-  host: betterlyrics.asu.tw
+  host: melisma.asu.tw
   healthcheck:
     # The admin page answers unauthenticated — it is only a login form — so it is a health check
     # that needs no key baked into the config.

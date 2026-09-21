@@ -47,6 +47,41 @@ function removeQuietly(directory: string, attempt = 0): void {
   }
 }
 
+/**
+ * Kills a Chromium and everything it started.
+ *
+ * `child.kill()` signals one process. Chromium is a family: a crashpad handler, a zygote, a GPU
+ * process and a renderer per page, none of which are Node's children. Signalling only the top one
+ * orphans the rest, and an orphan is re-parented to PID 1 — which in this image is `node`, and Node
+ * reaps only the processes it spawned itself. So every renewal left a handful of processes nobody
+ * would ever call `wait()` on, each holding a PID slot for the life of the container.
+ *
+ * That is a leak with a deadline. Roughly a day and a half at one renewal every thirty minutes and
+ * the cgroup's pid limit is gone, at which point `posix_spawn` starts answering `EAGAIN` — reported by
+ * Chromium as a `FATAL` from the crashpad handler, because the handler is the first thing it forks.
+ * The browser was never the problem; it simply could not start one.
+ *
+ * The fix is to make the group the unit. `detached: true` gives the child its own process group, and
+ * a negative pid signals every member of it, so the family dies together while Chromium is still
+ * their parent and there is nothing left to orphan.
+ */
+export function killTree(child: ChildProcess): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  try {
+    // Negative: the process *group*, which `detached` made this child the leader of.
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // ESRCH — already gone, which is the outcome this wanted. Fall back to the child alone in case
+    // the platform gave us no group to speak of.
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      /* Gone as well. */
+    }
+  }
+}
+
 /** Where Chromium usually is, in the order worth trying. */
 const CANDIDATES = [
   process.env.BL_CHROMIUM,
@@ -148,11 +183,18 @@ export class Browser {
         '--mute-audio',
         '--window-size=1280,800',
       ],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // Its own process group, so teardown can take the whole family at once. See `killTree`.
+        // The cost is that a hard crash of this process would leave a Chromium running rather than
+        // have it die with us — which is why the image also runs an init that reaps, and why the
+        // container is the outer boundary either way.
+        detached: true,
+      },
     );
 
     const cleanup = () => {
-      child.kill('SIGKILL');
+      killTree(child);
       removeQuietly(profileDir);
     };
 
@@ -247,7 +289,7 @@ export class Browser {
     } catch {
       /* Already gone. */
     }
-    this.process.kill('SIGKILL');
+    killTree(this.process);
     // The profile holds the session cookie that was just used. It is a temporary directory, but
     // leaving it behind would leave that on disk for no reason.
     removeQuietly(this.profileDir);
