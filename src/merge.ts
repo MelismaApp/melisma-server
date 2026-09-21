@@ -36,7 +36,10 @@ import { foldTight, similarity } from './text.ts';
 import { honestKind, wordTimedLines } from './timing.ts';
 
 /** Bump when the merge changes, so stored entries can be recomputed from raw responses. */
-export const MERGE_VERSION = 1;
+// 2: documents are now checked against their own claimed timing tier and against each other before
+// they are ranked, so every entry merged under v1 was built without either check. Bumping this is what
+// rebuilds them — at boot, from the archived bodies, without asking any provider anything.
+export const MERGE_VERSION = 2;
 
 export interface Candidate {
   provider: string;

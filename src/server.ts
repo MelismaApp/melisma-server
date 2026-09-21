@@ -106,12 +106,18 @@ export function start(
       say(`token refresh: every ${app.settings.read().tokenRefreshMinutes} min via the ${refresh}`);
     }
 
-    // A merge algorithm newer than the stored entries: bring them up to date at boot, from
-    // the archive, without asking any provider anything.
-    const caught = app.resolver.remergeAll();
-    if (caught.attempted > 0) {
-      say(`re-merged ${caught.rebuilt}/${caught.attempted} cached entries at v${MERGE_VERSION}`);
-    }
+    // A merge algorithm newer than the stored entries: bring them up to date from the archive, without
+    // asking any provider anything. Started rather than awaited — it takes a minute or so on a library
+    // of a few hundred, and the server has to be answering before then. Any entry it has not reached
+    // yet is re-merged on the way out of the cache when something asks for it.
+    void app.resolver
+      .remergeAll()
+      .then((caught) => {
+        if (caught.attempted > 0) {
+          say(`re-merged ${caught.rebuilt}/${caught.attempted} cached entries at v${MERGE_VERSION}`);
+        }
+      })
+      .catch(() => undefined);
   });
 
   return server;

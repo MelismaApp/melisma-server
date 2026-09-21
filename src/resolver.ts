@@ -924,7 +924,7 @@ export class Resolver {
       key,
       title: track.title,
       artist: track.artist,
-      album: track.album,
+      album: track.album ?? '',
       durationMs: track.durationMs,
       spotifyId: track.spotifyId ?? null,
       isrc: track.isrc ?? null,
@@ -990,13 +990,41 @@ export class Resolver {
       });
     }
 
-    if (candidates.length === 0) return null;
+    const result =
+      candidates.length === 0
+        ? null
+        : merge(candidates, {
+            durationMs: entry?.durationMs ?? 0,
+            preferredTranslationLang: config.translationLang,
+          });
 
-    const result = merge(candidates, {
-      durationMs: entry?.durationMs ?? 0,
-      preferredTranslationLang: config.translationLang,
-    });
-    if (!result.document) return null;
+    if (!result?.document) {
+      // Nothing usable left — every archived body either fails to parse now or was judged the wrong
+      // song. Returning quietly would leave the old merge standing, which is the worst outcome: it was
+      // built from exactly those sources, so the lyrics that are wrong stay cached and served, and
+      // nothing re-fetches until the thirty-day refresh. Six entries in the archive are this, all of
+      // them NetEase answering "instrumental, please enjoy" as the only source.
+      //
+      // So it becomes a cached miss instead, which is a state this already has: empty `merged` means
+      // "nothing found", carries the short negative TTL rather than the long refresh, and so asks the
+      // providers again in a couple of days. The archive and the extras are untouched — the raw bodies
+      // are evidence, and the artwork was never in question.
+      if (entry?.merged) {
+        this.store.putEntry({
+          key,
+          title: entry.title,
+          artist: entry.artist,
+          album: entry.album,
+          durationMs: entry.durationMs,
+          spotifyId: entry.spotifyId,
+          isrc: entry.isrc,
+          merged: '',
+          mergeVersion: MERGE_VERSION,
+        });
+        this.store.log('warn', null, `re-merge left ${key} with nothing usable; it now reads as a miss`);
+      }
+      return null;
+    }
 
     this.store.putEntry({
       key,
@@ -1013,12 +1041,24 @@ export class Resolver {
     return result.document;
   }
 
-  /** Recomputes every entry the current algorithm has not seen. Network-free. */
-  remergeAll(): { attempted: number; rebuilt: number } {
+  /**
+   * Recomputes every entry the current algorithm has not seen. Network-free, and deliberately not
+   * instant.
+   *
+   * It yields the event loop every few entries because it is slower than it looks: 386 entries took 68
+   * seconds on the real archive, most of it the pairwise alignment the cross-check needs. Run straight
+   * through, that is 68 seconds during which nothing is answered — including the proxy's health check,
+   * which polls every three seconds and would conclude the container is broken and fail the deploy.
+   * Correctness never depended on this pass anyway: `fromCache` re-merges an out-of-date entry the
+   * moment it is asked for, so this is only eager warming and can afford to be polite.
+   */
+  async remergeAll(): Promise<{ attempted: number; rebuilt: number }> {
     const keys = this.store.keysBelowVersion(MERGE_VERSION);
     let rebuilt = 0;
-    for (const key of keys) {
+    for (const [index, key] of keys.entries()) {
       if (this.remerge(key)) rebuilt++;
+      // Often enough that a health check never waits more than a few entries for a turn.
+      if (index % 5 === 4) await new Promise((resolve) => setImmediate(resolve));
     }
     if (keys.length > 0) {
       this.store.log('info', null, `re-merged ${rebuilt}/${keys.length} entries at v${MERGE_VERSION}`);
