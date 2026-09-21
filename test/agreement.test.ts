@@ -170,8 +170,13 @@ test('a wrong-song candidate is dropped from the merge, not merged from', () => 
 test('netease answering "instrumental, please enjoy" is no lyrics at all', () => {
   // A sentence in the lyric field, at a timestamp, with nothing marking it as a placeholder. 14 of the
   // 316 NetEase documents in the archive, including NewJeans' OMG, which is not an instrumental.
-  assert.equal(parseNeteasePayload({ lrc: { lyric: '[00:05.000]纯音乐，请欣赏\n' } }), null);
-  assert.equal(parseNeteasePayload({ lrc: { lyric: '[00:05.000]此歌曲为没有填词的纯音乐\n' } }), null);
+  for (const wording of [
+    '纯音乐，请欣赏', // the only form in the archive, 14 times
+    '纯音乐,请欣赏', // an ASCII comma
+    '此歌曲为没有填词的纯音乐，请您欣赏', // the longer wording, reported by the app side
+  ]) {
+    assert.equal(parseNeteasePayload({ lrc: { lyric: `[00:05.000]${wording}\n` } }), null, wording);
+  }
 
   // But a real song mentioning it in one line is still a real song.
   const real = parseNeteasePayload({

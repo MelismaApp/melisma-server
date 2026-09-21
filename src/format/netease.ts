@@ -150,21 +150,24 @@ export interface NeteaseLyricPayload {
  * when NetEase is the only source that answered — which is exactly when a placeholder would be served
  * as the whole answer.
  */
-const NO_LYRICS_MARKERS = [
-  '纯音乐，请欣赏', // "pure music, please enjoy"
-  '纯音乐,请欣赏', // the same, with an ASCII comma
-  '此歌曲为没有填词的纯音乐', // "this song is pure music with no lyrics written"
-];
+const PURE_MUSIC = '纯音乐'; // "pure music"
+const PLEASE_ENJOY = '欣赏'; // "enjoy"
+
 
 function isPlaceholder(doc: LyricsDocument): boolean {
-  // The whole document has to *be* the marker, not contain it. Every one of the 14 in the archive is a
-  // single line, and a substring test fails the obvious way: 这是纯音乐，请欣赏吧 is a lyric containing
-  // the phrase, and throwing that song away would be the same bug pointing the other direction.
+  // The whole document has to *be* the placeholder, not contain it. A substring test over a real
+  // document fails the obvious way — 这是纯音乐，请欣赏吧 is a lyric that happens to contain the phrase,
+  // and discarding that song would be this bug pointing the other way. Every one of the 14 in the
+  // archive is a single line, and a genuine instrumental has nothing to lose either way.
   const written = doc.lines.map((line) => line.text.trim()).filter(Boolean);
   if (written.length !== 1) return false;
 
+  // Both phrases rather than a list of exact wordings. The archive holds only 纯音乐，请欣赏, but the
+  // wording varies across NetEase's API versions — 此歌曲为没有填词的纯音乐，请您欣赏, an ASCII comma,
+  // 请您 for 请 — and matching the two stable halves covers all of them. Safe precisely because it is
+  // already restricted to a document of one line.
   const only = written[0].replace(/\s+/g, '');
-  return NO_LYRICS_MARKERS.some((marker) => only.startsWith(marker.replace(/\s+/g, '')));
+  return only.includes(PURE_MUSIC) && only.includes(PLEASE_ENJOY);
 }
 
 export function parseNeteasePayload(payload: NeteaseLyricPayload): LyricsDocument | null {
