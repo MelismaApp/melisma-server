@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "args": [
+        "--graph",
+        "codegraph-out/graph.json"
+      ],
+      "command": "codegraph-mcp",
+      "type": "stdio"
+    }
+  }
+}

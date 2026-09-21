@@ -1,0 +1,140 @@
+{
+  "version": "2",
+  "entries": {
+    "/Users/acsu/workplace/better-lyrics-server/scripts/key.ts": {
+      "hash": "36495a7c22473cbb02a4b2702d3336e3659bae4e41d2af522cea1ff69081c846"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/admin/app.js": {
+      "hash": "bccec6e1bdaf453a4c85c1b41ea0ee2c7aa8f851eab8aab147f6d05cd8944c5a"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/browser/cdp.ts": {
+      "hash": "6422671458eb4fd129b282d94c7dc26ce2af2c907abd5505a45d5e219e43ccfa"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/browser/spotify.ts": {
+      "hash": "ddfe545b9f1c0746a579f48526c13b728e7d35cd5dd67bc7394f022bc24a1795"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/config.ts": {
+      "hash": "3235715d23cb182ac0f9dca13361a4185f8076af6129ba04ad4d4c805396503c"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/db.ts": {
+      "hash": "11deb9a5c35c3995be6c84b9f2da517af772b8a7bac62ba02528f0e0249f57bc"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/format/lrc.ts": {
+      "hash": "23dadd8bb3cca9599785956d8b086e7d11974c39adadbaae3ae61c7fdaffd8f6"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/format/musixmatch.ts": {
+      "hash": "82893f1c227da766978ccbdd9cf367eb306db2e9fd6dc6bd410d6add5bf665e9"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/format/netease.ts": {
+      "hash": "4437bc57231cd8db3fd9672ee1ec81896affb9dad86488ce2a4563e371810d6d"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/format/spotify.ts": {
+      "hash": "88ceaab8478d4aa565221b058166cdc4097054b0eea9b34d32286518daeb4455"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/format/ttml.ts": {
+      "hash": "7d8185f5f15918097e9686e319787949b033d7a2fc3f458defb855f71e11b625"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/harvest.ts": {
+      "hash": "4e6f6fe533a29aa83e1582f6650caa463d2fd2263764f2e5cceff2e4c1e78659"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/http.ts": {
+      "hash": "3d1bc43d2f9f47c22b1892d7a571185feb62d77acb4b1580a9b6376d0fffa702"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/main.ts": {
+      "hash": "1eff38f87794d7bfc10c878ba7e3b8843102bb0887c80db5f3be7dfa6ee2a320"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/match.ts": {
+      "hash": "e314a513a04145407e89a8bf0aaf51fad97007f09c572838e881cf0562eb4567"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/merge.ts": {
+      "hash": "cf72d4cb7f91458130331bc79a3306fd17303f2590aa4c2620c9fd3e41ac23cd"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/model.ts": {
+      "hash": "b35302f6da02dfc038a72388684aedb341cc69a2592e79585d731a762d6489d1"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/providers/amll.ts": {
+      "hash": "3d0b047c23ff1b682b3e62be6757d920edc16fcd24308a2776a32a360e83eaa5"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/providers/apple.ts": {
+      "hash": "5e12961e1e7c360617c84aa3491149c01cb12d862ec8597e5a27055a7f3a2ee1"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/providers/index.ts": {
+      "hash": "cecc4901c5c033b0177a64223553ebdc4e66390964ee7cdd4ae4c90761887101"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/providers/lrclib.ts": {
+      "hash": "47b98386d34c67b2d917933bba3676defbec68890dfe22ff6eb29e647681e79d"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/providers/musixmatch.ts": {
+      "hash": "adcc5c4431a7db54a1a1b24411a80aa369e47ad304e5a8ffe3b91f0a943ec2ba"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/providers/netease.ts": {
+      "hash": "e8d1ddce5dc61c2cb4a95fa113f1fe260d074b64d42a729641ceebd0333555c1"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/providers/spotify.ts": {
+      "hash": "21454a78cb41c7c36869c6d7070c5015a1af568f7a9602f34b6c49a433616c29"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/providers/types.ts": {
+      "hash": "cb8da912fabf5f4c79c25e0fc5dd593839ccdd49ee427fbcf75dd291b5317a51"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/refresher.ts": {
+      "hash": "57eba90d32765052a6a4951b830dfbf88a31d34c9390444de9b201303d23d5fc"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/resolver.ts": {
+      "hash": "a2174b2392ee42888690bc7d559e7f21008de79dc318cc2b9bb99c1948ed4c14"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/selftest.ts": {
+      "hash": "69e5174e4189241044d1c9dca37cd10d072b6ab821760d61cd8aa8f50e690fe1"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/server.ts": {
+      "hash": "f70696441b661d832866161f889960ef61548d746e45ed11976929b72b74395c"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/spotifyApp.ts": {
+      "hash": "97860e0089164c39af75f8eca74b3cf0cf3d44cd7118f167309aace22f6bf323"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/text.ts": {
+      "hash": "3ca89744bd2a5561ac918af02c39a4ac21479026908b86c8d059971d4d7f7172"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/src/xml.ts": {
+      "hash": "6c251a083f3c1ec1ce589050435ccdc8f96930fe53ba6036e60891fce4c8b90d"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/backoff.test.ts": {
+      "hash": "34ed9ed5af56975604aed5e1f5bae4d5a67fd7c71cfed669fb5f68854945fee8"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/blank-env.test.ts": {
+      "hash": "c61b5aa4afa9b20b63fd1a5a61970885426e7c9ba280d58d885913c5ac1285b8"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/browser-teardown.test.ts": {
+      "hash": "c2222eb0399bab0c4941f006ab006eae00ceacec0ac66317745a8cc621262684"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/extras.test.ts": {
+      "hash": "598c4503c18e233b17fa7b452a2e4af8e5a0e5ca0dee401f8c3c9e338c14ab94"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/format.test.ts": {
+      "hash": "025409e25b2b3a2a27848c758b0b5a1f3038c33e4fccfd1d1fe0296d296f5e99"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/harvest.test.ts": {
+      "hash": "eeba36c7815496798ecaf4ee2492d1365ca3a0a2817d685d9cbac30ee6fcade8"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/match.test.ts": {
+      "hash": "8cdf54fca0caf6dc06d5576c96c83cdfe694792938bcbc43a07ead5cfbf565d1"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/merge.test.ts": {
+      "hash": "c2a51d61e425cc3c0945d7371eb1c2dea2d0183cf0e8006623af4c2f061060c4"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/refresher.test.ts": {
+      "hash": "6d178aafa0b25f5d6e19fc7a552665ad376b020978a3c5a6130662a9229adb2c"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/server.test.ts": {
+      "hash": "907af7434122314100cc63c6b6c8f74487f4bafe35a843d0046973794d0217f7"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/spotify-app.test.ts": {
+      "hash": "f1e3e72c7cecaf1c7b4c417fff6ae4f01076b6841810a612a232b80c24713c23"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/token-lifetime.test.ts": {
+      "hash": "f2524a9e6e123ee7111502ecebf8cf631f22da0941df2b25ae45f5dfb6247506"
+    },
+    "/Users/acsu/workplace/better-lyrics-server/test/upgrade.test.ts": {
+      "hash": "4b129f169c61570975c5ddf2b36720f83aa8822644a4a7f65e979d716fdc64d1"
+    }
+  }
+}

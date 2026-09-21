@@ -31,6 +31,7 @@ import {
   type Syllable,
 } from './model.ts';
 import { foldTight, similarity } from './text.ts';
+import { honestKind, wordTimedLines } from './timing.ts';
 
 /** Bump when the merge changes, so stored entries can be recomputed from raw responses. */
 export const MERGE_VERSION = 1;
@@ -64,11 +65,24 @@ export function merge(candidates: Candidate[], options: MergeOptions = {}): Merg
   const summaries: CandidateSummary[] = [];
   const usable: Candidate[] = [];
 
-  for (const candidate of candidates) {
+  for (const raw of candidates) {
+    // Before anything is ranked, and therefore before anything is cached: the tier a document claims
+    // is checked against the timings it actually carries. A line held in one "syllable" claims the
+    // word-timed tier and would take the backbone off a source that means it. See `honestKind`.
+    const candidate: Candidate =
+      raw.doc.lines.length === 0
+        ? raw
+        : { ...raw, doc: honestKind(raw.doc, options.durationMs ?? 0) };
+
     const summary = summarise(candidate);
     if (candidate.doc.lines.length === 0) {
       summary.rejected = 'no lines';
     } else {
+      if (candidate.doc.kind !== raw.doc.kind) {
+        // Said out loud, because "why did Apple lose to Musixmatch" is answerable only if the
+        // demotion is visible in the candidate list the admin page and `format=json` both show.
+        summary.note = `timings say ${candidate.doc.kind}, not ${raw.doc.kind}`;
+      }
       usable.push(candidate);
     }
     summaries.push(summary);
@@ -285,10 +299,18 @@ function rankForSpine(candidates: Candidate[], summaries: CandidateSummary[]): C
   const sorted = [...pool].sort((a, b) => {
     const kind = kindRank(b.doc.kind) - kindRank(a.doc.kind);
     if (kind !== 0) return kind;
-    const syllables = syllableLineCount(b.doc) - syllableLineCount(a.doc);
-    if (syllables !== 0) return syllables;
+    // Then the reader's own ordering, and *before* any count of lines or syllables.
+    //
+    // It used to come after a raw count of syllable-bearing lines, which meant one line more than the
+    // next source settled it and the ordering was consulted almost never — the same complaint the app
+    // had, where a source ranked last kept winning. Coverage is not ignored, it is enforced earlier and
+    // more bluntly: too few lines against the median is rejected outright above, and a document that is
+    // not mostly word-timed has already left this tier. What is left inside one tier is twenty lines
+    // against twenty-one, which is exactly what a preference is for.
     if (a.priority !== b.priority) return a.priority - b.priority;
     if (b.match !== a.match) return b.match - a.match;
+    const syllables = wordTimedLines(b.doc) - wordTimedLines(a.doc);
+    if (syllables !== 0) return syllables;
     return leadCount(b.doc) - leadCount(a.doc);
   });
 
@@ -300,10 +322,6 @@ function rankForSpine(candidates: Candidate[], summaries: CandidateSummary[]): C
 
 function leadCount(doc: LyricsDocument): number {
   return doc.lines.filter((l) => l.role !== 'background').length;
-}
-
-function syllableLineCount(doc: LyricsDocument): number {
-  return doc.lines.filter((l) => l.syllables.length > 0).length;
 }
 
 // ---- alignment ------------------------------------------------------------

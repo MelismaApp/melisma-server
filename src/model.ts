@@ -97,6 +97,13 @@ export interface CandidateSummary {
   hasRomanization: boolean;
   /** Set when the candidate was fetched but thrown away, with the reason. */
   rejected?: string;
+  /**
+   * Set when the candidate was kept but its own claim about itself was corrected.
+   *
+   * "Why did Apple lose to Musixmatch" is only answerable if a demotion is visible, and this list is
+   * what the admin page and `format=json` both show.
+   */
+  note?: string;
 }
 
 export interface MergedDocument extends LyricsDocument {

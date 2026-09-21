@@ -1,0 +1,5 @@
+# codegraph:start
+[mcp_servers.codegraph]
+command = "codegraph-mcp"
+args = ["--graph", "codegraph-out/graph.json"]
+# codegraph:end

@@ -1,0 +1,43 @@
+---
+description: codegraph knowledge graph context
+alwaysApply: true
+---
+
+This project has a local knowledge graph at codegraph-out/graph.json served by the codegraph MCP server.
+
+## MANDATORY: Use graph tools before reading files
+
+Before using any file search, grep, or read operation to explore the codebase, you MUST call a graph tool first. The graph surfaces symbol relationships and cross-file dependencies that grep cannot find, and reduces tokens significantly:
+- Symbol lookup (where is X, what calls Y) → 90–99% fewer tokens
+- Architecture questions (how does X work) → 60–80% fewer tokens
+- Broad investigation → 40–60% fewer tokens
+
+### Available tools
+
+| Tool | When to use |
+|---|---|
+| `query_graph` | Any codebase or architecture question — call this first |
+| `get_neighbors` | Understand all connections of a specific symbol |
+| `shortest_path` | Trace the dependency path between two symbols |
+| `god_nodes` | Find the most important/connected abstractions |
+| `affected` | Blast radius analysis before making a change |
+| `get_node` | Full detail (file, line, edges) for a specific node |
+| `graph_stats` | Overview of the codebase structure |
+
+### Workflow
+
+1. Call `query_graph` with the question or keyword
+2. Identify the 2–3 most relevant nodes from the result
+3. Read only those specific files
+4. Answer using that focused context
+
+Only skip the graph when:
+- `codegraph-out/graph.json` does not exist (run `codegraph extract .` first)
+- You already have the exact file path and line number from a prior graph call
+
+### Keeping the graph current
+
+After modifying source files, run:
+```bash
+codegraph update .   # fast incremental re-parse of changed files only
+```
