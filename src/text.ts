@@ -1,3 +1,5 @@
+import { toSimplified } from './han.ts';
+
 /**
  * Text comparison, and the script rules that make it honest across alphabets.
  *
@@ -80,9 +82,17 @@ export function comparableScripts(a: string, b: string): boolean {
   return detectScript(a) === detectScript(b);
 }
 
-/** Lowercased, punctuation and repeated whitespace collapsed. */
+/**
+ * Lowercased, punctuation and repeated whitespace collapsed, and Traditional Chinese folded onto
+ * Simplified.
+ *
+ * The Han folding is here and *not* in `foldTight` on purpose: this one is for comparing, that one
+ * derives `cacheKey`. Folding there would change the key of every Chinese track already cached, so the
+ * stored entries would never be read again and the next play would file a duplicate and re-fetch
+ * everything. See `han.ts` for the measurements that made it necessary here.
+ */
 export function fold(value: string): string {
-  return value
+  return toSimplified(value)
     .toLowerCase()
     .normalize('NFKC')
     .replace(/[\p{P}\p{S}\s]+/gu, ' ')
