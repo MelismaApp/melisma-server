@@ -75,5 +75,17 @@ stop: ## Stop the app (leaves the proxy up)
 
 backup: ## Copy the deployed database here, timestamped
 	@# The one piece of state worth keeping: every archived provider response, and the tokens.
-	kamal app exec --reuse "cat /data/better-lyrics.db" > "melisma-$$(date +%Y%m%d-%H%M%S).db"
-	@echo "Wrote melisma-$$(date +%Y%m%d-%H%M%S).db"
+	@#
+	@# Two things this has to work around. Kamal writes its own progress to stdout, which lands
+	@# in the middle of the file and leaves sqlite saying "file is not a database" -- `-q` quiets
+	@# it, and the tail below drops anything that still gets through by starting the output at
+	@# sqlite's magic header. And the timestamp is computed once, into a variable, because naming
+	@# the file and reporting it in two separate `date` calls can straddle a second and print a
+	@# name that does not exist.
+	@set -e; \
+	  out="melisma-$$(date +%Y%m%d-%H%M%S).db"; \
+	  kamal app exec -q --reuse "cat /data/better-lyrics.db" \
+	    | python3 -c 'import sys; d=sys.stdin.buffer.read(); i=d.find(b"SQLite format 3\x00"); sys.exit("no sqlite header in output") if i<0 else sys.stdout.buffer.write(d[i:])' \
+	    > "$$out"; \
+	  sqlite3 "$$out" "pragma integrity_check;" | head -1; \
+	  echo "Wrote $$out"
