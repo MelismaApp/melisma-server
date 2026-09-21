@@ -60,7 +60,18 @@ const PAIRS =
   '礙碍種种稅税竪竖筆笔節节範范簾帘簽签粵粤糧粮糰团罷罢羨羡聖圣聽听脫脱腳脚膚肤臥卧' +
   '蔔卜薑姜藍蓝蠻蛮詢询誠诚諾诺謎谜讚赞貢贡貨货販贩賢贤贏赢趙赵跡迹踐践軌轨軟软較较' +
   '輔辅輛辆轉转辦办邊边鄭郑醫医釋释閨闺雖虽電电顫颤驢驴鬆松鏈链錄录鍾钟閃闪陸陆雙双' +
-  '壯壮妝妆將将狀状獎奖漿浆槳桨醬酱彊强強强';
+  '壯壮妝妆將将狀状獎奖漿浆槳桨醬酱彊强強强' +
+  // Derived from the archive rather than from memory: aligned 5,046 line pairs between a
+  // Traditional copy and a Simplified copy of the same song, kept only where one Simplified partner
+  // dominated, in at least two different songs, without the reverse direction claiming it too.
+  // 像/象 and 的/地 met those rules and are excluded by hand — they are distinct characters in both
+  // orthographies, so those were two lyric versions choosing different words.
+  '瘋疯壞坏選选擇择著着擺摆沒没裡里夠够別别憶忆妳你懷怀剛刚戀恋帶带達达應应搖摇遺遗' +
+  '繞绕場场卻却後后擁拥當当遠远圍围嘆叹漸渐灑洒換换戲戏運运撐撑傘伞頰颊螢萤蓮莲喚唤' +
+  '動动驀蓦處处連连煩烦尋寻樓楼斷断棄弃蒼苍實实雋隽響响墜坠唸念係系惡恶遷迁證证據据' +
+  '蓋盖備备條条佔占張张曉晓論论憂忧掛挂洩泄畫画執执曖暧並并塵尘擊击撲扑晝昼慾欲遙遥' +
+  '訣诀葉叶殘残補补藉借糾纠淒凄捨舍揮挥鎖锁綿绵彎弯採采暫暂澀涩擱搁劃划輩辈復复輸输' +
+  '窩窝脈脉勝胜戰战擋挡';
 
 const TABLE = (() => {
   const chars = [...PAIRS];

@@ -30,7 +30,40 @@ test('anything it does not know passes through unchanged', () => {
 test('the table is big enough to be worth having', () => {
   // Not an assertion about correctness, an assertion about not being quietly gutted: the value of this
   // is entirely in its coverage, and a table of three entries would pass every other test here.
-  assert.ok(FOLDED_CHARACTERS > 400, `only ${FOLDED_CHARACTERS} characters`);
+  assert.ok(FOLDED_CHARACTERS > 550, `only ${FOLDED_CHARACTERS} characters`);
+});
+
+test('the pairs the archive proved are all there', () => {
+  // The most frequent folds in 5,046 aligned line pairs between a Traditional and a Simplified copy of
+  // the same song. 著/着 alone occurred 415 times, and the first hand-written table had none of these —
+  // it was directionally right and badly under-covered, which a structural check cannot notice.
+  const proven: Array<[string, string]> = [
+    ['著', '着'],
+    ['裡', '里'],
+    ['沒', '没'],
+    ['別', '别'],
+    ['妳', '你'],
+    ['懷', '怀'],
+    ['憶', '忆'],
+    ['夠', '够'],
+    ['壞', '坏'],
+    ['瘋', '疯'],
+  ];
+  for (const [traditional, simplified] of proven) {
+    assert.equal(toSimplified(traditional), simplified, traditional);
+  }
+});
+
+test('characters that only look like a pair are left alone', () => {
+  // 像/象 and 的/地 both passed the provenance filter — two songs each, one dominant partner — and are
+  // not folds: they are distinct characters in both orthographies, so those were two lyric versions
+  // choosing different words. Folding them would make genuinely different lines compare equal, which is
+  // this bug pointing backwards.
+  assert.equal(toSimplified('像'), '像');
+  assert.equal(toSimplified('的'), '的');
+  // Same for the one apparent contradiction in the data: 課/科 appeared six times in one song, and 科 is
+  // a different word rather than a Simplified form.
+  assert.equal(toSimplified('課'), '课');
 });
 
 // ---- what it was for --------------------------------------------------------
