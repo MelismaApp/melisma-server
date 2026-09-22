@@ -134,9 +134,12 @@ async function loadConfig() {
  *  - **The order is saved on drop, not during.** Six settings writes per dragged pixel would be absurd,
  *    and a value that goes out to storage and comes back arrives too late to draw.
  *
- * Native drag events rather than pointer maths, which is the whole feature for about ten lines — at the
- * cost of not working by touch. Arrow keys on the focused handle do the same job, which covers that and
- * the keyboard at the same time.
+ * Pointer events rather than the native drag-and-drop API, which was the first attempt and is the obvious
+ * choice until you try it on a phone: `dragstart` is never fired by a touch gesture in either mobile
+ * Safari or Android Chrome, so the handle did nothing at all there. Pointer events are one code path for
+ * mouse, touch and pen, which is both less code than two and the only version that works everywhere.
+ *
+ * Arrow keys on a focused handle do the same job, for the keyboard and as a fallback.
  */
 function grip() {
   const handle = el('div', {
@@ -181,7 +184,23 @@ async function nudge(card, delta) {
   moved?.querySelector('.grip')?.focus();
 }
 
+/** The drag in progress: which row, which pointer, and the finger's offset from where it started. */
 let dragging = null;
+
+/**
+ * Keeps the dragged row under the finger after the DOM moves it.
+ *
+ * Reordering changes the row's layout position, so the transform that was following the finger is
+ * suddenly measured from somewhere else and the row jumps by a row's height. Correcting by the
+ * neighbour's height is close and wrong — the cards have margins — so the layout position is measured
+ * either side of the move and the difference is taken out of the baseline.
+ */
+function reanchor(card, move) {
+  const layoutTopBefore = card.getBoundingClientRect().top - dragging.dy;
+  move();
+  const layoutTopAfter = card.getBoundingClientRect().top - dragging.dy;
+  dragging.startY += layoutTopAfter - layoutTopBefore;
+}
 
 function renderProviders() {
   const host = $('#providers');
@@ -203,16 +222,75 @@ function renderProviders() {
       event.preventDefault();
       void nudge(card, event.key === 'ArrowUp' ? -1 : 1);
     });
-    // Only draggable while the handle is held, which is what keeps the rest of the row usable.
-    handle.addEventListener('mousedown', () => {
-      card.draggable = true;
+
+    handle.addEventListener('pointerdown', (event) => {
+      // Left button only for a mouse; any contact for a finger or a pen.
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      // Stops the page scrolling under the finger instead of the row moving. `touch-action: none` on the
+      // handle does most of this; this covers the rest.
+      event.preventDefault();
+
+      dragging = { card, pointerId: event.pointerId, startY: event.clientY, dy: 0 };
+      card.classList.add('dragging');
+
+      // Capture keeps every later move and the release coming to this handle once the finger has left
+      // it, which is what makes the drag work at all over any distance. Attempted last and allowed to
+      // fail: it throws if the pointer is not one the browser considers active, and doing it first meant
+      // a throw there abandoned the drag before it had started.
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch {
+        /* Without capture the drag still works as long as the pointer stays over the handle. */
+      }
     });
-    // Cleared on the document, not the handle: press the handle, release the button somewhere else, and
-    // the handle never sees the mouseup — leaving the row draggable from anywhere, which is the accident
-    // the handle exists to prevent.
-    document.addEventListener('mouseup', () => {
-      card.draggable = false;
+
+    handle.addEventListener('pointermove', (event) => {
+      if (!dragging || dragging.pointerId !== event.pointerId) return;
+
+      dragging.dy = event.clientY - dragging.startY;
+      card.style.transform = `translateY(${dragging.dy}px)`;
+
+      // Past a neighbour's own midpoint, because the rows are not all the same height: a source with a
+      // two-line description is half again as tall as one without.
+      //
+      // A loop rather than one swap per move, and that is not theoretical tidiness: one move can cross
+      // several rows. A flick does it, and so does any automated drag that jumps straight to its target —
+      // which is exactly how this was caught, by a test that moved a row four places in a single step and
+      // saw nothing happen at all.
+      for (;;) {
+        const above = card.previousElementSibling;
+        if (above) {
+          const box = above.getBoundingClientRect();
+          if (event.clientY < box.top + box.height / 2) {
+            reanchor(card, () => host.insertBefore(card, above));
+            continue;
+          }
+        }
+
+        const below = card.nextElementSibling;
+        if (below) {
+          const box = below.getBoundingClientRect();
+          if (event.clientY > box.top + box.height / 2) {
+            reanchor(card, () => host.insertBefore(card, below.nextElementSibling));
+            continue;
+          }
+        }
+        break;
+      }
+      card.style.transform = `translateY(${dragging.dy}px)`;
     });
+
+    const release = (event) => {
+      if (!dragging || dragging.pointerId !== event.pointerId) return;
+      dragging = null;
+      card.classList.remove('dragging');
+      card.style.transform = '';
+      void commitOrder();
+    };
+    handle.addEventListener('pointerup', release);
+    // A cancelled pointer still has to put the row down — otherwise it stays lifted and the order is
+    // never saved.
+    handle.addEventListener('pointercancel', release);
 
     const card = el('div', { class: 'card row', 'data-provider': provider.id }, [
       handle,
@@ -262,31 +340,6 @@ function renderProviders() {
         },
       }),
     ]);
-
-    card.addEventListener('dragstart', (event) => {
-      dragging = card;
-      card.classList.add('dragging');
-      event.dataTransfer.effectAllowed = 'move';
-      // Firefox refuses to start a drag without data on the transfer.
-      event.dataTransfer.setData('text/plain', provider.id);
-    });
-
-    card.addEventListener('dragend', () => {
-      card.classList.remove('dragging');
-      card.draggable = false;
-      dragging = null;
-      void commitOrder();
-    });
-
-    card.addEventListener('dragover', (event) => {
-      if (!dragging || dragging === card) return;
-      event.preventDefault();
-
-      // Against this row's own midpoint, because rows are not all the same height.
-      const box = card.getBoundingClientRect();
-      const below = event.clientY > box.top + box.height / 2;
-      host.insertBefore(dragging, below ? card.nextElementSibling : card);
-    });
 
     host.append(card);
   }

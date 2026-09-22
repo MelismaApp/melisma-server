@@ -94,6 +94,8 @@ p.hint { color: var(--muted); margin: 0 0 14px; max-width: 70ch; }
   place-items: center;
   color: var(--muted);
   cursor: grab;
+  /* The browser must not treat a drag on the handle as a scroll. */
+  touch-action: none;
   border-radius: 6px;
   border: 1px solid transparent;
 }
