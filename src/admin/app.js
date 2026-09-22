@@ -671,6 +671,135 @@ async function runRelookup(keys) {
   }
 }
 
+// ---- timings that do not fit the track -------------------------------------
+
+/**
+ * The report, and the two things worth doing about a row.
+ *
+ * Which action applies depends on whether anything else answered for that track. With another source in
+ * the archive, dropping this one is instant and free — the merge picks a different backbone from bodies
+ * already on disk. With nothing else, dropping leaves no lyrics at all, so the only real move is to ask
+ * the sources again.
+ */
+let fitRows = [];
+
+function renderFit(report) {
+  fitRows = report.rows;
+  const host = $('#fit-results');
+  host.replaceChildren();
+
+  $('#fit-state').textContent = report.serious
+    ? `${report.serious} to look at`
+    : report.rows.length
+      ? 'nothing serious'
+      : 'all fit';
+  $('#fit-state').className = report.serious ? 'pill warn' : 'pill good';
+  $('#fit-summary').textContent =
+    `checked ${report.checked} cached track(s)` +
+    (report.withoutDuration ? ` · ${report.withoutDuration} had no duration to check against` : '');
+  $('#fit-relookup').hidden = report.rows.length === 0;
+
+  if (report.rows.length === 0) {
+    host.append(el('div', { class: 'desc', text: 'Every cached document fits the track the player reported.' }));
+    return;
+  }
+
+  const table = el('table');
+  table.append(
+    el('tr', {}, [
+      el('th', { text: '' }),
+      el('th', { text: 'Track' }),
+      el('th', { text: 'Timing from' }),
+      el('th', { text: 'Runs to' }),
+      el('th', { text: 'Player said' }),
+      el('th', { text: 'Past the end' }),
+      el('th', { text: '' }),
+    ]),
+  );
+
+  for (const row of report.rows) {
+    const drop = el('button', {
+      class: 'action',
+      text: row.alternatives > 0 ? `Drop ${row.provider}` : 'Nothing else answered',
+    });
+    drop.disabled = row.alternatives === 0;
+    drop.title =
+      row.alternatives > 0
+        ? `Stop merging ${row.provider} for this track and rebuild it from the ${row.alternatives} other source(s) already on disk. The body stays archived.`
+        : 'This is the only source that answered, so dropping it would leave no lyrics. Look it up again instead.';
+    drop.addEventListener('click', () => void dropSource(row, drop));
+
+    table.append(
+      el('tr', {}, [
+        el('td', { text: row.serious ? '!' : '', class: row.serious ? 'bad' : '' }),
+        el('td', {}, [
+          el('div', { text: row.title }),
+          el('div', { class: 'desc', text: row.artist }),
+        ]),
+        el('td', { text: row.provider || '—' }),
+        el('td', { class: 'mono', text: clock(row.lastTimingMs) }),
+        el('td', { class: 'mono', text: clock(row.durationMs) }),
+        el('td', { text: `${Math.round(row.pastEndShare * 100)}%` }),
+        el('td', {}, [drop]),
+      ]),
+    );
+  }
+  host.append(table);
+}
+
+function clock(ms) {
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+async function dropSource(row, button) {
+  button.disabled = true;
+  button.textContent = 'Dropping…';
+  try {
+    const result = await api('/admin/api/drop-source', {
+      method: 'POST',
+      body: JSON.stringify({ key: row.key, provider: row.provider }),
+    });
+    toast(
+      result.timing
+        ? `Dropped ${result.dropped}; ${result.timing} owns the timing now (${result.lines} lines)`
+        : `Dropped ${result.dropped}; nothing else could carry it, so the track has no lyrics now`,
+    );
+    await runFit();
+  } catch (error) {
+    toast(error.message, true);
+    button.disabled = false;
+    button.textContent = `Drop ${row.provider}`;
+  }
+}
+
+async function runFit() {
+  const button = $('#fit-run');
+  button.disabled = true;
+  button.textContent = 'Checking…';
+  try {
+    renderFit(await api('/admin/api/fit'));
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Check the library';
+  }
+}
+
+$('#fit-run').addEventListener('click', () => void runFit());
+
+// Opening the card is a request for the answer; making people press a second button for it is noise.
+$('#fit-card').addEventListener('toggle', () => {
+  if ($('#fit-card').open && fitRows.length === 0) void runFit();
+});
+
+$('#fit-relookup').addEventListener('click', () => {
+  // Only the tracks this report named, which is the point of offering it here rather than sending
+  // someone to the library to find them by hand.
+  void runRelookup(fitRows.map((row) => row.key));
+});
+
 $('#cache-relookup').addEventListener('click', () => void runRelookup(null));
 $('#cache-relookup-selected').addEventListener('click', () => void runRelookup([...selected]));
 

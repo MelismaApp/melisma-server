@@ -570,6 +570,34 @@ export class Store {
     return row ? toEntry(row) : null;
   }
 
+  /**
+   * Every cached entry, for a pass over the whole library.
+   *
+   * Rows rather than keys, because the callers that want all of them want the fields too, and fetching
+   * them one key at a time is four hundred statements for one question.
+   */
+  allEntries(): CacheEntry[] {
+    const rows = this.db
+      .prepare('SELECT * FROM entries ORDER BY artist, title')
+      .all() as Record<string, unknown>[];
+    return rows.map(toEntry);
+  }
+
+  /** Which sources have a usable archived body, by track. Superseded ones do not count. */
+  providersByKey(): Map<string, string[]> {
+    const rows = this.db
+      .prepare('SELECT key, provider FROM raw WHERE ok = 1')
+      .all() as { key: string; provider: string }[];
+
+    const out = new Map<string, string[]>();
+    for (const row of rows) {
+      const list = out.get(row.key);
+      if (list) list.push(row.provider);
+      else out.set(row.key, [row.provider]);
+    }
+    return out;
+  }
+
   putEntry(entry: Omit<CacheEntry, 'createdAt' | 'hits' | 'lastHitAt'>): void {
     const now = Date.now();
     this.db

@@ -238,6 +238,9 @@ th { color: var(--muted); font-weight: 500; font-size: 12px; }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--panel-2); }
 td.mono, th.mono { font-family: var(--mono); font-size: 12px; }
+
+/* The marker on a row past the threshold the merge uses to demote a document. */
+td.bad { color: var(--bad); font-weight: 700; text-align: center; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .stats { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 14px; }

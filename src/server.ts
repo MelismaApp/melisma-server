@@ -20,6 +20,7 @@ import { Store, LOG_LEVELS, type LogLevel } from './db.ts';
 import { Resolver, reparseByFormat } from './resolver.ts';
 import { Refresher } from './refresher.ts';
 import { MERGE_VERSION } from './merge.ts';
+import { timingFit } from './report.ts';
 import { PROVIDERS, providerById } from './providers/index.ts';
 import { testSources, TEST_TRACK } from './selftest.ts';
 import { backfillIsrc } from './harvest.ts';
@@ -301,6 +302,31 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
         `deleted ${includeExtras ? 'everything for' : 'the lyrics of'} ${keys.length} track(s)`,
       );
       return send(response, 200, { deleted: keys.length });
+    }
+
+    case 'GET /admin/api/fit':
+      // Cheap enough to answer inline: it reads the merged documents, which already hold their timings
+      // and name their source, rather than reparsing the archive.
+      return send(response, 200, timingFit(app.store));
+
+    case 'POST /admin/api/drop-source': {
+      const body = await readJson<{ key?: string; provider?: string }>(request);
+      const key = typeof body?.key === 'string' ? body.key : '';
+      const provider = typeof body?.provider === 'string' ? body.provider : '';
+      if (!key || !provider) return send(response, 400, { error: 'need a key and a provider' });
+
+      // The body stays on disk, marked unusable, so the evidence survives and the reason is recorded
+      // next to it. Then re-merge at once: the point of the action is that the answer changes now.
+      app.store.supersedeRaw(key, provider, 'dropped by hand: timings did not fit the track');
+      app.store.log('warn', null, `dropped ${provider} for ${key}: timings did not fit the track`);
+      const document = app.resolver.remerge(key);
+
+      return send(response, 200, {
+        dropped: provider,
+        // What owns the timing now — or nothing, if that source was the only one that answered.
+        timing: document?.provenance?.timing ?? null,
+        lines: document?.lines.length ?? 0,
+      });
     }
 
     case 'GET /admin/api/relookup':

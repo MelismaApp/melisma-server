@@ -262,6 +262,32 @@
           </p>
           <div class="stats" id="cache-stats"></div>
 
+          <!--
+            Collapsed, because most of the time it has nothing to say. It answers a question the app
+            cannot: the player told us how long the track was, so a document running past the end of it
+            describes a different recording.
+          -->
+          <details class="card" id="fit-card">
+            <summary>
+              <strong>Timings that do not fit the track</strong>
+              <span class="pill" id="fit-state">not checked yet</span>
+            </summary>
+            <div class="desc" style="margin: 8px 0 10px">
+              Every lookup carries the length the <em>player</em> reported, and it is kept on the entry —
+              so this compares what is cached against what was actually playing, over the whole library
+              at once, with nothing to install on the phone and nothing to wait for. A source marked
+              <strong>!</strong> is past the threshold the merge itself uses to demote a document: that
+              is a different recording, not a long outro.
+            </div>
+            <div class="inline" style="margin-bottom: 10px">
+              <button class="action primary" id="fit-run">Check the library</button>
+              <button class="action" id="fit-relookup" hidden>Look these up again</button>
+              <span class="spacer"></span>
+              <span class="desc" id="fit-summary"></span>
+            </div>
+            <div id="fit-results"></div>
+          </details>
+
           <div class="card">
             <div class="inline" style="margin-bottom: 10px">
               <input
