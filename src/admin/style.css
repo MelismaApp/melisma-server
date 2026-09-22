@@ -81,6 +81,41 @@ p.hint { color: var(--muted); margin: 0 0 14px; max-width: 70ch; }
 }
 
 .card.row { display: flex; align-items: center; gap: 14px; }
+
+/*
+ * The handle a source is dragged by, and the only part of the row that starts a drag: a row you can grab
+ * anywhere is a row you reorder by accident while reaching for its switch.
+ */
+.grip {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  cursor: grab;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.grip:hover { color: var(--text); background: var(--panel-2); }
+.grip:focus-visible { outline: none; border-color: var(--accent); color: var(--text); }
+.grip:active { cursor: grabbing; }
+
+.grip svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  fill: none;
+}
+
+/* The row being carried. Left in place and dimmed, so the gap shows where it would land. */
+.card.row.dragging {
+  opacity: 0.4;
+  border-color: var(--accent);
+}
 .card .grow { flex: 1; min-width: 0; }
 .card .title { font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .card .desc { color: var(--muted); font-size: 13px; margin-top: 2px; }

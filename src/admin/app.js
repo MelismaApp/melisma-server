@@ -117,6 +117,72 @@ async function loadConfig() {
   renderSpotifyAge(await api('/admin/api/refresh').catch(() => null));
 }
 
+/**
+ * The order the sources are in, dragged by a handle.
+ *
+ * It was a number box per row, which is a worse version of the question: the order is what matters and
+ * the numbers are how it happens to be stored, so editing them meant reading six boxes, working out what
+ * to type, and typing it. The app has a handle you drag; so does this now.
+ *
+ * Three decisions carried over from the app's version, each for its own reason:
+ *
+ *  - **The handle is the only drag target.** A row you can grab anywhere is a row you reorder by accident
+ *    while trying to flick a switch or select a label.
+ *  - **Rows move the moment a neighbour is passed**, compared against that neighbour's own midpoint rather
+ *    than an assumed row height — a source with a two-line description is half again as tall as one
+ *    without.
+ *  - **The order is saved on drop, not during.** Six settings writes per dragged pixel would be absurd,
+ *    and a value that goes out to storage and comes back arrives too late to draw.
+ *
+ * Native drag events rather than pointer maths, which is the whole feature for about ten lines — at the
+ * cost of not working by touch. Arrow keys on the focused handle do the same job, which covers that and
+ * the keyboard at the same time.
+ */
+function grip() {
+  const handle = el('div', {
+    class: 'grip',
+    tabindex: '0',
+    role: 'button',
+    title: 'Drag to reorder, or use the arrow keys',
+    'aria-label': 'Reorder this source',
+  });
+  // Three lines, drawn rather than shipped: an image for six pixels of chrome is not worth a request.
+  handle.innerHTML =
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" /></svg>';
+  return handle;
+}
+
+/** Reads the order off the page, stores it, and saves only what moved. */
+async function commitOrder() {
+  const host = $('#providers');
+  const order = [...host.children].map((card) => card.dataset.provider);
+
+  const patch = {};
+  for (const [index, id] of order.entries()) {
+    const provider = providers.find((candidate) => candidate.id === id);
+    if (!provider || provider.priority === index) continue;
+    provider.priority = index;
+    patch[`provider.${id}.priority`] = String(index);
+  }
+  if (Object.keys(patch).length === 0) return;
+
+  await save(patch);
+  renderProviders();
+}
+
+/** Moves a card one place up or down, for the keyboard. */
+async function nudge(card, delta) {
+  const sibling = delta < 0 ? card.previousElementSibling : card.nextElementSibling;
+  if (!sibling) return;
+  card.parentElement.insertBefore(delta < 0 ? card : sibling, delta < 0 ? sibling : card);
+  await commitOrder();
+  // The re-render replaced the node, so focus has to be put back where the hand is.
+  const moved = [...$('#providers').children].find((row) => row.dataset.provider === card.dataset.provider);
+  moved?.querySelector('.grip')?.focus();
+}
+
+let dragging = null;
+
 function renderProviders() {
   const host = $('#providers');
   host.replaceChildren();
@@ -131,7 +197,25 @@ function renderProviders() {
 
     const result = el('div', { class: 'desc', text: '' });
 
-    const card = el('div', { class: 'card row' }, [
+    const handle = grip();
+    handle.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      void nudge(card, event.key === 'ArrowUp' ? -1 : 1);
+    });
+    // Only draggable while the handle is held, which is what keeps the rest of the row usable.
+    handle.addEventListener('mousedown', () => {
+      card.draggable = true;
+    });
+    // Cleared on the document, not the handle: press the handle, release the button somewhere else, and
+    // the handle never sees the mouseup — leaving the row draggable from anywhere, which is the accident
+    // the handle exists to prevent.
+    document.addEventListener('mouseup', () => {
+      card.draggable = false;
+    });
+
+    const card = el('div', { class: 'card row', 'data-provider': provider.id }, [
+      handle,
       el('label', { class: 'switch' }, [
         el('input', {
           type: 'checkbox',
@@ -152,16 +236,6 @@ function renderProviders() {
         el('div', { class: 'desc', text: provider.description }),
         result,
       ]),
-      el('input', {
-        type: 'number',
-        value: provider.priority,
-        title: 'Priority — lower wins ties',
-        style: 'width: 68px',
-        onchange: async (event) => {
-          await save({ [`provider.${provider.id}.priority`]: event.target.value });
-          provider.priority = Number(event.target.value);
-        },
-      }),
       el('button', {
         class: 'action',
         text: 'Test',
@@ -188,6 +262,31 @@ function renderProviders() {
         },
       }),
     ]);
+
+    card.addEventListener('dragstart', (event) => {
+      dragging = card;
+      card.classList.add('dragging');
+      event.dataTransfer.effectAllowed = 'move';
+      // Firefox refuses to start a drag without data on the transfer.
+      event.dataTransfer.setData('text/plain', provider.id);
+    });
+
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      card.draggable = false;
+      dragging = null;
+      void commitOrder();
+    });
+
+    card.addEventListener('dragover', (event) => {
+      if (!dragging || dragging === card) return;
+      event.preventDefault();
+
+      // Against this row's own midpoint, because rows are not all the same height.
+      const box = card.getBoundingClientRect();
+      const below = event.clientY > box.top + box.height / 2;
+      host.insertBefore(dragging, below ? card.nextElementSibling : card);
+    });
 
     host.append(card);
   }
