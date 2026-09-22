@@ -69,6 +69,16 @@ const DEFAULT_INTERVAL_MS = 150;
 const PATIENCE_MS = 3_000;
 
 /**
+ * The phrase that marks a reply as "not asked yet" rather than "asked and failed".
+ *
+ * A sentinel this code both writes and reads, so matching on it is not sniffing somebody else's prose.
+ * It matters because the two look identical to a provider — both arrive as an unavailable reply — and
+ * they deserve opposite treatment: a source that could not be reached is left alone for hours, while a
+ * source that was merely not due yet should be asked the moment it is.
+ */
+export const PACED_MARKER = 'is paced at';
+
+/**
  * Sets a host's minimum interval at runtime.
  *
  * Musixmatch's tolerance is a property of the account rather than of this code, and it changes — hence a
@@ -123,7 +133,7 @@ async function run(host: string, url: string, options: FetchOptions): Promise<Fe
       body: '',
       contentType: '',
       ms: 0,
-      error: `${host} is paced at ${Math.round(interval / 1000)}s and is not due for another ${Math.ceil(wait / 1000)}s`,
+      error: `${host} ${PACED_MARKER} ${Math.round(interval / 1000)}s and is not due for another ${Math.ceil(wait / 1000)}s`,
     };
   }
   if (wait > 0) await sleep(wait);

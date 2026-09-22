@@ -876,9 +876,11 @@ function renderStats(stats) {
   // coerced to the text "null", so with nothing stale the row ended "0.2 MB null".
   $('#cache-stats').replaceChildren(
     ...[
-      stat(stats.entries, 'tracks'),
+      // `tracks` rather than `entries`: the table below lists the union of both, and counting one of
+      // them here made the artwork and ISRC figures look larger than the whole.
+      stat(stats.tracks ?? stats.entries, 'tracks'),
       stat(stats.found, 'with lyrics'),
-      stat(stats.misses, 'nothing found'),
+      stat(stats.misses, 'asked, nobody had it'),
       stat(stats.extras ?? 0, 'with artwork etc'),
       stat(stats.withIsrc ?? 0, 'with an ISRC'),
       stat(stats.withAnalysis ?? 0, 'with the audio analysis'),
@@ -889,7 +891,7 @@ function renderStats(stats) {
     ].filter(Boolean),
   );
   $('#header-stats').textContent =
-    `${stats.entries} tracks · ${stats.found} with lyrics · merge v${stats.mergeVersion}`;
+    `${stats.tracks ?? stats.entries} tracks · ${stats.found} with lyrics · merge v${stats.mergeVersion}`;
 }
 
 async function loadCache() {

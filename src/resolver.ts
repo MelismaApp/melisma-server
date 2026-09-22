@@ -13,6 +13,7 @@
  */
 
 import { MERGE_VERSION, merge, type Candidate, type MergeResult } from './merge.ts';
+import { PACED_MARKER } from './http.ts';
 import { activeProviders, providerById, type Provider } from './providers/index.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
 import { redact, sleep } from './http.ts';
@@ -585,6 +586,10 @@ export class Resolver {
       // answer.
       if (isrc && provider.usesIsrc && !attempt.hadIsrc) return true;
 
+      // Never asked, only postponed: ask as soon as anything asks again, because the reason it was
+      // skipped was measured in seconds and has almost certainly passed.
+      if (attempt.outcome === 'deferred') return true;
+
       if (attempt.outcome !== 'unreachable') return false;
       return Date.now() - attempt.at > RETRY_UNREACHABLE_MS;
     });
@@ -662,7 +667,10 @@ export class Resolver {
             log: (level, message) => this.store.log(level, provider.id, redact(message)),
             unreachable: (detail) => {
               unreachable.add(provider.id);
-              this.store.recordAttempt(key, provider.id, 'unreachable', hadIsrc);
+              // "Not due yet" is not a failure: nothing was asked, so nothing should be written down as
+              // having been tried. Recorded separately so the cooldown below can be none at all.
+              const deferred = detail.includes(PACED_MARKER);
+              this.store.recordAttempt(key, provider.id, deferred ? 'deferred' : 'unreachable', hadIsrc);
               this.store.log('warn', provider.id, redact(detail));
             },
             learn: () => {

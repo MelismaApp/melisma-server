@@ -46,10 +46,15 @@ export interface RawResponse {
 /**
  * How a source answered when it was last asked about a track.
  *
+ * `deferred` is a fourth case and the newest: the request was never made, because the host is paced in
+ * tens of seconds and its turn had not come. It looks exactly like `unreachable` from the provider's side
+ * and must not be treated like it — six hours of cooldown for a source that was forty seconds early is
+ * how a pacing rule turns into a source nobody asks any more.
+ *
  * `none` is an answer and `unreachable` is not, which is the whole distinction: one is settled and
  * the other is worth trying again.
  */
-export type AttemptOutcome = 'lyrics' | 'none' | 'unreachable';
+export type AttemptOutcome = 'lyrics' | 'none' | 'unreachable' | 'deferred';
 
 /** A JSON column read back, or null if it was empty or unreadable. */
 function parseJson(value: unknown): Record<string, unknown> | null {
@@ -262,7 +267,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS attempts (
         key      TEXT NOT NULL,
         provider TEXT NOT NULL,
-        -- 'lyrics' | 'none' | 'unreachable'
+        -- 'lyrics' | 'none' | 'unreachable' | 'deferred'
         outcome  TEXT NOT NULL,
         at       INTEGER NOT NULL,
         PRIMARY KEY (key, provider)
@@ -798,7 +803,10 @@ export class Store {
   }
 
   stats(): {
+    /** Rows in `entries`: tracks a lyric lookup has been made for. */
     entries: number;
+    /** Rows in the library, which is the union of `entries` and `extras`. See `tracks` below. */
+    tracks: number;
     found: number;
     misses: number;
     hits: number;
@@ -814,10 +822,23 @@ export class Store {
     };
 
     const entries = count('SELECT COUNT(*) AS n FROM entries');
-    const found = count('SELECT COUNT(*) AS n FROM entries WHERE merged IS NOT NULL');
+    // Not `IS NOT NULL`. An empty `merged` is this cache's way of saying "asked, and nobody had it" —
+    // `fromCache` reads it that way and gives it the short negative TTL — and an empty string is not
+    // null, so those were being counted as found. Six of them on the live library, and the number only
+    // grows: a re-merge that finds nothing usable now writes exactly this state.
+    const found = count("SELECT COUNT(*) AS n FROM entries WHERE merged IS NOT NULL AND merged <> ''");
+
+    // The library lists both tables, so a count of `entries` alone reads as a contradiction next to the
+    // artwork and ISRC figures, which are over the union: 410 tracks, 421 with artwork. Eleven keys have
+    // extras and no entry — artwork harvested for a track whose lyrics were later forgotten, which keeps
+    // the extras on purpose.
+    const tracks = count(
+      'SELECT COUNT(*) AS n FROM (SELECT key FROM entries UNION SELECT key FROM extras)',
+    );
 
     return {
       entries,
+      tracks,
       found,
       misses: entries - found,
       hits: count('SELECT COALESCE(SUM(hits), 0) AS n FROM entries'),

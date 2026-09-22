@@ -95,3 +95,28 @@ test('an expiry inside the margin does not ask for a negative delay', () => {
   // Already expired, same rule.
   assert.ok(nextDelayMs(now - 60_000, ceiling, now) >= 60_000);
 });
+
+test('a token inside the margin is not re-asked for every minute', () => {
+  // The bug this exists to stop, seen on the live server: a token 40s from expiry, a refresh every 60s,
+  // and every one of them reporting "already current". The margin cannot do what it was written to do —
+  // the harvest reads the token from the player's own request and the player keeps its cached one until
+  // it is nearly dead, so asking early returns the same string, nothing is stored, the recorded expiry
+  // never moves, and the schedule fires again at the floor. Five extra browser launches an hour, which
+  // is what made the leaked-process bug bite in a day and a half.
+  const now = 1_000_000;
+  const ceiling = 30 * 60_000;
+
+  // 40 seconds left: wake just after it dies, not in a minute and not in a minute after that.
+  const soon = nextDelayMs(now + 40_000, ceiling, now);
+  assert.ok(soon >= 55_000, `waited only ${soon}ms`);
+  assert.ok(soon <= 61_000, `waited ${soon}ms, which is another poll rather than a plan`);
+
+  // Four minutes left is still inside the five-minute margin, and the answer is the same shape: wait for
+  // the expiry rather than asking now and again in a minute.
+  const fourMinutes = nextDelayMs(now + 240_000, ceiling, now);
+  assert.ok(fourMinutes > 240_000, `woke ${fourMinutes}ms in, before the token had even expired`);
+  assert.ok(fourMinutes < 260_000, `waited ${fourMinutes}ms, well past the expiry`);
+
+  // And outside the margin nothing changed: renew five minutes early, as designed.
+  assert.equal(nextDelayMs(now + 20 * 60_000, ceiling, now), 15 * 60_000);
+});

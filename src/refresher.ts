@@ -70,6 +70,25 @@ const RENEW_MARGIN_MS = 5 * 60_000;
 const MIN_DELAY_MS = 60_000;
 
 /**
+ * How long past a token's expiry to wait before looking for its replacement.
+ *
+ * Because the margin cannot do what it was written to do. The plan was to renew five minutes early, and
+ * Spotify will not co-operate: the harvest reads the token out of the player's own request, and the
+ * player keeps using its cached one until that one is nearly dead. Asking early returns the *same*
+ * string, `updated` comes back empty, the recorded expiry never moves — so the schedule stays inside the
+ * margin and re-fires at `MIN_DELAY_MS`, launching a browser every sixty seconds for the last five
+ * minutes of every token's life.
+ *
+ * Which was not merely wasteful. Five extra Chromium launches an hour is what made the leaked-process
+ * bug bite in a day and a half rather than a month.
+ *
+ * So once inside the margin the only moment worth waking for is just after the old token dies, which is
+ * the first moment the player will mint a new one. A few seconds of a dead token costs a request its
+ * Spotify source; a browser launch every minute costs the container.
+ */
+const EXPIRY_GRACE_MS = 15_000;
+
+/**
  * When to renew next, given what the token said and the configured ceiling.
  *
  * A free function because the arithmetic is where the edge cases are — an expiry already past, one
@@ -86,8 +105,14 @@ export function nextDelayMs(
   now: number = Date.now(),
 ): number {
   if (expiresAt === null) return ceilingMs;
+
   const ahead = expiresAt - RENEW_MARGIN_MS - now;
-  return Math.min(ceilingMs, Math.max(MIN_DELAY_MS, ahead));
+  if (ahead > 0) return Math.min(ceilingMs, ahead);
+
+  // Inside the margin, or past the expiry. Aim just past the moment the token dies rather than an
+  // interval from now: the player will not issue a new one before then, so anything sooner is a browser
+  // launch that returns the token we already have. See `EXPIRY_GRACE_MS`.
+  return Math.min(ceilingMs, Math.max(MIN_DELAY_MS, expiresAt + EXPIRY_GRACE_MS - now));
 }
 
 export class Refresher {
