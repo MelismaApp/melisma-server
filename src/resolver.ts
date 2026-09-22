@@ -778,6 +778,12 @@ export class Resolver {
     if (entry.mergeVersion < MERGE_VERSION) {
       const remerged = this.remerge(key, config);
       if (remerged) return { document: remerged, key, source: 'remerge' };
+
+      // It returned nothing, which may mean it *cleared* this entry — every source it was built from is
+      // rejected now. The snapshot above is from before that, so falling through would serve the very
+      // document this just decided was unusable. Read it again and answer from what is true now.
+      const after = this.store.getEntry(key);
+      if (!after?.merged) return null;
     }
 
     if (!entry.merged) {
@@ -812,6 +818,15 @@ export class Resolver {
 
     const candidates: Candidate[] = [];
     const unreachable: string[] = [];
+    /**
+     * Of those, the ones that were never actually asked — the host was paced and its turn had not come.
+     *
+     * Kept apart because the outcome decides the cooldown, and the two deserve opposite ones: six hours
+     * for a service having a bad day, none at all for a source that was a few seconds early. The detail
+     * string is the only place that distinction exists by the time the recording happens, so it is
+     * noticed here rather than reconstructed later.
+     */
+    const deferred = new Set<string>();
 
     await Promise.all(
       providers.map(async (provider) => {
@@ -821,6 +836,7 @@ export class Resolver {
             this.store.log(level, provider.id, redact(message)),
           unreachable: (detail: string) => {
             unreachable.push(provider.id);
+            if (detail.includes(PACED_MARKER)) deferred.add(provider.id);
             this.store.log('warn', provider.id, redact(detail));
           },
           learn: (extras: LearnedExtras) => {
@@ -863,7 +879,11 @@ export class Resolver {
             this.store.recordAttempt(
               key,
               provider.id,
-              unreachable.includes(provider.id) ? 'unreachable' : 'none',
+              deferred.has(provider.id)
+                ? 'deferred'
+                : unreachable.includes(provider.id)
+                  ? 'unreachable'
+                  : 'none',
               hadIsrc,
             );
             return;

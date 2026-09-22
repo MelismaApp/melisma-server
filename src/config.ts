@@ -41,12 +41,17 @@ export interface Config {
   relookupPauseMs: number;
 
   /**
-   * The shortest gap between two Musixmatch requests, in milliseconds.
+   * The shortest gap between two Musixmatch *lookups*, in milliseconds.
+   *
+   * Lookups, not requests, and the distinction is the whole of it: one lookup is three calls to that host
+   * — mint a token, find the track, fetch the words — so spending the gap on the first meant the second
+   * was always too early and the source could never answer at all. A turn is an allowance big enough for
+   * one lookup; see `BURST` in `http.ts`.
    *
    * A setting rather than a constant because it is a property of the account and the day, not of this
    * code: reported as needing thirty to sixty seconds. Nothing waits that long — past a few seconds a
-   * request reports itself unreachable and is asked again later, so raising this slows how often
-   * Musixmatch is consulted rather than slowing everything down. See `PATIENCE_MS` in `http.ts`.
+   * request reports itself unreachable and is asked again later, so raising this makes Musixmatch
+   * consulted less often rather than making everything slower.
    */
   musixmatchPaceMs: number;
 

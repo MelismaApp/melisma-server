@@ -105,3 +105,41 @@ test('a host paced beyond patience is skipped rather than waited for', async () 
     paced.close();
   }
 });
+
+test('a paced host still allows one whole lookup through', async () => {
+  // The regression this exists to stop, and it shipped: Musixmatch takes three requests to answer — mint
+  // a token, `matcher.track.get`, then the richsync — all to the same host. With a turn worth one request,
+  // the second was always too early and got the synthetic 429, so the source could not return lyrics at
+  // all. The pace is between lookups, and a lookup is not one request.
+  const paced = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/plain' });
+    response.end('ok');
+  });
+  await new Promise((resolve) => paced.listen(0, '127.0.0.1', resolve));
+  const at = `http://127.0.0.1:${(paced.address() as AddressInfo).port}`;
+  const host = new URL(at).host;
+
+  try {
+    // The real setting: tens of seconds between lookups, with Musixmatch's allowance.
+    pace(host, 45_000, 4);
+
+    const first = await request(`${at}/token`);
+    const second = await request(`${at}/matcher`);
+    const third = await request(`${at}/richsync`);
+    for (const [name, reply] of [['token', first], ['matcher', second], ['richsync', third]] as const) {
+      assert.equal(reply.status, 200, `${name} was refused, so no lyrics could ever come back`);
+    }
+
+    // The fourth is the retry allowance, and it is meant to be there.
+    assert.equal((await request(`${at}/retry`)).status, 200);
+
+    // Past that the turn is spent, and the next lookup waits — which is the whole point of the pace.
+    const nextLookup = await request(`${at}/matcher-again`);
+    assert.equal(nextLookup.status, 429, 'a second lookup should wait its turn');
+    assert.ok(isUnavailable(nextLookup));
+    assert.match(nextLookup.error ?? '', /not due for another/);
+  } finally {
+    pace(host, 0, 1);
+    paced.close();
+  }
+});

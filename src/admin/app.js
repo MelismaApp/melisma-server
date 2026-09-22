@@ -195,11 +195,15 @@ let dragging = null;
  * neighbour's height is close and wrong — the cards have margins — so the layout position is measured
  * either side of the move and the difference is taken out of the baseline.
  */
-function reanchor(card, move) {
+function reanchor(card, move, clientY) {
   const layoutTopBefore = card.getBoundingClientRect().top - dragging.dy;
   move();
   const layoutTopAfter = card.getBoundingClientRect().top - dragging.dy;
   dragging.startY += layoutTopAfter - layoutTopBefore;
+  // And `dy` is measured from that baseline, so it has to be taken again. Leaving it stale left the row
+  // sitting a row's height away from the finger until the next pointer event arrived — visible as a jump
+  // on every crossing, and worse at the end of a move where no further event comes.
+  dragging.dy = clientY - dragging.startY;
 }
 
 function renderProviders() {
@@ -262,7 +266,7 @@ function renderProviders() {
         if (above) {
           const box = above.getBoundingClientRect();
           if (event.clientY < box.top + box.height / 2) {
-            reanchor(card, () => host.insertBefore(card, above));
+            reanchor(card, () => host.insertBefore(card, above), event.clientY);
             continue;
           }
         }
@@ -271,7 +275,7 @@ function renderProviders() {
         if (below) {
           const box = below.getBoundingClientRect();
           if (event.clientY > box.top + box.height / 2) {
-            reanchor(card, () => host.insertBefore(card, below.nextElementSibling));
+            reanchor(card, () => host.insertBefore(card, below.nextElementSibling), event.clientY);
             continue;
           }
         }

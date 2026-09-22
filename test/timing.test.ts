@@ -59,6 +59,15 @@ const FOUR_TIMED = [
   timed('I said ooh I m drowning in the night', 10_000, 14_000),
 ];
 
+/** Five plain line-timed lines, shifted, standing in for sources that agree with each other. */
+const ENGLISH_TIMED = FOUR_TIMED;
+
+function lineOnlyEnglish(shiftMs: number): LyricLine[] {
+  return ENGLISH_TIMED.map((l) =>
+    line({ text: l.text, startMs: l.startMs + shiftMs, endMs: l.endMs + shiftMs }),
+  );
+}
+
 // ---- the claim --------------------------------------------------------------
 
 test('a whole line in one fragment is not word timing', () => {
@@ -183,4 +192,44 @@ test('the reader ordering decides between two honest word-timed sources', () => 
   const result = merge([preferred, extra], { durationMs: 200_000 });
 
   assert.equal(result.document?.provenance.timing, 'apple');
+});
+
+// ---- what reaches the cache -------------------------------------------------
+
+test('a coarse document does not claim word timing in the merged result', () => {
+  // The demotion was only half applied: `honestKind` lowered the candidate's `kind`, and then the merged
+  // document's kind was taken from "does any line have syllables at all" — which a document of whole
+  // lines held in one fragment each does. So the candidate list reported line timing while the cached and
+  // served document claimed word timing, which is the claim the app ranks on.
+  const only = candidate('musixmatch', FOUR_COARSE, 3);
+  const result = merge([only], { durationMs: 200_000 });
+
+  assert.equal(result.document?.kind, 'line', 'the served document must say what it can support');
+  assert.equal(result.summaries.find((s) => s.provider === 'musixmatch')?.kind, 'line');
+});
+
+test('a source with the wrong clock cannot take the spine back on priority', () => {
+  // One tier down loses the backbone to a source that means it — unless the corroborating sources are a
+  // tier down too, in which case the reader's ordering could hand the clock straight back to the one
+  // document known to belong to another recording.
+  const drifting = ENGLISH_TIMED.map((line, i) => ({
+    ...line,
+    startMs: line.startMs + i * 6_000,
+    endMs: line.endMs + i * 6_000,
+  }));
+
+  const result = merge(
+    [
+      // Most trusted, and adrift from everyone: exactly the combination that used to win.
+      { provider: 'musixmatch', doc: document(drifting), match: 1, priority: 0 },
+      { provider: 'lrclib', doc: document(lineOnlyEnglish(0)), match: 1, priority: 5 },
+      { provider: 'netease', doc: document(lineOnlyEnglish(60)), match: 1, priority: 6 },
+      { provider: 'spotify', doc: document(lineOnlyEnglish(-40)), match: 1, priority: 7 },
+    ],
+    { durationMs: 200_000 },
+  );
+
+  assert.notEqual(result.document?.provenance.timing, 'musixmatch');
+  const note = result.summaries.find((s) => s.provider === 'musixmatch')?.note ?? '';
+  assert.ok(note, 'and the candidate list should say why it lost the clock');
 });

@@ -155,6 +155,12 @@ export function relookupCandidates(store: Store): CandidateSet {
   const found = new Map<string, Candidate>();
   const entries = store.allEntries();
 
+  // The library is the union of `entries` and `extras`, and a key with only extras has no lyrics at all —
+  // which is what "forget the lyrics, keep the artwork" leaves behind, and exactly the case worth asking
+  // about again. Reading `entries` alone skipped them and undercounted the total.
+  const known = new Set(entries.map((entry) => entry.key));
+  const extrasOnly = store.allKeys().filter((key) => !known.has(key));
+
   const note = (entry: { key: string; title: string; artist: string }, reason: string) => {
     const existing = found.get(entry.key);
     if (existing) existing.reasons.push(reason);
@@ -173,6 +179,11 @@ export function relookupCandidates(store: Store): CandidateSet {
     }
   }
 
+  for (const key of extrasOnly) {
+    const extras = store.extras(key);
+    note({ key, title: extras?.title ?? '', artist: extras?.artist ?? '' }, 'nothing cached');
+  }
+
   for (const row of timingFit(store).rows) {
     if (row.serious) note(row, 'timings do not fit the track');
   }
@@ -182,5 +193,5 @@ export function relookupCandidates(store: Store): CandidateSet {
     for (const reason of new Set(candidate.reasons)) byReason[reason] = (byReason[reason] ?? 0) + 1;
   }
 
-  return { candidates: [...found.values()], total: entries.length, byReason };
+  return { candidates: [...found.values()], total: entries.length + extrasOnly.length, byReason };
 }

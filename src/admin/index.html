@@ -478,14 +478,16 @@
               </span>
             </label>
             <label class="field">
-              <span>Shortest gap between Musixmatch requests (ms)</span>
+              <span>Shortest gap between Musixmatch lookups (ms)</span>
               <input type="number" id="set-musixmatchMs" />
               <span class="note">
                 Musixmatch throttles an account rather than an address, and wants tens of seconds —
-                thirty to sixty in practice. Nothing waits that long: past a few seconds a request
-                reports itself unreachable and is asked again later, so raising this makes Musixmatch
-                consulted less often rather than making everything slower. A bulk run proceeds at the
-                pace of the other five sources.
+                thirty to sixty in practice. This is the gap between whole lookups: one lookup is three
+                calls to that host, so the allowance covers all of them rather than stopping after the
+                first. Nothing waits for it either — past a few seconds a request reports itself
+                unreachable and is asked again later, so raising this makes Musixmatch consulted less
+                often rather than making everything slower, and a bulk run proceeds at the pace of the
+                other five sources.
               </span>
             </label>
               <label class="field">

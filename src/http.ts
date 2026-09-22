@@ -37,6 +37,25 @@ const USER_AGENT =
 /** Named because the pace of this one is a setting, and two spellings of a host key is a silent bug. */
 export const MUSIXMATCH_HOST = 'apic.musixmatch.com';
 
+/**
+ * How many requests one turn at a host is worth.
+ *
+ * The interval below is the gap between *lookups*, and a lookup is not one request. Musixmatch takes
+ * three: mint a token if there is none, `matcher.track.get` to find the track, then `track.richsync.get`
+ * or `track.subtitle.get` for the words. Spending the whole interval on the first of those means the
+ * second is always too early, is refused, and the source can never return lyrics at all — which is
+ * exactly what happened when this was one request per interval, and it shipped.
+ *
+ * So a turn is a small allowance rather than a single request: enough for one lookup's worth of calls,
+ * refilled over the interval. Four rather than three, because a retry inside a lookup should not cost it
+ * the lyrics. Every other host is one, which is the old behaviour.
+ */
+const BURST: Record<string, number> = {
+  [/* musixmatch */ 'apic.musixmatch.com']: 4,
+};
+
+const DEFAULT_BURST = 1;
+
 const MIN_INTERVAL_MS: Record<string, number> = {
   'lrclib.net': 350,
   'api.amll.dev': 350,
@@ -84,12 +103,17 @@ export const PACED_MARKER = 'is paced at';
  * Musixmatch's tolerance is a property of the account rather than of this code, and it changes — hence a
  * setting rather than a constant. Applied at boot and whenever settings are saved.
  */
-export function pace(host: string, ms: number): void {
+export function pace(host: string, ms: number, burst = BURST[host] ?? DEFAULT_BURST): void {
   MIN_INTERVAL_MS[host] = Math.max(0, ms);
+  BURST[host] = Math.max(1, burst);
+  // The allowance is deliberately *not* reset. Clearing it would hand out a full turn every time the
+  // setting is saved, which is a free pass at the exact moment somebody is trying to ask for fewer
+  // requests. The refill simply uses the new rate from here on.
 }
 
 const queues = new Map<string, Promise<unknown>>();
-const lastRequestAt = new Map<string, number>();
+/** Per host: how much of its allowance is left, and when that was last measured. See `BURST`. */
+const allowance = new Map<string, { tokens: number; at: number }>();
 const backoffUntil = new Map<string, number>();
 
 export async function request(url: string, options: FetchOptions = {}): Promise<FetchResult> {
@@ -121,8 +145,14 @@ async function run(host: string, url: string, options: FetchOptions): Promise<Fe
   }
 
   const interval = MIN_INTERVAL_MS[host] ?? DEFAULT_INTERVAL_MS;
-  const since = now - (lastRequestAt.get(host) ?? 0);
-  const wait = interval - since;
+  const burst = BURST[host] ?? DEFAULT_BURST;
+
+  // An allowance that refills over the interval, rather than a stopwatch since the last request. With a
+  // burst of one the two are identical, which is why every other host behaves exactly as before.
+  const perMs = burst / interval;
+  const state = allowance.get(host) ?? { tokens: burst, at: now };
+  const tokens = Math.min(burst, state.tokens + (now - state.at) * perMs);
+  const wait = tokens >= 1 ? 0 : (1 - tokens) / perMs;
   if (wait > PATIENCE_MS) {
     // Not a failure, and deliberately shaped like the one the caller already handles: `isUnavailable`
     // is true for a 429, so this is recorded as "could not ask" and re-asked later rather than written
@@ -137,7 +167,7 @@ async function run(host: string, url: string, options: FetchOptions): Promise<Fe
     };
   }
   if (wait > 0) await sleep(wait);
-  lastRequestAt.set(host, Date.now());
+  allowance.set(host, { tokens: Math.max(0, tokens - 1 + wait * perMs), at: Date.now() });
 
   const headers: Record<string, string> = {
     'User-Agent': USER_AGENT,

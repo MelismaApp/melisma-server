@@ -448,7 +448,10 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
         const document = app.resolver.remerge(body.key);
         return send(response, 200, { ok: Boolean(document), document });
       }
-      return send(response, 200, app.resolver.remergeAll());
+      // Awaited: it became async so the boot sweep could yield, and an un-awaited Promise serialises as
+      // `{}` — the button reported `undefined/undefined` and reloaded the library before the work was
+      // done.
+      return send(response, 200, await app.resolver.remergeAll());
     }
 
     case 'POST /admin/api/lookup': {

@@ -29,11 +29,12 @@ import {
   type MergedDocument,
   type Provenance,
   type Syllable,
+  type LyricsKind,
 } from './model.ts';
 import { crossCheck } from './agreement.ts';
 import { alignTo } from './align.ts';
 import { foldTight, similarity } from './text.ts';
-import { honestKind, wordTimedLines } from './timing.ts';
+import { hasWordTimings, honestKind, wordTimedLines } from './timing.ts';
 
 /** Bump when the merge changes, so stored entries can be recomputed from raw responses. */
 // 2: documents are now checked against their own claimed timing tier and against each other before
@@ -48,6 +49,13 @@ export interface Candidate {
   match: number;
   /** The user's ordering. Lower is more trusted; breaks ties only. */
   priority: number;
+  /**
+   * Set when the other sources agree its timings belong to a different recording.
+   *
+   * Its words are still worth having; its clock is not. Kept out of the running for the spine, and never
+   * allowed to promote the merged document back to word timing.
+   */
+  clockSuspect?: boolean;
 }
 
 export interface MergeOptions {
@@ -113,6 +121,10 @@ export function merge(candidates: Candidate[], options: MergeOptions = {}): Merg
     }
 
     if (verdict.kind === 'wrong-recording' && candidate.doc.kind !== 'static') {
+      // Marked as well as demoted. One tier down loses the backbone to a source that means it — unless
+      // the sources corroborating each other are a tier down too, in which case the reader's ordering
+      // could hand the clock straight back to the one document known to have the wrong one.
+
       // Kept, because the words are right and may be the only copy of them. It just may not own the
       // clock: one tier down is enough to lose the backbone to anyone the others corroborate.
       const kind = candidate.doc.kind === 'syllable' ? 'line' : 'static';
@@ -120,7 +132,7 @@ export function merge(candidates: Candidate[], options: MergeOptions = {}): Merg
         summary.note = verdict.detail;
         summary.kind = kind;
       }
-      trusted.push({ ...candidate, doc: { ...candidate.doc, kind } });
+      trusted.push({ ...candidate, clockSuspect: true, doc: { ...candidate.doc, kind } });
       continue;
     }
 
@@ -292,8 +304,21 @@ export function merge(candidates: Candidate[], options: MergeOptions = {}): Merg
   const language =
     spine.doc.language ?? others.find((other) => other.doc.language)?.doc.language;
 
+  // What the merged lines actually support, and never more than the spine's own corrected claim.
+  //
+  // `syllables.length > 0` was the test, and it undid the demotion it was supposed to respect: a document
+  // of whole lines held in one "syllable" each still has syllable arrays, so a candidate just demoted to
+  // line timing came back out of here claiming word timing — the candidate list said one thing and the
+  // cached document said another. And a spine demoted for its *clock* must not be promoted by borrowed
+  // granularity either: the borrowed syllables sit on timings that were judged to belong to another
+  // recording.
+  const granular = lines.some((line) => hasWordTimings(line));
+  let kind: LyricsKind = spine.doc.kind;
+  if (kind === 'syllable' && !granular) kind = 'line';
+  else if (kind === 'line' && granular && !spine.clockSuspect) kind = 'syllable';
+
   const document: MergedDocument = {
-    kind: lines.some((l) => l.syllables.length > 0) ? 'syllable' : spine.doc.kind,
+    kind,
     lines,
     language,
     songWriters,
@@ -324,6 +349,12 @@ function rankForSpine(candidates: Candidate[], summaries: CandidateSummary[]): C
 
   const eligible: Candidate[] = [];
   for (const candidate of candidates) {
+    if (candidate.clockSuspect) {
+      // It may still lend its words. It may not own the clock the reader follows.
+      const summary = summaries.find((s) => s.provider === candidate.provider);
+      if (summary && !summary.note) summary.note = 'not trusted with the timing';
+      continue;
+    }
     const lines = leadCount(candidate.doc);
     if (lines < floor && candidates.length > 1) {
       // Still usable for borrowing — just not trusted to carry the whole song.
