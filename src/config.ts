@@ -11,6 +11,7 @@
  */
 
 import type { Store } from './db.ts';
+import { MUSIXMATCH_HOST, pace } from './http.ts';
 
 export interface ProviderSetting {
   enabled: boolean;
@@ -38,6 +39,16 @@ export interface Config {
    * covers, so this is the knob for it — raise it if a source starts refusing partway through a run.
    */
   relookupPauseMs: number;
+
+  /**
+   * The shortest gap between two Musixmatch requests, in milliseconds.
+   *
+   * A setting rather than a constant because it is a property of the account and the day, not of this
+   * code: reported as needing thirty to sixty seconds. Nothing waits that long — past a few seconds a
+   * request reports itself unreachable and is asked again later, so raising this slows how often
+   * Musixmatch is consulted rather than slowing everything down. See `PATIENCE_MS` in `http.ts`.
+   */
+  musixmatchPaceMs: number;
 
   /**
    * How often to run `BL_TOKEN_REFRESH_COMMAND`, in minutes.
@@ -128,6 +139,8 @@ const DEFAULTS = {
   negativeTtlHours: 48,
   refreshDays: 30,
   relookupPauseMs: 1_000,
+  // Thirty seconds, from what the account actually tolerates. Nothing waits for it; see the field.
+  musixmatchPaceMs: 30_000,
   tokenRefreshMinutes: 50,
   allowLocalNetwork: true,
   lrclibBaseUrl: 'https://lrclib.net',
@@ -194,6 +207,7 @@ export class Settings {
       negativeTtlHours: int(raw['cache.negativeTtlHours'], DEFAULTS.negativeTtlHours),
       refreshDays: int(raw['cache.refreshDays'], DEFAULTS.refreshDays),
       relookupPauseMs: int(raw['cache.relookupPauseMs'], DEFAULTS.relookupPauseMs),
+      musixmatchPaceMs: int(raw['throttle.musixmatchMs'], DEFAULTS.musixmatchPaceMs),
       tokenRefreshMinutes: int(
         value('refresh.everyMinutes', 'BL_TOKEN_REFRESH_MINUTES'),
         DEFAULTS.tokenRefreshMinutes,
@@ -231,6 +245,15 @@ export class Settings {
       if (!isWritable(key)) continue;
       this.store.setSetting(key, value === null ? null : String(value).trim());
     }
+    // The transport keeps its own per-host floors, so a saved pace has to be pushed to it. Done here
+    // rather than at the call site: a setting that only takes effect on the next restart is a setting
+    // somebody will change twice and then distrust.
+    this.applyPacing();
+  }
+
+  /** Pushes the configured per-host pacing into the transport. Called on read-at-boot and on save. */
+  applyPacing(): void {
+    pace(MUSIXMATCH_HOST, this.read().musixmatchPaceMs);
   }
 
   /**
@@ -285,6 +308,7 @@ function isWritable(key: string): boolean {
     'cache.negativeTtlHours',
     'cache.refreshDays',
     'cache.relookupPauseMs',
+    'throttle.musixmatchMs',
     'refresh.everyMinutes',
     'endpoint.lrclib',
     'endpoint.netease',

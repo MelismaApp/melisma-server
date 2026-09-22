@@ -326,6 +326,13 @@
               >
                 Look up again
               </button>
+              <button
+                class="action primary"
+                id="cache-relookup-worth"
+                title="Ask again only about the tracks where something has actually changed: nothing cached, matched by title rather than by an identity, an identity learned since, or timings that do not fit the track. On a library of 400 this is usually a few dozen."
+              >
+                Look up again where it helps
+              </button>
               <button class="action" id="cache-select-mode">Select</button>
               <button
                 class="action"
@@ -468,6 +475,17 @@
                 per-request gap covers — if a source starts refusing partway through a run, raise this.
                 A refusal is now recorded as "could not ask" rather than "nothing here", so a throttled
                 run no longer writes itself into the cache, but it still wastes the run.
+              </span>
+            </label>
+            <label class="field">
+              <span>Shortest gap between Musixmatch requests (ms)</span>
+              <input type="number" id="set-musixmatchMs" />
+              <span class="note">
+                Musixmatch throttles an account rather than an address, and wants tens of seconds —
+                thirty to sixty in practice. Nothing waits that long: past a few seconds a request
+                reports itself unreachable and is asked again later, so raising this makes Musixmatch
+                consulted less often rather than making everything slower. A bulk run proceeds at the
+                pace of the other five sources.
               </span>
             </label>
               <label class="field">

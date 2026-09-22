@@ -20,7 +20,7 @@ import { Store, LOG_LEVELS, type LogLevel } from './db.ts';
 import { Resolver, reparseByFormat } from './resolver.ts';
 import { Refresher } from './refresher.ts';
 import { MERGE_VERSION } from './merge.ts';
-import { timingFit } from './report.ts';
+import { relookupCandidates, timingFit } from './report.ts';
 import { PROVIDERS, providerById } from './providers/index.ts';
 import { testSources, TEST_TRACK } from './selftest.ts';
 import { backfillIsrc } from './harvest.ts';
@@ -48,6 +48,8 @@ export interface App {
 export function createApp(databasePath: string): App {
   const store = new Store(databasePath);
   const settings = new Settings(store);
+  // The stored pace has to reach the transport before the first request, not after the first save.
+  settings.applyPacing();
   settings.ensureApiKey();
   const resolver = new Resolver(store, settings);
   const refresher = new Refresher(store, settings);
@@ -303,6 +305,9 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       );
       return send(response, 200, { deleted: keys.length });
     }
+
+    case 'GET /admin/api/relookup/candidates':
+      return send(response, 200, relookupCandidates(app.store));
 
     case 'GET /admin/api/fit':
       // Cheap enough to answer inline: it reads the merged documents, which already hold their timings

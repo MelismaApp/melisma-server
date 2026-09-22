@@ -34,19 +34,49 @@ const USER_AGENT =
   'MelismaServer/0.1 (personal cache; https://github.com/MelismaApp/melisma-server)';
 
 /** Politeness per host: one request at a time, with a floor on the gap between them. */
+/** Named because the pace of this one is a setting, and two spellings of a host key is a silent bug. */
+export const MUSIXMATCH_HOST = 'apic.musixmatch.com';
+
 const MIN_INTERVAL_MS: Record<string, number> = {
   'lrclib.net': 350,
   'api.amll.dev': 350,
   'music.163.com': 250,
   // The desktop host is discontinued; the Android player's is what works. Keyed by the host that
   // is actually called, or the interval silently reverts to the default.
-  'apic.musixmatch.com': 500,
+  [MUSIXMATCH_HOST]: 30_000, // a setting; see `pace`
   'amp-api.music.apple.com': 200,
   'spclient.wg.spotify.com': 200,
   'open.spotify.com': 200,
 };
 
 const DEFAULT_INTERVAL_MS = 150;
+
+/**
+ * How long a request will wait for its host's turn before giving up on this attempt.
+ *
+ * The floors above are politeness measured in hundreds of milliseconds, and waiting them out is free.
+ * Musixmatch is not like that: it wants tens of seconds between requests, and a floor that *waits* would
+ * turn that into two different disasters. A phone asking for lyrics would sit for half a minute on the
+ * sixth source when five have already answered; and a run over four hundred tracks would take the whole
+ * of the slowest source's pace for every single track, hours of it, whether or not that source had
+ * anything to add.
+ *
+ * So past this point the request is not made and not waited for — it reports itself unreachable, exactly
+ * as a 429 does, which the caller already knows means "ask again later" rather than "this track has
+ * nothing". Everything else carries on at its own speed, and the slow source gets asked about whichever
+ * track happens to come up when its window next opens.
+ */
+const PATIENCE_MS = 3_000;
+
+/**
+ * Sets a host's minimum interval at runtime.
+ *
+ * Musixmatch's tolerance is a property of the account rather than of this code, and it changes — hence a
+ * setting rather than a constant. Applied at boot and whenever settings are saved.
+ */
+export function pace(host: string, ms: number): void {
+  MIN_INTERVAL_MS[host] = Math.max(0, ms);
+}
 
 const queues = new Map<string, Promise<unknown>>();
 const lastRequestAt = new Map<string, number>();
@@ -82,7 +112,21 @@ async function run(host: string, url: string, options: FetchOptions): Promise<Fe
 
   const interval = MIN_INTERVAL_MS[host] ?? DEFAULT_INTERVAL_MS;
   const since = now - (lastRequestAt.get(host) ?? 0);
-  if (since < interval) await sleep(interval - since);
+  const wait = interval - since;
+  if (wait > PATIENCE_MS) {
+    // Not a failure, and deliberately shaped like the one the caller already handles: `isUnavailable`
+    // is true for a 429, so this is recorded as "could not ask" and re-asked later rather than written
+    // down as "this track has nothing here". See `PATIENCE_MS`.
+    return {
+      ok: false,
+      status: 429,
+      body: '',
+      contentType: '',
+      ms: 0,
+      error: `${host} is paced at ${Math.round(interval / 1000)}s and is not due for another ${Math.ceil(wait / 1000)}s`,
+    };
+  }
+  if (wait > 0) await sleep(wait);
   lastRequestAt.set(host, Date.now());
 
   const headers: Record<string, string> = {

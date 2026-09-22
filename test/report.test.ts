@@ -6,7 +6,7 @@ import { createApp, start, type App } from '../src/server.ts';
 import { MERGE_VERSION } from '../src/merge.ts';
 import { Store } from '../src/db.ts';
 import { document, line } from '../src/model.ts';
-import { timingFit } from '../src/report.ts';
+import { relookupCandidates, timingFit } from '../src/report.ts';
 
 /**
  * Judging what is already cached against the length the player reported.
@@ -207,4 +207,38 @@ test('the report and the action both need the key', async () => {
     (await fetch(`${base}/admin/api/drop-source`, { method: 'POST', body: '{}' })).status,
     401,
   );
+});
+
+// ---- who is worth asking again ---------------------------------------------
+
+test('only the tracks a re-lookup could change are candidates', () => {
+  const store = new Store(':memory:');
+  const fine = merged([line({ text: 'One', startMs: 1_000, endMs: 2_000 })], 'apple');
+
+  // Asked precisely by Spotify id, answered, cached, fits. Six requests for nothing.
+  entry(store, 'sp:abc', 200_000, fine);
+  // Nothing cached: the only question is whether anyone has it now.
+  entry(store, 'sp:empty', 200_000, '');
+  // Filed under a title, which is the match the folding and the identity-first search changed.
+  entry(store, 'q:song|artist|100', 200_000, fine);
+
+  const set = relookupCandidates(store);
+  const keys = set.candidates.map((c) => c.key).sort();
+  assert.deepEqual(keys, ['q:song|artist|100', 'sp:empty']);
+  assert.equal(set.total, 3);
+  assert.equal(set.byReason['nothing cached'], 1);
+  assert.equal(set.byReason['matched by title'], 1);
+  store.close();
+});
+
+test('a source that never answered is not a reason to run a bulk lookup', () => {
+  const store = new Store(':memory:');
+  // The largest group on the real library by far — 176 of 407 — and already handled for free: a cache hit
+  // re-asks the sources that never got to answer, in the background, on the next play. Putting these in a
+  // bulk run would spend hours redoing work that happens by itself.
+  entry(store, 'sp:thin', 200_000, merged([line({ text: 'One', startMs: 1_000, endMs: 2_000 })], 'apple'));
+  store.putRaw({ key: 'sp:thin', provider: 'apple', body: 'x', contentType: 'text/plain', ok: true, note: null });
+
+  assert.equal(relookupCandidates(store).candidates.length, 0);
+  store.close();
 });

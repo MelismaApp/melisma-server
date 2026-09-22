@@ -3,7 +3,7 @@ import { after, before, test } from 'node:test';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { backOff, isUnavailable, request } from '../src/http.ts';
+import { backOff, isUnavailable, pace, request } from '../src/http.ts';
 
 /**
  * Declining to ask a host that has just refused.
@@ -61,4 +61,47 @@ test('backing off again does not shorten the window', async () => {
   const result = await request(`${base}/three`);
   // Two refusals in a row should not add up to permission to continue.
   assert.equal(result.status, 429);
+});
+
+/**
+ * A host paced in tens of seconds is skipped, not waited for.
+ *
+ * Musixmatch wants thirty to sixty seconds between requests. A floor that waits would mean two separate
+ * disasters: a phone sitting half a minute on the sixth source when five have already answered, and a run
+ * over four hundred tracks taking the slowest source's pace for every one of them — hours, whether or not
+ * that source had anything to add. Past a few seconds the request is not made and not waited for; it
+ * reports itself unreachable, which the caller already treats as "ask again later".
+ */
+test('a host paced beyond patience is skipped rather than waited for', async () => {
+  // Its own server, and therefore its own host key: the tests above back `base` off for a minute, and
+  // borrowing it would measure that instead of the pacing.
+  const paced = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'text/plain' });
+    response.end('ok');
+  });
+  await new Promise((resolve) => paced.listen(0, '127.0.0.1', resolve));
+  const at = `http://127.0.0.1:${(paced.address() as AddressInfo).port}`;
+
+  try {
+    const first = await request(`${at}/first`);
+    assert.equal(first.status, 200, 'the first request sets the clock');
+
+    pace(new URL(at).host, 120_000);
+    const started = Date.now();
+    const second = await request(`${at}/second`);
+    const took = Date.now() - started;
+
+    assert.ok(took < 500, `it waited ${took}ms instead of giving up at once`);
+    assert.equal(second.status, 429);
+    assert.ok(isUnavailable(second), 'it must read as "could not ask", not as an answer');
+    assert.match(second.error ?? '', /not due for another/);
+
+    // A pace short enough to wait out is still waited out, because that is what politeness is.
+    pace(new URL(at).host, 250);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal((await request(`${at}/third`)).status, 200);
+  } finally {
+    pace(new URL(at).host, 0);
+    paced.close();
+  }
 });

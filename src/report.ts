@@ -109,3 +109,78 @@ export function timingFit(store: Store): FitReport {
   rows.sort((a, b) => b.pastEndShare - a.pastEndShare);
   return { rows, checked, withoutDuration, serious: rows.filter((r) => r.serious).length };
 }
+
+// ---- who is worth asking again ---------------------------------------------
+
+export interface Candidate {
+  key: string;
+  title: string;
+  artist: string;
+  reasons: string[];
+}
+
+export interface CandidateSet {
+  candidates: Candidate[];
+  /** Every cached track, for comparison: the point is how much smaller this is. */
+  total: number;
+  /** Count per reason, so the page can say what the run would be for. */
+  byReason: Record<string, number>;
+}
+
+const CJK = /[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/;
+
+/**
+ * The tracks a re-lookup could actually change something for.
+ *
+ * Asking every source about every track is the obvious thing and the wrong thing. Musixmatch tolerates
+ * one request every thirty to sixty seconds, so four hundred tracks is three to seven hours of requests —
+ * and measured on a real library, 225 of 407 had nothing to gain: matched by a Spotify id, answered by
+ * everything that was going to answer, already word-timed. Those cost six requests each and change
+ * nothing.
+ *
+ * A re-lookup is only worth it where the *question* has changed since the answer was filed:
+ *
+ *  - nothing is cached, so the only question is whether anyone has it now;
+ *  - it was matched on a title rather than an identity, which is exactly what the Chinese folding and
+ *    the ISRC-first search changed;
+ *  - an identity was learned after it was filed, so the next search can be exact;
+ *  - its timings do not fit the length the player reported.
+ *
+ * Deliberately *not* included: "a source never answered". It is the largest group by far — 176 of 407 —
+ * and it is already handled without any of this. A cache hit re-asks the sources that never got to
+ * answer, in the background, on the next play. Putting them in a bulk run would spend hours re-doing
+ * work that happens for free.
+ */
+export function relookupCandidates(store: Store): CandidateSet {
+  const found = new Map<string, Candidate>();
+  const entries = store.allEntries();
+
+  const note = (entry: { key: string; title: string; artist: string }, reason: string) => {
+    const existing = found.get(entry.key);
+    if (existing) existing.reasons.push(reason);
+    else found.set(entry.key, { key: entry.key, title: entry.title, artist: entry.artist, reasons: [reason] });
+  };
+
+  for (const entry of entries) {
+    if (!entry.merged) note(entry, 'nothing cached');
+
+    if (entry.key.startsWith('q:')) {
+      // Filed under a title and a duration bucket, which is the match the folding and the identity-first
+      // search improve. A `sp:` or `isrc:` key was already asked precisely.
+      note(entry, 'matched by title');
+      if (CJK.test(`${entry.title} ${entry.artist}`)) note(entry, 'Chinese, Japanese or Korean title');
+      if (entry.isrc || entry.spotifyId) note(entry, 'has an identity now');
+    }
+  }
+
+  for (const row of timingFit(store).rows) {
+    if (row.serious) note(row, 'timings do not fit the track');
+  }
+
+  const byReason: Record<string, number> = {};
+  for (const candidate of found.values()) {
+    for (const reason of new Set(candidate.reasons)) byReason[reason] = (byReason[reason] ?? 0) + 1;
+  }
+
+  return { candidates: [...found.values()], total: entries.length, byReason };
+}

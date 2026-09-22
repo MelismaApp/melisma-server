@@ -418,6 +418,7 @@ function fillSettings(config) {
   $('#set-translationLang').value = config.translationLang ?? '';
   $('#set-refreshDays').value = config.refreshDays ?? '';
   $('#set-relookupPauseMs').value = config.relookupPauseMs ?? '';
+  $('#set-musixmatchMs').value = config.musixmatchPaceMs ?? '';
   $('#set-negativeTtlHours').value = config.negativeTtlHours ?? '';
   $('#set-endpoint-amll').value = config.amllBaseUrl ?? '';
   $('#set-endpoint-lrclib').value = config.lrclibBaseUrl ?? '';
@@ -445,6 +446,7 @@ $('#settings-save').addEventListener('click', async () => {
     'merge.translationLang': $('#set-translationLang').value,
     'cache.refreshDays': $('#set-refreshDays').value,
     'cache.relookupPauseMs': $('#set-relookupPauseMs').value,
+    'throttle.musixmatchMs': $('#set-musixmatchMs').value,
     'cache.negativeTtlHours': $('#set-negativeTtlHours').value,
     'endpoint.amll': $('#set-endpoint-amll').value,
     'endpoint.lrclib': $('#set-endpoint-lrclib').value,
@@ -798,6 +800,37 @@ $('#fit-relookup').addEventListener('click', () => {
   // Only the tracks this report named, which is the point of offering it here rather than sending
   // someone to the library to find them by hand.
   void runRelookup(fitRows.map((row) => row.key));
+});
+
+/**
+ * Asks again only where the answer could actually change.
+ *
+ * The whole library is the obvious button and the wrong one: Musixmatch tolerates one request every
+ * thirty to sixty seconds, so four hundred tracks is hours of requests, and most of them were matched by
+ * a Spotify id and answered by everything that was ever going to answer. The server works out which ones
+ * have a reason, and says what the reasons are before anything is asked.
+ */
+$('#cache-relookup-worth').addEventListener('click', async () => {
+  const button = $('#cache-relookup-worth');
+  button.disabled = true;
+  try {
+    const set = await api('/admin/api/relookup/candidates');
+    if (set.candidates.length === 0) {
+      toast(`Nothing to re-ask: all ${set.total} tracks were matched by an identity and answered`);
+      return;
+    }
+
+    const reasons = Object.entries(set.byReason)
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, n]) => `${n} ${reason}`)
+      .join(', ');
+    toast(`${set.candidates.length} of ${set.total} worth asking — ${reasons}`);
+    await runRelookup(set.candidates.map((c) => c.key));
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
 });
 
 $('#cache-relookup').addEventListener('click', () => void runRelookup(null));
