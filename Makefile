@@ -78,10 +78,15 @@ restore: ## Load a backup into the LOCAL database (FILE=melisma-....db)
 	@test -f "$(FILE)" || { echo "No such file: $(FILE)"; exit 1; }
 	@# Whatever is here already is a cache and a set of tokens. Moved aside, never overwritten: the
 	@# whole point of a restore is that you are unsure, and an unsure operation must not destroy.
+	@# The `-wal` and `-shm` files go with it. Left behind, SQLite would replay the old database's
+	@# pending writes onto the restored one the next time it opened. Stop a local server first.
 	@mkdir -p data
 	@if [ -f data/better-lyrics.db ]; then \
 	  aside="data/replaced-$$(date +%Y%m%d-%H%M%S).db"; \
 	  mv data/better-lyrics.db "$$aside"; \
+	  for side in -wal -shm; do \
+	    if [ -f "data/better-lyrics.db$$side" ]; then mv "data/better-lyrics.db$$side" "$$aside$$side"; fi; \
+	  done; \
 	  echo "Moved the current local database to $$aside"; \
 	fi
 	@cp "$(FILE)" data/better-lyrics.db
@@ -98,8 +103,13 @@ restore: ## Load a backup into the LOCAL database (FILE=melisma-....db)
 #   make backup                                    # first, so there is a way back
 #   kamal app stop
 #   ssh <user>@<host>
-#   docker run --rm -v better-lyrics-data:/data -v "$PWD:/in" alpine \
-#     sh -c 'cp /in/<backup>.db /data/better-lyrics.db && chmod 600 /data/better-lyrics.db'
+#   docker run --rm -v better-lyrics-data:/data -v "$PWD:/in" alpine sh -c '
+#     for f in better-lyrics.db better-lyrics.db-wal better-lyrics.db-shm; do
+#       if [ -f /data/$f ]; then mv /data/$f /data/replaced-$f; fi; done
+#     cp /in/<backup>.db /data/better-lyrics.db && chmod 600 /data/better-lyrics.db'
+#
+# The `-wal` and `-shm` files are moved too: SQLite would otherwise replay the old database's pending
+# writes onto the restored one at boot.
 #   exit
 #   kamal app boot
 #
@@ -109,16 +119,20 @@ restore: ## Load a backup into the LOCAL database (FILE=melisma-....db)
 backup: ## Copy the deployed database here, timestamped
 	@# The one piece of state worth keeping: every archived provider response, and the tokens.
 	@#
+	@# Not `cat` of the file: the database is in WAL mode, and a plain copy misses every write not yet
+	@# checkpointed. See scripts/backup.ts. `umask 077` because the copy holds the tokens in the clear,
+	@# and a failed run removes its empty file rather than leaving one that looks like a backup.
+	@#
 	@# Two things this has to work around. Kamal writes its own progress to stdout, which lands
 	@# in the middle of the file and leaves sqlite saying "file is not a database" -- `-q` quiets
 	@# it, and the tail below drops anything that still gets through by starting the output at
 	@# sqlite's magic header. And the timestamp is computed once, into a variable, because naming
 	@# the file and reporting it in two separate `date` calls can straddle a second and print a
 	@# name that does not exist.
-	@set -e; \
+	@set -e; umask 077; \
 	  out="melisma-$$(date +%Y%m%d-%H%M%S).db"; \
-	  kamal app exec -q --reuse "cat /data/better-lyrics.db" \
+	  if ! kamal app exec -q --reuse "node scripts/backup.ts" \
 	    | python3 -c 'import sys; d=sys.stdin.buffer.read(); i=d.find(b"SQLite format 3\x00"); sys.exit("no sqlite header in output") if i<0 else sys.stdout.buffer.write(d[i:])' \
-	    > "$$out"; \
+	    > "$$out"; then rm -f "$$out"; echo "Backup failed; nothing written" >&2; exit 1; fi; \
 	  sqlite3 "$$out" "pragma integrity_check;" | head -1; \
 	  echo "Wrote $$out"
