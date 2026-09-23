@@ -22,7 +22,7 @@ import type { Store } from './db.ts';
 import { document, line, type LyricsDocument, type MergedDocument } from './model.ts';
 import { parseTtml } from './format/ttml.ts';
 import { parseLrc } from './format/lrc.ts';
-import { harvest } from './harvest.ts';
+import { canvasIsDue, harvest, harvestCanvas } from './harvest.ts';
 import type { LearnedExtras } from './providers/types.ts';
 
 export interface ResolveOptions {
@@ -156,6 +156,9 @@ export class Resolver {
 
   /** Tracks already harvested this run. See [harvestOnce]. */
   private readonly harvested = new Set<string>();
+
+  /** When each track's Canvas was last asked about. See [mayAskCanvas]. */
+  private readonly canvasAsked = new Map<string, number>();
 
   /** Tracks with an upgrade in flight right now. See [upgradeOnce]. */
   private readonly upgrading = new Set<string>();
@@ -740,11 +743,6 @@ export class Resolver {
   }
 
   private async harvestOnce(config: Config, key: string, track: TrackQuery): Promise<void> {
-    if (this.harvested.has(key)) return;
-    this.harvested.add(key);
-    // A cap rather than an unbounded set: this is a memo, not a record.
-    if (this.harvested.size > 4_000) this.harvested.clear();
-
     try {
       // What the harvest adds that a provider cannot: Spotify's audio analysis and an artist
       // image, both of which need requests nobody makes while looking for words. So the question
@@ -754,12 +752,37 @@ export class Resolver {
       // report includes an ISRC, so the old guard treated the commonest successful path as already
       // harvested and never collected the analysis at all. Which is the one thing here that cannot
       // be fetched later: Spotify withdrew the endpoint.
-      const already = this.store.extras(key);
-      if (already?.analysis && already.artistImageUrl && this.store.isrcFor(key)) return;
-      await harvest(this.store, config, key, track);
+      const already = this.store.extras(key, { hit: false });
+      const complete = Boolean(already?.analysis && already.artistImageUrl && this.store.isrcFor(key));
+      // The Canvas keeps its own clock: it can appear or change long after the rest was collected.
+      const canvas = canvasIsDue(already, track.spotifyId) && this.mayAskCanvas(key);
+
+      if (!complete && !this.harvested.has(key)) {
+        this.harvested.add(key);
+        // A cap rather than an unbounded set: this is a memo, not a record.
+        if (this.harvested.size > 4_000) this.harvested.clear();
+        await harvest(this.store, config, key, track, { canvas });
+      } else if (canvas) {
+        await harvestCanvas(this.store, config, key, track.spotifyId!, (level, message) =>
+          this.store.log(level, 'spotify', message),
+        );
+      }
     } catch {
       // Best effort by definition.
     }
+  }
+
+  /**
+   * At most one Canvas request per track an hour, whatever the outcome: an answer is recorded and
+   * stands for a week, but a failure is not, and would otherwise be retried on every play.
+   */
+  private mayAskCanvas(key: string): boolean {
+    const now = Date.now();
+    const last = this.canvasAsked.get(key);
+    if (last !== undefined && now - last < 3_600_000) return false;
+    if (this.canvasAsked.size > 4_000) this.canvasAsked.clear();
+    this.canvasAsked.set(key, now);
+    return true;
   }
 
   /**

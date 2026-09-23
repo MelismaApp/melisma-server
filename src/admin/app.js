@@ -1287,6 +1287,17 @@ $('#cache-backfill-isrc').addEventListener('click', async (event) => {
   }
 });
 
+$('#cache-backfill-canvas').addEventListener('click', async () => {
+  try {
+    const result = await api('/admin/api/backfill-canvas', { method: 'POST' });
+    if (result.skipped) toast(result.skipped, true);
+    else if (result.pending === 0) toast('Every Spotify track has a Canvas answer from the last week');
+    else toast(`Asking Spotify about ${result.pending} tracks — the result will be in the Log`);
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
 $('#cache-remerge').addEventListener('click', async () => {
   const result = await api('/admin/api/remerge', { method: 'POST', body: '{}' });
   toast(`Re-merged ${result.rebuilt}/${result.attempted}`);

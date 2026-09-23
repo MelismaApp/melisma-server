@@ -23,7 +23,7 @@ import { MERGE_VERSION } from './merge.ts';
 import { relookupCandidates, timingFit } from './report.ts';
 import { PROVIDERS, providerById } from './providers/index.ts';
 import { testSources, TEST_TRACK } from './selftest.ts';
-import { backfillIsrc } from './harvest.ts';
+import { backfillCanvas, backfillIsrc } from './harvest.ts';
 import { parseTtml, writeTtml } from './format/ttml.ts';
 import { parseLrc, writePlainText } from './format/lrc.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
@@ -264,6 +264,13 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
         app.store.log(level, 'spotify', message),
       );
       return send(response, 200, result);
+    }
+
+    case 'POST /admin/api/backfill-canvas': {
+      const { pending, skipped } = backfillCanvas(app.store, app.settings.read(), (level, message) =>
+        app.store.log(level, 'spotify', message),
+      );
+      return send(response, 200, { pending, skipped });
     }
 
     case 'POST /admin/api/relookup': {
@@ -822,8 +829,15 @@ function readExtras(app: App, url: URL, response: ServerResponse): void {
   const found = app.store.extras(cacheKey(track));
   if (!found) return void send(response, 404, { error: 'nothing held for this track' });
 
+  // Only for the Spotify id asked about. The key already implies it; checking the stored id too means
+  // a Canvas can never be served for a track it was not fetched for.
+  const canvas =
+    track.spotifyId && found.canvas?.spotifyId === track.spotifyId ? found.canvas : null;
+
   send(response, 200, {
     coverUrl: found.coverUrl ?? undefined,
+    canvasUrl: canvas?.url ?? undefined,
+    canvasVariants: canvas?.url && canvas.variants.length ? canvas.variants : undefined,
     artistImageUrl: found.artistImageUrl ?? undefined,
     tempo: found.tempo ?? undefined,
     palette: found.palette ?? undefined,

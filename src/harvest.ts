@@ -26,14 +26,27 @@
  */
 
 import type { Config } from './config.ts';
-import type { LogLevel, Store } from './db.ts';
+import type { ExtrasEntry, LogLevel, Store, StoredCanvas } from './db.ts';
 import { spotifyAppToken } from './spotifyApp.ts';
-import { json, query, redact } from './http.ts';
+import { json, query, redact, request, sleep } from './http.ts';
 import { MATCH_THRESHOLD, score, type TrackQuery } from './match.ts';
+import { decode, integer, lengthDelimited, submessage, submessages, text } from './protobuf.ts';
 import { pastedToken } from './providers/spotify.ts';
 
 const SPOTIFY_API = 'https://api.spotify.com/v1';
 const SPOTIFY_INTERNAL = 'https://spclient.wg.spotify.com';
+const CANVAS_URL = `${SPOTIFY_INTERNAL}/canvaz-cache/v0/canvases`;
+
+/** 22 characters of base62. Checked because it is spliced into a URI. */
+const SPOTIFY_ID = /^[0-9A-Za-z]{22}$/;
+
+/**
+ * How long an answer about a Canvas stands, "none" included.
+ *
+ * Artists add a Canvas after release and swap them now and then, so both answers go stale. A week
+ * catches that for one request per track per week.
+ */
+export const CANVAS_RECHECK_MS = 7 * 86_400_000;
 
 /** Audio features for tracks Spotify will no longer describe. No key, no account. */
 const RECCOBEATS_API = 'https://api.reccobeats.com/v1';
@@ -62,6 +75,8 @@ export interface Harvest {
   palette?: Record<string, unknown> | null;
   analysis?: Record<string, unknown> | null;
   metadata?: Record<string, unknown> | null;
+  /** Present only when Spotify answered. See `askCanvas`. */
+  canvas?: StoredCanvas;
   source: string;
 }
 
@@ -71,19 +86,23 @@ export interface Harvest {
  * Both sources are consulted rather than the first that answers, because they know different
  * things: only Spotify has the tempo and the beat grid, only Apple has the songwriter and a
  * colour palette, and either may have an ISRC the other lacks.
+ *
+ * `canvas: false` skips the Canvas, for a track whose last answer is still current.
  */
 export async function harvest(
   store: Store,
   config: Config,
   key: string,
   track: TrackQuery,
+  { canvas = true }: { canvas?: boolean } = {},
 ): Promise<void> {
   const results: Harvest[] = [];
 
-  const spotify = await fromSpotify(config, track, (level, message) =>
+  const spotify = await fromSpotify(config, track, { canvas }, (level, message) =>
     store.log(level, 'spotify', message),
   ).catch(() => null);
   if (spotify) results.push(spotify);
+  if (spotify?.canvas) store.saveCanvas(key, spotify.canvas);
 
   const apple = await fromApple(config, track, (level, message) =>
     store.log(level, 'applemusic', message),
@@ -132,6 +151,7 @@ export async function harvest(
 async function fromSpotify(
   config: Config,
   track: TrackQuery,
+  options: { canvas: boolean },
   log: (level: LogLevel, message: string) => void,
 ): Promise<Harvest | null> {
   const token = pastedToken(config.secrets.spotifyWebToken);
@@ -187,7 +207,13 @@ async function fromSpotify(
   //
   // So they run together and each is allowed to fail on its own. A 429 now costs the ISRC and the
   // cover, and the tempo still arrives.
-  const [details, analysis] = await Promise.all([
+  //
+  // The Canvas only for the id the caller gave, never one found by searching: a Canvas for a
+  // different release of the song would be the most visible mistake this could make.
+  const canvasId = options.canvas && token && track.spotifyId && SPOTIFY_ID.test(track.spotifyId)
+    ? track.spotifyId
+    : null;
+  const [details, analysis, asked] = await Promise.all([
     json<SpotifyTrack>(`${SPOTIFY_API}/tracks/${spotifyId}`, { headers: catalogueHeaders }),
     // The internal analysis endpoint, not the public one — the public `audio-features` was
     // restricted to apps that already had extended access, so this is the only way to it. A 404
@@ -207,9 +233,11 @@ async function fromSpotify(
           value: null,
           result: { ok: false, status: 0, body: '', contentType: '', ms: 0 },
         }),
+    canvasId ? askCanvas(canvasId, token!, log) : Promise.resolve(null),
   ]);
 
   const found = details.value;
+  const canvas = asked?.canvas ?? null;
 
   // Said out loud, because the consequence is invisible otherwise: no ISRC and no cover, for a track
   // the server can see perfectly well. A 429 here is routine — `api.spotify.com` is rate-limited hard
@@ -240,8 +268,8 @@ async function fromSpotify(
   const trackSection = analysis.value?.track as Record<string, unknown> | undefined;
   const tempo = Number(trackSection?.tempo ?? 0) || null;
 
-  // Nothing from either, so there is nothing to record and no point writing an empty row.
-  if (!found?.id && !analysis.value) return null;
+  // Nothing from any of them, so there is nothing to record and no point writing an empty row.
+  if (!found?.id && !analysis.value && !canvas) return null;
 
   const cover = [...(found?.album?.images ?? [])].sort(
     (a, b) => (b.width ?? 0) - (a.width ?? 0),
@@ -316,7 +344,205 @@ async function fromSpotify(
       artistFollowers: artist?.followers ?? undefined,
       ...(album ?? {}),
     }),
+    canvas: canvas ?? undefined,
   };
+}
+
+/** Whether a track's Canvas should be asked about now. */
+export function canvasIsDue(
+  extras: ExtrasEntry | null,
+  spotifyId: string | undefined,
+  now = Date.now(),
+): boolean {
+  if (!spotifyId || !SPOTIFY_ID.test(spotifyId)) return false;
+  if (!extras?.canvasCheckedAt || extras.canvas?.spotifyId !== spotifyId) return true;
+  return now - extras.canvasCheckedAt >= CANVAS_RECHECK_MS;
+}
+
+/**
+ * Asks about the Canvas alone, for a track whose other extras are already held.
+ *
+ * Returns the HTTP status, so the backfill can tell a refused token from one odd track.
+ */
+export async function harvestCanvas(
+  store: Store,
+  config: Config,
+  key: string,
+  spotifyId: string,
+  log: (level: LogLevel, message: string) => void,
+): Promise<{ canvas: StoredCanvas | null; status: number }> {
+  const token = pastedToken(config.secrets.spotifyWebToken);
+  if (!token || !SPOTIFY_ID.test(spotifyId)) return { canvas: null, status: 0 };
+  const asked = await askCanvas(spotifyId, token, log);
+  if (asked.canvas) store.saveCanvas(key, asked.canvas);
+  return asked;
+}
+
+let backfilling = false;
+
+/**
+ * Asks about the Canvas of every track named by a Spotify id that has no current answer.
+ *
+ * Starts the run and returns at once, because four hundred requests outlast the reverse proxy's
+ * response timeout; the outcome goes to the log. `done` is for tests.
+ *
+ * `gapMs` between tracks, because this shares its host with Spotify's lyrics, and a 429 here would
+ * stop those for a minute too.
+ */
+export function backfillCanvas(
+  store: Store,
+  config: Config,
+  log: (level: LogLevel, message: string) => void,
+  gapMs = 1_000,
+): { pending: number; skipped: string | null; done: Promise<void> } {
+  const idle = Promise.resolve();
+  if (backfilling) return { pending: 0, skipped: 'already filling in Canvas', done: idle };
+  const token = pastedToken(config.secrets.spotifyWebToken);
+  if (!token) {
+    return {
+      pending: 0,
+      skipped: 'needs the Spotify web token — Canvas is on the player’s own service',
+      done: idle,
+    };
+  }
+
+  const keys = store
+    .keysNeedingCanvas(Date.now() - CANVAS_RECHECK_MS)
+    .filter((key) => SPOTIFY_ID.test(key.slice(3)));
+  if (keys.length === 0) return { pending: 0, skipped: null, done: idle };
+
+  backfilling = true;
+  const done = (async () => {
+    let found = 0;
+    let none = 0;
+    let looked = 0;
+    let stopped: string | null = null;
+    try {
+      for (const key of keys) {
+        if (looked > 0) await sleep(gapMs);
+        looked++;
+        const asked = await askCanvas(key.slice(3), token, log);
+        if (asked.canvas) {
+          store.saveCanvas(key, asked.canvas);
+          if (asked.canvas.url) found++;
+          else none++;
+          continue;
+        }
+        // A refused or throttled token will refuse the rest too.
+        if ([401, 403, 429].includes(asked.status)) {
+          stopped = `stopped at HTTP ${asked.status}`;
+          break;
+        }
+      }
+    } finally {
+      backfilling = false;
+    }
+    log(
+      stopped ? 'warn' : 'info',
+      `Canvas backfill: ${found} of ${looked} tracks have one, ${none} have none` +
+        (looked - found - none > 0 ? `, ${looked - found - none} did not answer` : '') +
+        (stopped ? ` — ${stopped}, ${keys.length - looked} not reached` : ''),
+    );
+  })();
+  return { pending: keys.length, skipped: null, done };
+}
+
+/**
+ * One track's Canvas, from the player's own service.
+ *
+ * `canvas` is null when there is no answer — a refused token, a throttle, a reply that does not
+ * decode — as opposed to a `StoredCanvas` with no URL, which is Spotify saying there is none.
+ */
+async function askCanvas(
+  spotifyId: string,
+  token: string,
+  log: (level: LogLevel, message: string) => void,
+): Promise<{ canvas: StoredCanvas | null; status: number }> {
+  const reply = await request(CANVAS_URL, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/protobuf',
+      'Content-Type': 'application/x-protobuf',
+      Authorization: `Bearer ${token}`,
+      'App-Platform': 'WebPlayer',
+      'User-Agent': WEB_UA,
+    },
+    // EntityCanvazRequest { repeated Entity entities = 1 }, Entity { string entity_uri = 1 }.
+    body: lengthDelimited(1, lengthDelimited(1, `spotify:track:${spotifyId}`)),
+    binary: true,
+  });
+
+  if (!reply.ok || !reply.bytes) {
+    log(
+      reply.status === 429 ? 'warn' : 'debug',
+      `spotify canvas lookup returned HTTP ${reply.status}`,
+    );
+    return { canvas: null, status: reply.status };
+  }
+  try {
+    const canvas = readCanvas(reply.bytes, spotifyId);
+    if (!canvas) log('debug', `spotify canvas reply for ${spotifyId} named a different track`);
+    return { canvas, status: reply.status };
+  } catch (error) {
+    // Spotify publishes no .proto, so this is how a change of format would first show.
+    log('warn', `spotify canvas reply did not decode: ${(error as Error).message}`);
+    return { canvas: null, status: reply.status };
+  }
+}
+
+/**
+ * Reads an `EntityCanvazResponse`. Field numbers as observed, since there is no published schema:
+ *
+ * - top level: `1` repeated canvas, `2` ttl in seconds. A track with no Canvas gets only `2`.
+ * - canvas: `1` id, `2` url, `4` type, `5` entity uri, `6` artist `{1 uri, 2 name}`, `11` canvas uri,
+ *   `13` repeated smaller encodes `{1 width, 2 height, 3 url}`.
+ *
+ * Null when the reply holds a Canvas for some other track, which is not an answer about this one.
+ * Throws when the reply is not protobuf.
+ */
+export function readCanvas(bytes: Uint8Array, spotifyId: string): StoredCanvas | null {
+  const canvases = submessages(decode(bytes), 1);
+  const none: StoredCanvas = { spotifyId, url: null, variants: [] };
+  if (canvases.length === 0) return none;
+
+  const canvas = canvases.find((entry) => text(entry, 5) === `spotify:track:${spotifyId}`);
+  if (!canvas) return null;
+
+  // One the app could not play counts as none: it would only be served to be dropped.
+  const url = cdnUrl(text(canvas, 2));
+  if (!url) return none;
+
+  const variants = submessages(canvas, 13)
+    .map((variant) => ({
+      width: integer(variant, 1) ?? 0,
+      height: integer(variant, 2) ?? 0,
+      url: cdnUrl(text(variant, 3)) ?? '',
+    }))
+    .filter((variant) => variant.url && variant.width > 0 && variant.height > 0)
+    .sort((a, b) => a.width * a.height - b.width * b.height);
+
+  const artist = submessage(canvas, 6);
+  return {
+    spotifyId,
+    url,
+    variants,
+    id: text(canvas, 1) ?? undefined,
+    uri: text(canvas, 11) ?? undefined,
+    type: integer(canvas, 4) ?? undefined,
+    artistUri: (artist && text(artist, 1)) ?? undefined,
+    artistName: (artist && text(artist, 2)) ?? undefined,
+  };
+}
+
+/** Spotify's CDN over https, or nothing. The app accepts no other host. */
+function cdnUrl(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname.endsWith('.scdn.co') ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

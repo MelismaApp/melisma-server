@@ -337,9 +337,16 @@
               <button
                 class="action"
                 id="cache-backfill-isrc"
-                title="Every track here that already has a Spotify id can have its exact ISRC looked up, fifty at a time. Needs the Spotify client id and secret."
+                title="Every track here that already has a Spotify id can have its exact ISRC looked up, one request per track. Needs the Spotify client id and secret."
               >
                 Fill in missing ISRCs
+              </button>
+              <button
+                class="action"
+                id="cache-backfill-canvas"
+                title="Ask Spotify about the Canvas of every track played from Spotify that has no answer from the last week. Runs in the background; the result goes to the Log. Needs the Spotify web token."
+              >
+                Fill in Canvas
               </button>
             </div>
           </div>

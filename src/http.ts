@@ -14,16 +14,20 @@
 export interface FetchOptions {
   headers?: Record<string, string>;
   method?: string;
-  body?: string;
+  body?: string | Uint8Array;
   timeoutMs?: number;
   /** Sent as a Cookie header. Never logged. */
   cookie?: string;
+  /** Keep the reply as bytes, in `bytes`. Decoding a protobuf reply as text corrupts it. */
+  binary?: boolean;
 }
 
 export interface FetchResult {
   ok: boolean;
   status: number;
+  /** The reply as text. For a `binary` request, only when it failed, so the error can be read. */
   body: string;
+  bytes?: Uint8Array;
   contentType: string;
   /** Round-trip time, for the admin page's connection test. */
   ms: number;
@@ -188,7 +192,14 @@ async function run(host: string, url: string, options: FetchOptions): Promise<Fe
       signal: controller.signal,
       redirect: 'follow',
     });
-    const body = await response.text();
+    let body: string;
+    let bytes: Uint8Array | undefined;
+    if (options.binary) {
+      bytes = new Uint8Array(await response.arrayBuffer());
+      body = response.ok ? '' : new TextDecoder().decode(bytes);
+    } else {
+      body = await response.text();
+    }
     const ms = Math.round(performance.now() - started);
 
     if (response.status === 429) {
@@ -201,6 +212,7 @@ async function run(host: string, url: string, options: FetchOptions): Promise<Fe
       ok: response.ok,
       status: response.status,
       body,
+      bytes,
       contentType: response.headers.get('content-type') ?? '',
       ms,
       error: response.ok ? undefined : `HTTP ${response.status}`,

@@ -98,8 +98,30 @@ export interface ExtrasEntry {
   analysis: Record<string, unknown> | null;
   /** Album name, release date, track and disc numbers, composer, genres, content rating. */
   metadata: Record<string, unknown> | null;
+  /** The last answer Spotify gave about a Canvas, including "none". Null if never asked. */
+  canvas: StoredCanvas | null;
+  canvasCheckedAt: number | null;
   source: string;
   updatedAt: number;
+}
+
+/**
+ * A Spotify Canvas, or the record that a track has none (`url` null), so it is not asked again.
+ *
+ * Always for the Spotify id it was asked about, never a matched one: a Canvas is made for one
+ * release, and a remaster's would be obviously wrong.
+ */
+export interface StoredCanvas {
+  spotifyId: string;
+  url: string | null;
+  /** Smaller encodes of the same video, smallest first. */
+  variants: Array<{ width: number; height: number; url: string }>;
+  /** Spotify's own ids and type code, kept as given; nothing reads them yet. */
+  id?: string;
+  uri?: string;
+  type?: number;
+  artistUri?: string;
+  artistName?: string;
 }
 
 /**
@@ -309,6 +331,9 @@ export class Store {
         palette          TEXT,
         analysis         TEXT,
         metadata         TEXT,
+        -- A StoredCanvas as JSON. Replaced rather than merged: each answer supersedes the last.
+        canvas           TEXT,
+        canvas_checked_at INTEGER,
         source           TEXT NOT NULL DEFAULT '',
         created_at       INTEGER NOT NULL,
         updated_at       INTEGER NOT NULL,
@@ -328,7 +353,12 @@ export class Store {
 
     // Columns added after the table first shipped. SQLite has no `ADD COLUMN IF NOT EXISTS`, and
     // a duplicate-column error is the expected outcome on an already-migrated database.
-    for (const column of ['isrc TEXT', 'duration_ms INTEGER']) {
+    for (const column of [
+      'isrc TEXT',
+      'duration_ms INTEGER',
+      'canvas TEXT',
+      'canvas_checked_at INTEGER',
+    ]) {
       try {
         this.db.exec(`ALTER TABLE extras ADD COLUMN ${column}`);
       } catch {
@@ -351,12 +381,13 @@ export class Store {
 
   // ---- extras ------------------------------------------------------------
 
-  extras(key: string): ExtrasEntry | null {
+  /** `hit: false` for the server's own reads, which are not somebody asking about the track. */
+  extras(key: string, { hit = true }: { hit?: boolean } = {}): ExtrasEntry | null {
     const row = this.db.prepare('SELECT * FROM extras WHERE key = ?').get(key) as
       | Record<string, unknown>
       | undefined;
     if (!row) return null;
-    this.db.prepare('UPDATE extras SET hits = hits + 1 WHERE key = ?').run(key);
+    if (hit) this.db.prepare('UPDATE extras SET hits = hits + 1 WHERE key = ?').run(key);
     return {
       key,
       title: String(row.title ?? ''),
@@ -369,9 +400,47 @@ export class Store {
       palette: parseJson(row.palette),
       analysis: parseJson(row.analysis),
       metadata: parseJson(row.metadata),
+      canvas: parseJson(row.canvas) as StoredCanvas | null,
+      canvasCheckedAt: (row.canvas_checked_at as number | null) ?? null,
       source: String(row.source ?? ''),
       updatedAt: Number(row.updated_at ?? 0),
     };
+  }
+
+  /**
+   * Records Spotify's answer about a Canvas, replacing the previous one.
+   *
+   * Only for an answer. A request that failed says nothing about the Canvas and must not be recorded,
+   * or a removed one would be kept, or an outage would read as "none".
+   */
+  saveCanvas(key: string, canvas: StoredCanvas, at = Date.now()): void {
+    const value = JSON.stringify(canvas);
+    this.db
+      .prepare(
+        `INSERT INTO extras (key, canvas, canvas_checked_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           canvas            = excluded.canvas,
+           canvas_checked_at = excluded.canvas_checked_at,
+           -- A re-check that changed nothing is not an update to the track.
+           updated_at        = CASE WHEN extras.canvas IS excluded.canvas THEN extras.updated_at
+                                    ELSE excluded.updated_at END`,
+      )
+      .run(key, value, at, at, at);
+  }
+
+  /** Keys named by a Spotify id whose Canvas was never asked about, or last asked before `before`. */
+  keysNeedingCanvas(before: number): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT k.key AS key
+           FROM (SELECT key FROM entries UNION SELECT key FROM extras) k
+           LEFT JOIN extras x ON x.key = k.key
+          WHERE k.key LIKE 'sp:%'
+            AND (x.canvas_checked_at IS NULL OR x.canvas_checked_at < ?)`,
+      )
+      .all(before) as { key: string }[];
+    return rows.map((row) => row.key);
   }
 
   /**
@@ -770,7 +839,7 @@ export class Store {
           )                                                       AS created_at,
           e.last_hit_at                                           AS last_hit_at,
           x.updated_at                                            AS extras_updated_at,
-          x.cover_url, x.artist_image_url, x.tempo,
+          x.cover_url, x.artist_image_url, x.tempo, x.canvas,
           x.palette, x.analysis, x.metadata, x.source             AS extras_source,
           CASE WHEN e.merged LIKE '%\"hasTranslation\":true%' THEN 1 ELSE 0 END AS hasTranslationFlag,
           (SELECT GROUP_CONCAT(provider) FROM raw WHERE raw.key = k.key) AS providers,
@@ -1106,6 +1175,7 @@ function toLibraryRow(row: Record<string, unknown>): LibraryRow {
   if (row.cover_url) extrasFields.push('cover');
   if (row.artist_image_url) extrasFields.push('artist image');
   if (row.tempo != null) extrasFields.push('tempo');
+  if (parseJson(row.canvas)?.url) extrasFields.push('canvas');
   if (parseJson(row.palette)) extrasFields.push('palette');
   if (metadata) extrasFields.push('metadata');
   // The grids are the part that cannot be re-fetched, so they are named rather than folded into
