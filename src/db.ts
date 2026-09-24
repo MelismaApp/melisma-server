@@ -1020,6 +1020,10 @@ export class Store {
           COALESCE(q.last_at, e.last_hit_at, NULLIF(e.created_at, 0), x.created_at) AS asked_at`;
     const cteParams = scoped ? [query.askedBy!] : [];
 
+    // When nothing is cached, a request stands in for "updated". Scoped, the asker's own, so a user's
+    // list does not reveal when somebody else asked for a song they share.
+    const lastAsked = scoped ? 'mine.last_at' : 'q.last_at';
+
     // One expression for the row shape, used by both the count and the page, so a filter can
     // never mean two different things depending on which one applied it.
     const base = `
@@ -1040,14 +1044,20 @@ export class Store {
           ${asked},
           COALESCE(
             NULLIF(MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0)), 0),
-            q.last_at,
+            ${lastAsked},
             0
           )                                                       AS updated_at,
-          MIN(
+          ${
+            // Scoped, "first seen" is when they first asked: the cache's own first sighting could be
+            // somebody else's lookup.
+            scoped
+              ? 'mine.first_at'
+              : `MIN(
             COALESCE(NULLIF(e.created_at, 0), 9e18),
             COALESCE(NULLIF(x.created_at, 0), 9e18),
             COALESCE(q.first_at, 9e18)
-          )                                                       AS created_at,
+          )`
+          }                                                       AS created_at,
           x.updated_at                                            AS extras_updated_at,
           x.cover_url, x.artist_image_url, x.tempo, x.canvas,
           x.palette, x.analysis, x.metadata, x.source             AS extras_source,

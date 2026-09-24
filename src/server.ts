@@ -907,6 +907,24 @@ function describeProvider(app: App) {
   });
 }
 
+/**
+ * The ids a caller names a track by, checked where they arrive.
+ *
+ * A Spotify id is spliced into URL paths that are requested with the server's own Spotify token, so
+ * one like `../../something` would have it fetch an arbitrary path and file the reply as this
+ * track's extras. Anything not shaped like the id is dropped, and the lookup falls back to the name.
+ * An ISRC is printed with hyphens now and then, so those are removed before it is checked.
+ */
+function spotifyIdFrom(value: unknown): string | undefined {
+  const id = typeof value === 'string' ? value.trim() : '';
+  return /^[0-9A-Za-z]{22}$/.test(id) ? id : undefined;
+}
+
+function isrcFrom(value: unknown): string | undefined {
+  const isrc = typeof value === 'string' ? value.trim().replace(/-/g, '').toUpperCase() : '';
+  return /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(isrc) ? isrc : undefined;
+}
+
 function trackFromParams(params: URLSearchParams): TrackQuery | null {
   const title = (params.get('title') ?? '').trim();
   if (!title) return null;
@@ -915,8 +933,8 @@ function trackFromParams(params: URLSearchParams): TrackQuery | null {
     artist: (params.get('artist') ?? '').trim(),
     album: (params.get('album') ?? '').trim(),
     durationMs: Number.parseInt(params.get('durationMs') ?? '0', 10) || 0,
-    spotifyId: params.get('spotifyId')?.trim() || undefined,
-    isrc: params.get('isrc')?.trim() || undefined,
+    spotifyId: spotifyIdFrom(params.get('spotifyId')),
+    isrc: isrcFrom(params.get('isrc')),
   };
 }
 
@@ -967,8 +985,8 @@ function trackFromJson(body: unknown): TrackQuery | null {
     artist: String(record.artist ?? '').trim(),
     album: String(record.album ?? '').trim(),
     durationMs: Number(record.durationMs ?? 0) || 0,
-    spotifyId: record.spotifyId ? String(record.spotifyId) : undefined,
-    isrc: record.isrc ? String(record.isrc) : undefined,
+    spotifyId: spotifyIdFrom(record.spotifyId),
+    isrc: isrcFrom(record.isrc),
   };
 }
 

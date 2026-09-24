@@ -102,9 +102,11 @@ $('#login-key').addEventListener('keydown', (event) => {
 
 $('#logout').addEventListener('click', async () => {
   await api('/admin/api/logout', { method: 'POST' }).catch(() => {});
-  // Nothing of the last person's stays on the page for the next one.
+  // Nothing of the last person's stays on the page for the next one, a key not yet dismissed included.
   $('#cache-table tbody').replaceChildren();
   $('#entry-detail').replaceChildren();
+  $('#user-new-key').value = '';
+  $('#user-new').hidden = true;
   logStream?.close();
   logStream = null;
   showLogin();
@@ -1731,11 +1733,17 @@ function canvasPreview(src, title) {
   return video;
 }
 
-/** A stored URL, as a link: to open it, or to copy it. */
+/**
+ * A stored URL, as a link: to open it, or to copy it. Only an http(s) one is made a link; these come
+ * from providers, and a `javascript:` URL in an href runs when clicked.
+ */
 function linkRow(label, url) {
+  const safe = /^https?:\/\//i.test(url);
   return el('div', { class: 'desc', style: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap' }, [
     el('span', { style: 'color: var(--muted)', text: `${label}: ` }),
-    el('a', { href: url.replace('{w}', '1000').replace('{h}', '1000'), target: '_blank', rel: 'noreferrer', text: url, title: url }),
+    safe
+      ? el('a', { href: url.replace('{w}', '1000').replace('{h}', '1000'), target: '_blank', rel: 'noreferrer', text: url, title: url })
+      : el('span', { text: url, title: url }),
   ]);
 }
 
@@ -1947,7 +1955,9 @@ function startLog() {
  * carries a `cache` event when the library's fingerprint moves, so the page refreshes itself.
  */
 function startStream() {
-  if (logStream) return;
+  // Not from the login screen or for a user: a reconnect queued before a Lock would otherwise reopen
+  // it, be refused, and retry every five seconds for as long as the page stayed open.
+  if (logStream || role !== 'admin' || $('#app').hidden) return;
 
   logStream = new EventSource('/admin/api/stream');
   logStream.onmessage = (message) => {

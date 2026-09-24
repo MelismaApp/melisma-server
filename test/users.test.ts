@@ -404,3 +404,46 @@ test('the page\'s own lookups do not count as asked for', async () => {
   await withKey(adminKey, track.path);
   assert.equal(await hits(), 2);
 });
+
+test('a user\'s list does not show when somebody else asked for a song they share', async () => {
+  const one = await addUser('Early');
+  const two = await addUser('Late');
+  const key = cacheKey({ title: 'Shared Request', artist: 'Someone', album: '', durationMs: 200_000 });
+  app.store.recordRequest(one.id, key, { title: 'Shared Request', artist: 'Someone' }, 1_000);
+  app.store.recordRequest(two.id, key, { title: 'Shared Request', artist: 'Someone' }, 5_000);
+
+  const rows = ((await (await withKey(one.key, '/admin/api/library?limit=500')).json()) as {
+    rows: { key: string; createdAt: number; updatedAt: number }[];
+  }).rows;
+  const row = rows.find((candidate) => candidate.key === key)!;
+  assert.equal(row.createdAt, 1_000);
+  assert.equal(row.updatedAt, 1_000);
+
+  // Cached by somebody else's lookup first: "first seen", for this user, is when they asked.
+  const track = cached('Cached Before');
+  const later = Date.now() + 60_000;
+  app.store.recordRequest(one.id, track.key, {}, later);
+  const again = ((await (await withKey(one.key, '/admin/api/library?limit=500')).json()) as {
+    rows: { key: string; createdAt: number }[];
+  }).rows;
+  assert.equal(again.find((candidate) => candidate.key === track.key)!.createdAt, later);
+});
+
+test('an id that is not shaped like one is dropped, and the lookup goes by the name', async () => {
+  const one = await addUser('Crafted');
+  const name = cacheKey({ title: 'Crafted Id', artist: 'Someone', album: '', durationMs: 200_000 });
+  const path = '/v1/lyrics?title=Crafted%20Id&artist=Someone&durationMs=200000';
+  await withKey(one.key, `${path}&spotifyId=${encodeURIComponent('../../x/4uLU6hMCjMI75M1')}&isrc=nope`);
+  await withKey(adminKey, '/v1/warm', {
+    method: 'POST',
+    body: JSON.stringify({ title: 'Crafted Id', artist: 'Someone', durationMs: 200_000, spotifyId: '../x' }),
+  });
+  assert.deepEqual(await libraryKeys(one.key), [name]);
+  assert.ok(app.store.hasAsked(0, name));
+
+  // A real one still names the track, and a hyphenated ISRC is the same code.
+  await withKey(one.key, `${path}&spotifyId=4uLU6hMCjMI75M1A2tKUQC`);
+  await withKey(one.key, `${path}&isrc=us-um7-17-03861`);
+  assert.ok(app.store.hasAsked(one.id, 'sp:4uLU6hMCjMI75M1A2tKUQC'));
+  assert.ok(app.store.hasAsked(one.id, 'isrc:USUM71703861'));
+});

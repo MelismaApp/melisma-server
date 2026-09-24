@@ -324,6 +324,18 @@ test('a failed request records nothing, so a held Canvas survives it', async () 
   assert.equal(held.canvasCheckedAt, 1_000);
 });
 
+test('an empty reply is no answer either, so it does not record "none"', async () => {
+  stubSpotify();
+  const { store, config } = withToken();
+  store.saveCanvas(`sp:${ID}`, { spotifyId: ID, url: VIDEO, variants: [] }, 1_000);
+
+  reply = () => protobuf(new Uint8Array(0));
+  assert.equal((await harvestCanvas(store, config, `sp:${ID}`, ID, quiet)).canvas, null);
+  const held = store.extras(`sp:${ID}`, { hit: false })!;
+  assert.equal(held.canvas?.url, VIDEO);
+  assert.equal(held.canvasCheckedAt, 1_000);
+});
+
 test('without a player token, nothing is asked', async () => {
   stubSpotify();
   const store = new Store(':memory:');

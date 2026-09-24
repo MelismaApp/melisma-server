@@ -535,10 +535,13 @@ async function askCanvas(
     binary: true,
   });
 
-  if (!reply.ok || !reply.bytes) {
+  // Empty is not an answer: a reply with no Canvas still carries its TTL, so nothing at all is a fault.
+  if (!reply.ok || !reply.bytes?.length) {
     log(
       reply.status === 429 ? 'warn' : 'debug',
-      `spotify canvas lookup returned HTTP ${reply.status}`,
+      reply.ok
+        ? 'spotify canvas lookup returned an empty reply'
+        : `spotify canvas lookup returned HTTP ${reply.status}`,
     );
     return { canvas: null, status: reply.status };
   }
