@@ -493,7 +493,7 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       // A track can have artwork and a tempo and no lyrics anybody has written down, so either
       // half is enough to have something to show. And one can have been asked for with nothing
       // cached at all, when every source was unreachable.
-      const asked = entry || extras ? null : app.store.askedFor(key);
+      const asked = entry || extras ? null : app.store.askedFor(key, viewer?.id);
       if (!entry && !extras && !asked) return send(response, 404, { error: 'no such entry' });
       return send(response, 200, {
         key,

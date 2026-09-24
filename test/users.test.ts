@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { createApp, start, type App } from '../src/server.ts';
 import { MERGE_VERSION } from '../src/merge.ts';
 import { cacheKey } from '../src/match.ts';
+import { relookupCandidates } from '../src/report.ts';
 
 /**
  * User keys: a key per person or device beside the admin key, each seeing only the tracks they asked
@@ -446,4 +447,54 @@ test('an id that is not shaped like one is dropped, and the lookup goes by the n
   await withKey(one.key, `${path}&isrc=us-um7-17-03861`);
   assert.ok(app.store.hasAsked(one.id, 'sp:4uLU6hMCjMI75M1A2tKUQC'));
   assert.ok(app.store.hasAsked(one.id, 'isrc:USUM71703861'));
+});
+
+test('a user is shown the names they asked with, not somebody else\'s for the same key', async () => {
+  const one = await addUser('Names Mine');
+  const two = await addUser('Names Theirs');
+  const key = 'sp:0000000000000000000001';
+  app.store.recordRequest(one.id, key, { title: 'Mine', artist: 'A' }, 1_000);
+  app.store.recordRequest(two.id, key, { title: 'Theirs', artist: 'Z', album: 'Private' }, 2_000);
+
+  const rows = ((await (await withKey(one.key, '/admin/api/library?limit=500')).json()) as {
+    rows: { key: string; title: string; artist: string; album: string }[];
+  }).rows;
+  const row = rows.find((candidate) => candidate.key === key)!;
+  assert.deepEqual([row.title, row.artist, row.album], ['Mine', 'A', '']);
+  const entry = (await (await withKey(one.key, `/admin/api/entry?key=${key}`)).json()) as {
+    asked: { title: string; album: string };
+  };
+  assert.deepEqual([entry.asked.title, entry.asked.album], ['Mine', '']);
+});
+
+test('a song asked for with nothing cached keeps its duration, and a re-lookup can retry it', async () => {
+  await addUser('Retry');
+  const spotifyId = '0000000000000000000002';
+  const key = `sp:${spotifyId}`;
+  await withKey(adminKey, `/v1/lyrics?title=Retry%20Me&artist=Someone&durationMs=181000&spotifyId=${spotifyId}`);
+  assert.equal(app.store.getEntry(key), null);
+
+  const entry = (await (await withKey(adminKey, `/admin/api/entry?key=${key}`)).json()) as {
+    asked: { durationMs: number };
+  };
+  assert.equal(entry.asked.durationMs, 181_000);
+  const rows = ((await (await withKey(adminKey, '/admin/api/library?limit=500')).json()) as {
+    rows: { key: string; durationMs: number }[];
+  }).rows;
+  assert.equal(rows.find((row) => row.key === key)?.durationMs, 181_000);
+
+  // "Re-look up everything" includes it, the report names it, and it is asked again, not skipped.
+  assert.ok(app.store.allKeys().includes(key));
+  assert.equal(relookupCandidates(app.store).candidates.find((c) => c.key === key)?.title, 'Retry Me');
+  const progress = await app.resolver.relookup([key]);
+  assert.deepEqual([progress.done, progress.skipped], [1, 0]);
+});
+
+test('a request moves the revision the live page watches', () => {
+  const before = app.store.cacheRevision();
+  app.store.recordRequest(0, 'q:revision|someone|90');
+  const added = app.store.cacheRevision();
+  assert.notEqual(added, before);
+  app.store.recordRequest(0, 'q:revision|someone|90');
+  assert.notEqual(app.store.cacheRevision(), added);
 });

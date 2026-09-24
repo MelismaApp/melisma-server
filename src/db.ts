@@ -398,6 +398,7 @@ export class Store {
         title    TEXT NOT NULL DEFAULT '',
         artist   TEXT NOT NULL DEFAULT '',
         album    TEXT NOT NULL DEFAULT '',
+        duration_ms INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (user_id, key)
       );
 
@@ -420,7 +421,12 @@ export class Store {
     }
 
     // Added to `requests` after it first shipped.
-    for (const column of ["title TEXT NOT NULL DEFAULT ''", "artist TEXT NOT NULL DEFAULT ''", "album TEXT NOT NULL DEFAULT ''"]) {
+    for (const column of [
+      "title TEXT NOT NULL DEFAULT ''",
+      "artist TEXT NOT NULL DEFAULT ''",
+      "album TEXT NOT NULL DEFAULT ''",
+      'duration_ms INTEGER NOT NULL DEFAULT 0',
+    ]) {
       try {
         this.db.exec(`ALTER TABLE requests ADD COLUMN ${column}`);
       } catch {
@@ -835,37 +841,51 @@ export class Store {
   recordRequest(
     userId: number,
     key: string,
-    track: { title?: string; artist?: string; album?: string } = {},
+    track: { title?: string; artist?: string; album?: string; durationMs?: number } = {},
     at = Date.now(),
   ): void {
     this.db
       .prepare(
-        `INSERT INTO requests (user_id, key, first_at, last_at, title, artist, album)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO requests (user_id, key, first_at, last_at, title, artist, album, duration_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(user_id, key) DO UPDATE SET
            last_at = excluded.last_at,
            count   = count + 1,
            title   = CASE WHEN excluded.title  <> '' THEN excluded.title  ELSE requests.title  END,
            artist  = CASE WHEN excluded.artist <> '' THEN excluded.artist ELSE requests.artist END,
-           album   = CASE WHEN excluded.album  <> '' THEN excluded.album  ELSE requests.album  END`,
+           album   = CASE WHEN excluded.album  <> '' THEN excluded.album  ELSE requests.album  END,
+           duration_ms = CASE WHEN excluded.duration_ms > 0 THEN excluded.duration_ms
+                              ELSE requests.duration_ms END`,
       )
-      .run(userId, key, at, at, track.title ?? '', track.artist ?? '', track.album ?? '');
+      .run(
+        userId, key, at, at, track.title ?? '', track.artist ?? '', track.album ?? '',
+        Math.max(0, Math.round(track.durationMs ?? 0)),
+      );
   }
 
-  /** What was asked for a track, when nothing else is held on it. */
-  askedFor(key: string): { title: string; artist: string; album: string; lastAt: number } | null {
+  /**
+   * What was asked for a track, when nothing else is held on it. With `userId`, only what that user
+   * asked, so a user is not shown the names somebody else sent for the same key.
+   */
+  askedFor(
+    key: string,
+    userId?: number,
+  ): { title: string; artist: string; album: string; durationMs: number; lastAt: number } | null {
+    const mine = userId === undefined ? '' : 'AND user_id = ?';
     const row = this.db
       .prepare(
         `SELECT MAX(NULLIF(title, '')) AS title, MAX(NULLIF(artist, '')) AS artist,
-                MAX(NULLIF(album, '')) AS album, MAX(last_at) AS last_at
-           FROM requests WHERE key = ?`,
+                MAX(NULLIF(album, '')) AS album, MAX(duration_ms) AS duration_ms,
+                MAX(last_at) AS last_at
+           FROM requests WHERE key = ? ${mine}`,
       )
-      .get(key) as Record<string, unknown> | undefined;
+      .get(...(userId === undefined ? [key] : [key, userId])) as Record<string, unknown> | undefined;
     if (!row || row.last_at === null) return null;
     return {
       title: String(row.title ?? ''),
       artist: String(row.artist ?? ''),
       album: String(row.album ?? ''),
+      durationMs: Number(row.duration_ms ?? 0),
       lastAt: Number(row.last_at),
     };
   }
@@ -1023,6 +1043,8 @@ export class Store {
     // When nothing is cached, a request stands in for "updated". Scoped, the asker's own, so a user's
     // list does not reveal when somebody else asked for a song they share.
     const lastAsked = scoped ? 'mine.last_at' : 'q.last_at';
+    // And the names asked with, for the same reason.
+    const said = scoped ? 'mine' : 'q';
 
     // One expression for the row shape, used by both the count and the page, so a filter can
     // never mean two different things depending on which one applied it.
@@ -1031,10 +1053,11 @@ export class Store {
         SELECT
           k.key                                                   AS key,
           -- A track only asked for, with nothing cached, is named by what was asked.
-          COALESCE(NULLIF(e.title, ''),  NULLIF(x.title, ''),  q.title,  '') AS title,
-          COALESCE(NULLIF(e.artist, ''), NULLIF(x.artist, ''), q.artist, '') AS artist,
-          COALESCE(NULLIF(e.album, ''), q.album, '')              AS album,
-          COALESCE(NULLIF(e.duration_ms, 0), x.duration_ms, 0)    AS duration_ms,
+          COALESCE(NULLIF(e.title, ''),  NULLIF(x.title, ''),  NULLIF(${said}.title, ''),  '') AS title,
+          COALESCE(NULLIF(e.artist, ''), NULLIF(x.artist, ''), NULLIF(${said}.artist, ''), '') AS artist,
+          COALESCE(NULLIF(e.album, ''), NULLIF(${said}.album, ''), '') AS album,
+          COALESCE(NULLIF(e.duration_ms, 0), NULLIF(x.duration_ms, 0), NULLIF(${said}.duration_ms, 0), 0)
+                                                                  AS duration_ms,
           e.spotify_id                                            AS spotify_id,
           -- Identity is written to whichever row existed at the time, so either can hold it.
           COALESCE(e.isrc, x.isrc)                                AS isrc,
@@ -1072,7 +1095,7 @@ export class Store {
         LEFT JOIN (
           SELECT key, MIN(first_at) AS first_at, MAX(last_at) AS last_at, SUM(count) AS count,
                  MAX(NULLIF(title, '')) AS title, MAX(NULLIF(artist, '')) AS artist,
-                 MAX(NULLIF(album, '')) AS album
+                 MAX(NULLIF(album, '')) AS album, MAX(duration_ms) AS duration_ms
             FROM requests GROUP BY key
         ) q ON q.key = k.key
         ${scoped ? 'JOIN requests mine ON mine.key = k.key AND mine.user_id = ?' : ''}
@@ -1235,7 +1258,8 @@ export class Store {
    * something changed, and it already has an endpoint for what. Three tables, because a track's row
    * moves for three different reasons — a lookup or a re-merge writes `entries`, a harvest writes
    * `extras`, and an archived answer writes `raw` — and watching only the first missed the harvest
-   * landing a tempo a few seconds later, which is exactly the update worth seeing.
+   * landing a tempo a few seconds later, which is exactly the update worth seeing. And `requests`,
+   * since a lookup that cached nothing still adds a row, and a repeat one moves its count.
    */
   cacheRevision(): string {
     const row = this.db
@@ -1247,11 +1271,14 @@ export class Store {
            (SELECT COALESCE(MAX(updated_at), 0) FROM extras)     AS extrasAt,
            (SELECT COUNT(*) FROM raw)                            AS raws,
            (SELECT COALESCE(MAX(fetched_at), 0) FROM raw)        AS rawsAt,
-           (SELECT COALESCE(SUM(hits), 0) FROM entries)          AS hits`,
+           (SELECT COALESCE(SUM(hits), 0) FROM entries)          AS hits,
+           (SELECT COUNT(*) FROM requests)                       AS requests,
+           (SELECT COALESCE(SUM(count), 0) FROM requests)        AS asks`,
       )
       .get() as Record<string, number>;
     return [
       row.entries, row.entriesAt, row.extras, row.extrasAt, row.raws, row.rawsAt, row.hits,
+      row.requests, row.asks,
     ].join('.');
   }
 
@@ -1261,16 +1288,18 @@ export class Store {
    * Both tables, the same union the library view lists from. `entries` alone missed every extras-only
    * row — which is what "Forget lyrics" leaves behind, since it drops the entry and the archive and
    * keeps the artwork and tempo. Those rows showed in the library and were then skipped by the very
-   * action most likely to be aimed at them.
+   * action most likely to be aimed at them. Requests too, for a track asked for while no source could
+   * be reached: the one a re-lookup is most for.
    */
   allKeys(limit = 5_000): string[] {
     const rows = this.db
       .prepare(
         `SELECT k.key AS key,
-                MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0)) AS touched
-           FROM (SELECT key FROM entries UNION SELECT key FROM extras) k
+                MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0), COALESCE(q.last_at, 0)) AS touched
+           FROM (SELECT key FROM entries UNION SELECT key FROM extras UNION SELECT key FROM requests) k
            LEFT JOIN entries e ON e.key = k.key
            LEFT JOIN extras  x ON x.key = k.key
+           LEFT JOIN (SELECT key, MAX(last_at) AS last_at FROM requests GROUP BY key) q ON q.key = k.key
           ORDER BY touched DESC
           LIMIT ?`,
       )

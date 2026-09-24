@@ -445,20 +445,22 @@ export class Resolver {
   private trackForKey(key: string): TrackQuery | null {
     const entry = this.store.getEntry(key);
     const extras = this.store.extras(key);
+    const asked = entry || extras ? null : this.store.askedFor(key);
 
     // Extras as well as the entry, because "Forget lyrics" leaves the entry and the archive deleted and
     // the artwork and tempo behind. Those rows show in the library — it lists the union of both tables
-    // — so a re-lookup aimed at one has to be able to find its title.
-    const title = entry?.title || extras?.title || '';
-    const artist = entry?.artist || extras?.artist || '';
+    // — so a re-lookup aimed at one has to be able to find its title. And what was asked, for a track
+    // that was asked for while no source could be reached and has neither.
+    const title = entry?.title || extras?.title || asked?.title || '';
+    const artist = entry?.artist || extras?.artist || asked?.artist || '';
     if (!title) return null;
 
     const known = this.store.identityFor(key);
     const base: TrackQuery = {
       title,
       artist,
-      album: entry?.album ?? '',
-      durationMs: entry?.durationMs || known.durationMs || 0,
+      album: entry?.album ?? asked?.album ?? '',
+      durationMs: entry?.durationMs || known.durationMs || asked?.durationMs || 0,
       spotifyId: entry?.spotifyId ?? undefined,
       isrc: known.isrc ?? undefined,
     };

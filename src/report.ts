@@ -179,9 +179,10 @@ export function relookupCandidates(store: Store): CandidateSet {
     }
   }
 
+  // A request-only key too: asked for while no source could be reached, and named by what was asked.
   for (const key of extrasOnly) {
-    const extras = store.extras(key);
-    note({ key, title: extras?.title ?? '', artist: extras?.artist ?? '' }, 'nothing cached');
+    const named = store.extras(key) ?? store.askedFor(key);
+    note({ key, title: named?.title ?? '', artist: named?.artist ?? '' }, 'nothing cached');
   }
 
   for (const row of timingFit(store).rows) {

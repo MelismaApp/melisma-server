@@ -1428,7 +1428,7 @@ async function showEntry(key) {
         }) : null,
         el('a', {
           class: 'action',
-          href: `/v1/lyrics?${downloadQuery(key, title, artist, data.entry?.durationMs ?? 0)}`,
+          href: `/v1/lyrics?${downloadQuery(key, title, artist, about.durationMs ?? 0)}`,
           target: '_blank',
           rel: 'noreferrer',
           text: 'Download TTML',
