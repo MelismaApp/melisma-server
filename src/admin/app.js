@@ -1573,9 +1573,58 @@ function extrasCard(extras) {
     .map((name) => `${analysis[name].length} ${name}`);
   if (grids.length > 0) facts.push(['Grids', grids.join(', ')]);
 
+  // The features that stand in when Spotify has no analysis, from ReccoBeats: energy, valence and so on.
+  const features = analysis?.features && typeof analysis.features === 'object' ? analysis.features : null;
+  if (features) {
+    for (const [name, value] of Object.entries(features)) {
+      if (name === 'tempo' || value === null || value === undefined) continue;
+      facts.push([humanise(name), typeof value === 'number' ? String(Math.round(value * 1000) / 1000) : formatValue(value)]);
+    }
+  }
+
+  const canvas = extras.canvas ?? null;
+  const canvasUrl = canvas?.url ?? null;
+
+  // Everything stored, as rows: the URLs as links so they can be opened or copied, and the Canvas's
+  // answer even when it is "none", which is an answer worth seeing.
+  const stored = [];
+  if (extras.coverUrl) stored.push(linkRow('Cover', extras.coverUrl));
+  if (extras.artistImageUrl) stored.push(linkRow('Artist image', extras.artistImageUrl));
+  if (canvasUrl) stored.push(linkRow('Canvas', canvasUrl));
+  for (const variant of canvas?.variants ?? []) {
+    stored.push(linkRow(`Canvas ${variant.width}×${variant.height}`, variant.url));
+  }
+  if (canvas) {
+    stored.push(
+      factRow([
+        'Canvas checked',
+        `${when(extras.canvasCheckedAt)}${canvasUrl ? '' : ' — Spotify has none for this track'}`,
+      ]),
+    );
+    for (const [label, value] of [
+      ['Canvas uploaded by', canvas.artistName],
+      ['Canvas URI', canvas.uri],
+      ['Canvas id', canvas.id],
+      ['Canvas type', canvas.type],
+      ['Canvas for', canvas.spotifyId],
+    ]) {
+      if (value !== undefined && value !== null && value !== '') stored.push(factRow([label, String(value)]));
+    }
+  } else if (extras.key?.startsWith('sp:')) {
+    stored.push(factRow(['Canvas', 'not asked about yet']));
+  }
+  if (extras.isrc) stored.push(factRow(['ISRC', extras.isrc]));
+  if (extras.durationMs) stored.push(factRow(['Duration', `${stamp(extras.durationMs)} (${extras.durationMs} ms)`]));
+  for (const [name, value] of Object.entries(palette ?? {})) {
+    stored.push(factRow([humanise(name), formatValue(value)]));
+  }
+
+  // The row minus the analysis, which has its own section and can be large.
+  const { analysis: _analysis, ...rest } = extras;
+
   return el('div', { class: 'card' }, [
     el('div', { class: 'title' }, [
-      el('span', { text: 'Artwork, identity and analysis' }),
+      el('span', { text: 'Artwork, Canvas, identity and analysis' }),
       extras.source ? el('span', { class: 'pill', text: extras.source }) : null,
       el('span', { class: 'pill', text: when(extras.updatedAt) }),
     ]),
@@ -1593,6 +1642,8 @@ function extrasCard(extras) {
             'border: 1px solid var(--line); flex: none; background: var(--bg)',
         }),
       ),
+      // Played, like the artwork is shown: whether it is the right video is only obvious by looking.
+      canvasUrl ? canvasPreview(canvas.variants?.[0]?.url ?? canvasUrl, canvasUrl) : null,
       palette
         ? el(
             'div',
@@ -1612,6 +1663,17 @@ function extrasCard(extras) {
         : null,
       facts.length > 0 ? el('div', { class: 'grow' }, facts.map(factRow)) : null,
     ]),
+
+    stored.length > 0
+      ? el('details', { open: 'open', style: 'margin-top: 14px' }, [
+          el('summary', { class: 'desc', text: 'Artwork, Canvas and identity, as stored' }),
+          el(
+            'div',
+            { style: 'margin-top: 8px; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 2px 18px' },
+            stored,
+          ),
+        ])
+      : null,
 
     // Everything else in the metadata, rendered generically rather than from a list of field names
     // — the whole point of keeping it as a blob is that a provider can start reporting something
@@ -1634,6 +1696,41 @@ function extrasCard(extras) {
           el('pre', { style: 'margin-top: 8px', text: JSON.stringify(analysis, null, 2) }),
         ])
       : null,
+
+    // Everything else in the row, whatever it holds: a field added later shows up here without this
+    // page being taught about it.
+    el('details', { style: 'margin-top: 12px' }, [
+      el('summary', { class: 'desc', text: 'Everything else, as stored' }),
+      el('pre', { style: 'margin-top: 8px', text: JSON.stringify(rest, null, 2) }),
+    ]),
+  ]);
+}
+
+/**
+ * The Canvas, looping, at the smallest size stored. Muted through the property: the attribute does
+ * not mute a video made in script, and the browser only autoplays one that is muted.
+ */
+function canvasPreview(src, title) {
+  const video = el('video', {
+    src,
+    loop: '',
+    autoplay: '',
+    playsinline: '',
+    preload: 'metadata',
+    title,
+    style:
+      'width: 61px; height: 108px; object-fit: cover; border-radius: 8px; ' +
+      'border: 1px solid var(--line); flex: none; background: var(--bg)',
+  });
+  video.muted = true;
+  return video;
+}
+
+/** A stored URL, as a link: to open it, or to copy it. */
+function linkRow(label, url) {
+  return el('div', { class: 'desc', style: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap' }, [
+    el('span', { style: 'color: var(--muted)', text: `${label}: ` }),
+    el('a', { href: url.replace('{w}', '1000').replace('{h}', '1000'), target: '_blank', rel: 'noreferrer', text: url, title: url }),
   ]);
 }
 
