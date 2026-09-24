@@ -190,6 +190,8 @@ export interface LibraryQuery {
   missing?: 'lyrics' | 'extras' | 'syllables' | 'translation' | 'isrc' | 'analysis';
   /** Only songs this user asked for (0 is the admin key), with their counts rather than everybody's. */
   askedBy?: number;
+  /** Only cached entries merged below this version: what the stats count as stale. */
+  staleBelow?: number;
   limit?: number;
   offset?: number;
 }
@@ -1014,6 +1016,11 @@ export class Store {
         break;
     }
 
+    if (query.staleBelow !== undefined) {
+      where.push('(cached = 1 AND merge_version < ?)');
+      params.push(query.staleBelow);
+    }
+
     const order = {
       song: 'artist COLLATE NOCASE ASC, title COLLATE NOCASE ASC',
       recent: 'updated_at DESC',
@@ -1064,6 +1071,7 @@ export class Store {
           -- Empty is this cache's "asked, and nobody had it", the same as null. See stats().
           NULLIF(e.merged, '')                                    AS lyrics,
           COALESCE(e.merge_version, 0)                            AS merge_version,
+          CASE WHEN e.key IS NULL THEN 0 ELSE 1 END               AS cached,
           ${asked},
           COALESCE(
             NULLIF(MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0)), 0),

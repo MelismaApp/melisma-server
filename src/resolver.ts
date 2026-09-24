@@ -1108,7 +1108,7 @@ export class Resolver {
    * Correctness never depended on this pass anyway: `fromCache` re-merges an out-of-date entry the
    * moment it is asked for, so this is only eager warming and can afford to be polite.
    */
-  async remergeAll(): Promise<{ attempted: number; rebuilt: number }> {
+  async remergeAll(): Promise<{ attempted: number; rebuilt: number; left: number }> {
     const keys = this.store.keysBelowVersion(MERGE_VERSION);
     let rebuilt = 0;
     for (const [index, key] of keys.entries()) {
@@ -1116,9 +1116,17 @@ export class Resolver {
       // Often enough that a health check never waits more than a few entries for a turn.
       if (index % 5 === 4) await new Promise((resolve) => setImmediate(resolve));
     }
+    // A miss with nothing archived has nothing to re-merge from, so it stays below the version until a
+    // re-lookup rewrites it.
+    const left = this.store.keysBelowVersion(MERGE_VERSION).length;
     if (keys.length > 0) {
-      this.store.log('info', null, `re-merged ${rebuilt}/${keys.length} entries at v${MERGE_VERSION}`);
+      this.store.log(
+        'info',
+        null,
+        `re-merged ${rebuilt}/${keys.length} entries at v${MERGE_VERSION}` +
+          (left > 0 ? `; ${left} have nothing archived to re-merge from` : ''),
+      );
     }
-    return { attempted: keys.length, rebuilt };
+    return { attempted: keys.length, rebuilt, left };
   }
 }

@@ -466,6 +466,7 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
           sort: pick('sort', LIBRARY_SORTS, 'song'),
           missing: pick('missing', LIBRARY_MISSING),
           askedBy,
+          staleBelow: url.searchParams.get('stale') === '1' ? MERGE_VERSION : undefined,
           limit: Number(url.searchParams.get('limit') ?? 50),
           offset: Number(url.searchParams.get('offset') ?? 0),
         }),

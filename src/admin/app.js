@@ -656,11 +656,14 @@ let libraryOffset = 0;
 const LIBRARY_PAGE = 50;
 
 function libraryQuery() {
+  // "Stale" shares the filter menu but is its own parameter: it is about the merge, not a missing field.
+  const filter = $('#library-missing').value;
   return new URLSearchParams({
     search: $('#cache-search').value,
     inLyrics: $('#library-in-lyrics').checked ? '1' : '0',
     sort: $('#library-sort').value,
-    missing: $('#library-missing').value,
+    missing: filter === 'stale' ? '' : filter,
+    stale: filter === 'stale' ? '1' : '0',
     askedBy: role === 'admin' ? $('#library-asked-by').value : '',
     limit: String(LIBRARY_PAGE),
     offset: String(libraryOffset),
@@ -1372,7 +1375,12 @@ function renderCanvas(state) {
 
 $('#cache-remerge').addEventListener('click', async () => {
   const result = await api('/admin/api/remerge', { method: 'POST', body: '{}' });
-  toast(`Re-merged ${result.rebuilt}/${result.attempted}`);
+  toast(
+    `Re-merged ${result.rebuilt}/${result.attempted}` +
+      (result.left
+        ? ` — ${result.left} have nothing archived to re-merge; filter "Stale" and look them up again`
+        : ''),
+  );
   await loadCache();
 });
 

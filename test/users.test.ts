@@ -498,3 +498,36 @@ test('a request moves the revision the live page watches', () => {
   app.store.recordRequest(0, 'q:revision|someone|90');
   assert.notEqual(app.store.cacheRevision(), added);
 });
+
+test('a stale miss has nothing to re-merge, is listed under "Stale", and a re-lookup clears it', async () => {
+  const track = cached('Instrumental');
+  // Filed by an older merge, with nothing archived: what an instrumental a while ago looks like.
+  app.store.putEntry({ ...app.store.getEntry(track.key)!, mergeVersion: MERGE_VERSION - 1 });
+  // Its merge version reads 0, and it is still not stale: there is no entry to re-merge.
+  app.store.recordRequest(0, 'sp:0000000000000000000003', { title: 'Asked, not cached' });
+
+  const remerged = (await (await withKey(adminKey, '/admin/api/remerge', { method: 'POST', body: '{}' })).json()) as {
+    rebuilt: number;
+    left: number;
+  };
+  assert.equal(remerged.left, 1);
+  assert.deepEqual(await libraryKeys(adminKey, '&stale=1'), [track.key]);
+
+  // Asked again, and a source answers that it has nothing: a miss again, but filed by this merge.
+  const realFetch = globalThis.fetch;
+  app.settings.update({ 'provider.lrclib.enabled': '1' });
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/api/get?')) return new Response('{}', { status: 404 });
+    if (url.includes('/api/search?')) return Response.json([]);
+    return realFetch(input, init);
+  }) as typeof fetch;
+  try {
+    await app.resolver.relookup([track.key]);
+  } finally {
+    globalThis.fetch = realFetch;
+    app.settings.update({ 'provider.lrclib.enabled': '0' });
+  }
+  assert.equal(app.store.getEntry(track.key)?.mergeVersion, MERGE_VERSION);
+  assert.deepEqual(await libraryKeys(adminKey, '&stale=1'), []);
+});
