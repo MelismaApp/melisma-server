@@ -961,7 +961,7 @@ function readExtras(app: App, url: URL, response: ServerResponse): void {
   send(response, 200, {
     coverUrl: found.coverUrl ?? undefined,
     canvasUrl: canvas?.url ?? undefined,
-    canvasVariants: canvas?.url && canvas.variants.length ? canvas.variants : undefined,
+    canvasThumbnails: canvas?.url && canvas.thumbnails.length ? canvas.thumbnails : undefined,
     artistImageUrl: found.artistImageUrl ?? undefined,
     tempo: found.tempo ?? undefined,
     palette: found.palette ?? undefined,

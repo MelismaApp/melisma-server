@@ -58,6 +58,20 @@ export interface RawResponse {
 export type AttemptOutcome = 'lyrics' | 'none' | 'unreachable' | 'deferred';
 
 /** A JSON column read back, or null if it was empty or unreadable. */
+/**
+ * A stored Canvas. One saved before the stills were identified has them as `variants`, with width and
+ * height the wrong way round.
+ */
+function storedCanvas(value: Record<string, unknown> | null): StoredCanvas | null {
+  if (!value) return null;
+  if (Array.isArray(value.thumbnails) || !Array.isArray(value.variants)) return value as unknown as StoredCanvas;
+  const { variants, ...rest } = value as { variants: Array<{ width: number; height: number; url: string }> };
+  return {
+    ...(rest as unknown as StoredCanvas),
+    thumbnails: variants.map((still) => ({ width: still.height, height: still.width, url: still.url })),
+  };
+}
+
 function parseJson(value: unknown): Record<string, unknown> | null {
   if (typeof value !== 'string' || !value) return null;
   try {
@@ -115,8 +129,8 @@ export interface ExtrasEntry {
 export interface StoredCanvas {
   spotifyId: string;
   url: string | null;
-  /** Smaller encodes of the same video, smallest first. */
-  variants: Array<{ width: number; height: number; url: string }>;
+  /** JPEG stills of the video, smallest first. */
+  thumbnails: Array<{ width: number; height: number; url: string }>;
   /** Spotify's own ids and type code, kept as given; nothing reads them yet. */
   id?: string;
   uri?: string;
@@ -470,7 +484,7 @@ export class Store {
       palette: parseJson(row.palette),
       analysis: parseJson(row.analysis),
       metadata: parseJson(row.metadata),
-      canvas: parseJson(row.canvas) as StoredCanvas | null,
+      canvas: storedCanvas(parseJson(row.canvas)),
       canvasCheckedAt: (row.canvas_checked_at as number | null) ?? null,
       source: String(row.source ?? ''),
       updatedAt: Number(row.updated_at ?? 0),

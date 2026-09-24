@@ -561,14 +561,14 @@ async function askCanvas(
  *
  * - top level: `1` repeated canvas, `2` ttl in seconds. A track with no Canvas gets only `2`.
  * - canvas: `1` id, `2` url, `4` type, `5` entity uri, `6` artist `{1 uri, 2 name}`, `11` canvas uri,
- *   `13` repeated smaller encodes `{1 width, 2 height, 3 url}`.
+ *   `13` repeated JPEG stills of the video `{1 height, 2 width, 3 url}` (checked against the images).
  *
  * Null when the reply holds a Canvas for some other track, which is not an answer about this one.
  * Throws when the reply is not protobuf.
  */
 export function readCanvas(bytes: Uint8Array, spotifyId: string): StoredCanvas | null {
   const canvases = submessages(decode(bytes), 1);
-  const none: StoredCanvas = { spotifyId, url: null, variants: [] };
+  const none: StoredCanvas = { spotifyId, url: null, thumbnails: [] };
   if (canvases.length === 0) return none;
 
   const canvas = canvases.find((entry) => text(entry, 5) === `spotify:track:${spotifyId}`);
@@ -578,20 +578,20 @@ export function readCanvas(bytes: Uint8Array, spotifyId: string): StoredCanvas |
   const url = cdnUrl(text(canvas, 2));
   if (!url) return none;
 
-  const variants = submessages(canvas, 13)
-    .map((variant) => ({
-      width: integer(variant, 1) ?? 0,
-      height: integer(variant, 2) ?? 0,
-      url: cdnUrl(text(variant, 3)) ?? '',
+  const thumbnails = submessages(canvas, 13)
+    .map((still) => ({
+      width: integer(still, 2) ?? 0,
+      height: integer(still, 1) ?? 0,
+      url: cdnUrl(text(still, 3)) ?? '',
     }))
-    .filter((variant) => variant.url && variant.width > 0 && variant.height > 0)
+    .filter((still) => still.url && still.width > 0 && still.height > 0)
     .sort((a, b) => a.width * a.height - b.width * b.height);
 
   const artist = submessage(canvas, 6);
   return {
     spotifyId,
     url,
-    variants,
+    thumbnails,
     id: text(canvas, 1) ?? undefined,
     uri: text(canvas, 11) ?? undefined,
     type: integer(canvas, 4) ?? undefined,

@@ -186,10 +186,10 @@ ever read. `beats`, `bars` and `sections` are two orders of magnitude smaller an
 that could actually change the rendering — a background can pulse on the beat grid rather than
 drift at a rate derived from the tempo.
 
-**Canvas is the exception to "true forever".** The URL of a track's Spotify Canvas, and the smaller
-encodes beside it, come from `spclient`'s `canvaz-cache` with the player token, as protobuf with no
+**Canvas is the exception to "true forever".** The URL of a track's Spotify Canvas, and the JPEG
+stills of it beside it, come from `spclient`'s `canvaz-cache` with the player token, as protobuf with no
 published schema (`src/protobuf.ts` reads it by field number). It is served as `canvasUrl` and
-`canvasVariants` only when the caller's `spotifyId` is the one it was fetched for, and never
+`canvasThumbnails` only when the caller's `spotifyId` is the one it was fetched for, and never
 harvested for an id found by searching: a Canvas for another release would be obvious. The server
 stores the URL, not the video. An artist can add, swap or remove a Canvas, so the answer is kept
 with the time it was given — "none" included, so a track without one is not asked about on every

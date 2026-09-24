@@ -48,7 +48,8 @@ function varint(field: number, value: number): Uint8Array {
 function canvasMessage(
   entity: string,
   url: string,
-  variants: Array<[number, number, string]> = [],
+  /** `[height, width, url]`, in field order. */
+  stills: Array<[number, number, string]> = [],
 ): Uint8Array {
   return lengthDelimited(
     1,
@@ -68,10 +69,10 @@ function canvasMessage(
       ),
       lengthDelimited(8, 'artist'),
       lengthDelimited(11, 'spotify:canvas:c0ffee'),
-      ...variants.map(([width, height, variantUrl]) =>
+      ...stills.map(([height, width, stillUrl]) =>
         lengthDelimited(
           13,
-          concat([varint(1, width), varint(2, height), lengthDelimited(3, variantUrl)]),
+          concat([varint(1, height), varint(2, width), lengthDelimited(3, stillUrl)]),
         ),
       ),
     ]),
@@ -140,12 +141,13 @@ test('a field that is not a message is skipped by submessages, not fatal', () =>
 
 // ---- reading a reply ------------------------------------------------------
 
-test('a Canvas is read with its smaller encodes, smallest first', () => {
+test('a Canvas is read with its stills, smallest first, height before width on the wire', () => {
+  // The sizes of a live record's stills, for a 1080×1920 video.
   const canvas = readCanvas(
     concat([
       canvasMessage(ID, VIDEO, [
-        [512, 288, 'https://canvaz.scdn.co/upload/artist/abc/video/512.mp4'],
-        [256, 144, 'https://canvaz.scdn.co/upload/artist/abc/video/256.mp4'],
+        [512, 288, 'https://i.scdn.co/image/ab67ba6900002e9f'],
+        [256, 144, 'https://i.scdn.co/image/ab67ba6900002ea6'],
       ]),
       TTL,
     ]),
@@ -153,17 +155,17 @@ test('a Canvas is read with its smaller encodes, smallest first', () => {
   );
   assert.equal(canvas?.url, VIDEO);
   assert.equal(canvas?.spotifyId, ID);
-  assert.deepEqual(
-    canvas?.variants.map((variant) => variant.width),
-    [256, 512],
-  );
+  assert.deepEqual(canvas?.thumbnails, [
+    { width: 144, height: 256, url: 'https://i.scdn.co/image/ab67ba6900002ea6' },
+    { width: 288, height: 512, url: 'https://i.scdn.co/image/ab67ba6900002e9f' },
+  ]);
   assert.equal(canvas?.type, 3);
   assert.equal(canvas?.artistName, 'Someone');
   assert.equal(canvas?.uri, 'spotify:canvas:c0ffee');
 });
 
 test('a reply with only the TTL is Spotify saying there is no Canvas', () => {
-  assert.deepEqual(readCanvas(TTL, ID), { spotifyId: ID, url: null, variants: [] });
+  assert.deepEqual(readCanvas(TTL, ID), { spotifyId: ID, url: null, thumbnails: [] });
 });
 
 test('a Canvas for a different track is not an answer about this one', () => {
@@ -175,11 +177,11 @@ test('a URL the app would drop is recorded as no Canvas', () => {
   for (const url of ['http://canvaz.scdn.co/x.mp4', 'https://example.com/x.mp4', 'not a url']) {
     assert.equal(readCanvas(canvasMessage(ID, url), ID)?.url, null, url);
   }
-  const variants = readCanvas(
-    canvasMessage(ID, VIDEO, [[256, 144, 'https://evil.example/256.mp4']]),
+  const stills = readCanvas(
+    canvasMessage(ID, VIDEO, [[256, 144, 'https://evil.example/256.jpg']]),
     ID,
-  )?.variants;
-  assert.deepEqual(variants, []);
+  )?.thumbnails;
+  assert.deepEqual(stills, []);
 });
 
 test('a reply that is not protobuf throws', () => {
@@ -198,11 +200,11 @@ test('a Canvas is due when never asked, and again after a week — "none" includ
   const now = Date.now();
   assert.equal(canvasIsDue(null, ID, now), true);
 
-  const none = { spotifyId: ID, url: null, variants: [] };
+  const none = { spotifyId: ID, url: null, thumbnails: [] };
   assert.equal(canvasIsDue(extrasWith(none, now - 1_000), ID, now), false);
   assert.equal(canvasIsDue(extrasWith(none, now - CANVAS_RECHECK_MS - 1), ID, now), true);
 
-  const found = { spotifyId: ID, url: VIDEO, variants: [] };
+  const found = { spotifyId: ID, url: VIDEO, thumbnails: [] };
   assert.equal(canvasIsDue(extrasWith(found, now - 1_000), ID, now), false);
   assert.equal(canvasIsDue(extrasWith(found, now - CANVAS_RECHECK_MS - 1), ID, now), true);
 });
@@ -218,24 +220,33 @@ test('never due without a real Spotify id', () => {
 test('an answer replaces the last one, and a re-check that changed nothing is not an update', () => {
   const store = new Store(':memory:');
   const key = `sp:${ID}`;
-  store.saveCanvas(key, { spotifyId: ID, url: VIDEO, variants: [] }, 1_000);
-  store.saveCanvas(key, { spotifyId: ID, url: VIDEO, variants: [] }, 2_000);
+  store.saveCanvas(key, { spotifyId: ID, url: VIDEO, thumbnails: [] }, 1_000);
+  store.saveCanvas(key, { spotifyId: ID, url: VIDEO, thumbnails: [] }, 2_000);
   let held = store.extras(key, { hit: false })!;
   assert.equal(held.canvasCheckedAt, 2_000);
   assert.equal(held.updatedAt, 1_000);
 
   // Removed since: the old URL must not survive.
-  store.saveCanvas(key, { spotifyId: ID, url: null, variants: [] }, 3_000);
+  store.saveCanvas(key, { spotifyId: ID, url: null, thumbnails: [] }, 3_000);
   held = store.extras(key, { hit: false })!;
   assert.equal(held.canvas?.url, null);
   assert.equal(held.updatedAt, 3_000);
+});
+
+test('a Canvas stored before the stills were identified reads with them the right way round', () => {
+  const store = new Store(':memory:');
+  const legacy = { spotifyId: ID, url: VIDEO, variants: [{ width: 256, height: 144, url: 'https://i.scdn.co/image/a' }] };
+  store.saveCanvas(`sp:${ID}`, legacy as unknown as StoredCanvas);
+  const canvas = store.extras(`sp:${ID}`, { hit: false })?.canvas as unknown as Record<string, unknown>;
+  assert.deepEqual(canvas.thumbnails, [{ width: 144, height: 256, url: 'https://i.scdn.co/image/a' }]);
+  assert.equal(canvas.variants, undefined);
 });
 
 test('a Canvas does not disturb the rest of the extras', () => {
   const store = new Store(':memory:');
   const key = `sp:${ID}`;
   store.saveExtras({ key, title: 'Song', artist: 'Someone', tempo: 120, source: 'spotify' });
-  store.saveCanvas(key, { spotifyId: ID, url: VIDEO, variants: [] });
+  store.saveCanvas(key, { spotifyId: ID, url: VIDEO, thumbnails: [] });
   store.saveExtras({ key, coverUrl: 'https://i.scdn.co/image/c', source: 'applemusic' });
   const held = store.extras(key, { hit: false })!;
   assert.equal(held.tempo, 120);
@@ -248,7 +259,7 @@ test('the backfill queue is Spotify-keyed tracks without a current answer', () =
   const now = Date.now();
   store.saveExtras({ key: `sp:${ID}`, title: 'Fresh', source: 'spotify' });
   store.saveExtras({ key: `sp:${OTHER}`, title: 'Checked', source: 'spotify' });
-  store.saveCanvas(`sp:${OTHER}`, { spotifyId: OTHER, url: null, variants: [] }, now);
+  store.saveCanvas(`sp:${OTHER}`, { spotifyId: OTHER, url: null, thumbnails: [] }, now);
   store.saveExtras({ key: 'q:song|someone|100', title: 'No id', source: 'applemusic' });
   assert.deepEqual(store.keysNeedingCanvas(now - CANVAS_RECHECK_MS), [`sp:${ID}`]);
   assert.deepEqual(
@@ -311,7 +322,7 @@ test('the request is the entity URI as protobuf, with the player token', async (
 test('a failed request records nothing, so a held Canvas survives it', async () => {
   stubSpotify();
   const { store, config } = withToken();
-  store.saveCanvas(`sp:${ID}`, { spotifyId: ID, url: VIDEO, variants: [] }, 1_000);
+  store.saveCanvas(`sp:${ID}`, { spotifyId: ID, url: VIDEO, thumbnails: [] }, 1_000);
 
   for (const status of [401, 500]) {
     reply = () => new Response('{"error":"no"}', { status });
@@ -327,7 +338,7 @@ test('a failed request records nothing, so a held Canvas survives it', async () 
 test('an empty reply is no answer either, so it does not record "none"', async () => {
   stubSpotify();
   const { store, config } = withToken();
-  store.saveCanvas(`sp:${ID}`, { spotifyId: ID, url: VIDEO, variants: [] }, 1_000);
+  store.saveCanvas(`sp:${ID}`, { spotifyId: ID, url: VIDEO, thumbnails: [] }, 1_000);
 
   reply = () => protobuf(new Uint8Array(0));
   assert.equal((await harvestCanvas(store, config, `sp:${ID}`, ID, quiet)).canvas, null);
@@ -481,28 +492,28 @@ test('a Canvas request that failed is not retried on every play', async () => {
 // ---- serving it -----------------------------------------------------------
 
 test('/v1/extras serves the Canvas for the Spotify id asked about', async () => {
-  const small = { width: 256, height: 144, url: 'https://canvaz.scdn.co/small.mp4' };
-  app.store.saveCanvas(`sp:${ID}`, { spotifyId: ID, url: VIDEO, variants: [small] });
+  const small = { width: 144, height: 256, url: 'https://i.scdn.co/image/small' };
+  app.store.saveCanvas(`sp:${ID}`, { spotifyId: ID, url: VIDEO, thumbnails: [small] });
 
   const body = (await (
     await realFetch(`${base}/v1/extras?title=Song&spotifyId=${ID}`)
   ).json()) as Record<string, unknown>;
   assert.equal(body.canvasUrl, VIDEO);
-  assert.deepEqual(body.canvasVariants, [small]);
+  assert.deepEqual(body.canvasThumbnails, [small]);
 });
 
 test('/v1/extras never serves a Canvas recorded for another id, or one recorded as none', async () => {
   // Written under one key for a different id — only possible by a bug, and exactly what must not show.
-  app.store.saveCanvas(`sp:${OTHER}`, { spotifyId: ID, url: VIDEO, variants: [] });
+  app.store.saveCanvas(`sp:${OTHER}`, { spotifyId: ID, url: VIDEO, thumbnails: [] });
   let body = (await (
     await realFetch(`${base}/v1/extras?title=Song&spotifyId=${OTHER}`)
   ).json()) as Record<string, unknown>;
   assert.equal(body.canvasUrl, undefined);
 
-  app.store.saveCanvas(`sp:${ID}`, { spotifyId: ID, url: null, variants: [] });
+  app.store.saveCanvas(`sp:${ID}`, { spotifyId: ID, url: null, thumbnails: [] });
   body = (await (
     await realFetch(`${base}/v1/extras?title=Song&spotifyId=${ID}`)
   ).json()) as Record<string, unknown>;
   assert.equal(body.canvasUrl, undefined);
-  assert.equal(body.canvasVariants, undefined);
+  assert.equal(body.canvasThumbnails, undefined);
 });

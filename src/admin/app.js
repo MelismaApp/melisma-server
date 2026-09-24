@@ -1606,8 +1606,8 @@ function extrasCard(extras) {
   if (extras.coverUrl) stored.push(linkRow('Cover', extras.coverUrl));
   if (extras.artistImageUrl) stored.push(linkRow('Artist image', extras.artistImageUrl));
   if (canvasUrl) stored.push(linkRow('Canvas', canvasUrl));
-  for (const variant of canvas?.variants ?? []) {
-    stored.push(linkRow(`Canvas ${variant.width}×${variant.height}`, variant.url));
+  for (const still of canvas?.thumbnails ?? []) {
+    stored.push(linkRow(`Canvas still ${still.width}×${still.height}`, still.url));
   }
   if (canvas) {
     stored.push(
@@ -1658,7 +1658,7 @@ function extrasCard(extras) {
         }),
       ),
       // Played, like the artwork is shown: whether it is the right video is only obvious by looking.
-      canvasUrl ? canvasPreview(canvas.variants?.[0]?.url ?? canvasUrl, canvasUrl) : null,
+      canvasUrl ? canvasPreview(canvasUrl, canvas.thumbnails?.[0]?.url) : null,
       palette
         ? el(
             'div',
@@ -1722,17 +1722,19 @@ function extrasCard(extras) {
 }
 
 /**
- * The Canvas, looping, at the smallest size stored. Muted through the property: the attribute does
- * not mute a video made in script, and the browser only autoplays one that is muted.
+ * The Canvas, looping, with its smallest still showing until the video loads. Muted through the
+ * property: the attribute does not mute a video made in script, and the browser only autoplays one
+ * that is muted.
  */
-function canvasPreview(src, title) {
+function canvasPreview(src, poster) {
   const video = el('video', {
     src,
+    ...(poster ? { poster } : {}),
     loop: '',
     autoplay: '',
     playsinline: '',
     preload: 'metadata',
-    title,
+    title: src,
     style:
       'width: 61px; height: 108px; object-fit: cover; border-radius: 8px; ' +
       'border: 1px solid var(--line); flex: none; background: var(--bg)',
