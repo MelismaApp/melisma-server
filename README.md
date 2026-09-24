@@ -118,6 +118,20 @@ Rotating invalidates the old key immediately: the admin page asks again on its n
 app needs the new value.
 </details>
 
+<details>
+<summary><b>A key per person or device</b></summary>
+
+**Users** in the admin page makes a key for each phone or person, beside the admin key. It goes in
+the app's cache server key field and looks lyrics up exactly as the admin key does, from the same
+shared cache. Signing in to the admin page with it shows only the songs asked for with that key,
+under **Cache**, with **Recently asked** and **Most asked for** counting that key's lookups alone.
+
+It reaches nothing else: not the tokens, the settings, the log, the source tests, or anything that
+spends the server's tokens or changes the cache. A key is shown once and kept only as a hash, and
+**Revoke** ends it and every page session opened with it. The admin key keeps working everywhere,
+the app included, and the admin sees every song, or anyone's with **Asked by**.
+</details>
+
 ## Point the app at it
 
 In Melisma: **Settings → Developer**
@@ -125,7 +139,7 @@ In Melisma: **Settings → Developer**
 | Field | Value |
 |---|---|
 | **Cache server URL** | `http://<your-machine>:8787` — no trailing slash, no `/v1` |
-| **Cache server key** | only needed if the server is **not** on your own network |
+| **Cache server key** | the admin key, or one from **Users**. Only needed if the server is **not** on your own network |
 
 A lookup from your own machine or your own Wi-Fi is let through without a key, because a lookup can
 only cause a lyric fetch. Anything [deployed](#deploying-it) off your network always wants the key.
@@ -252,7 +266,8 @@ structured model with its provenance and candidate list; `format=ttml` the bare 
 `cache`, `remerge`, `network` or `absent`.
 
 Authentication follows what a route can reach: `/admin/*` always needs the key, since it is the only
-surface that can read a credential, while a lookup is let through from your own network.
+surface that can read a credential, while a lookup is let through from your own network. A user key
+reaches the lookups and a read-only view of its own songs; everything else answers `403`.
 
 **Full contract → [docs/CACHE-SERVER.md](docs/CACHE-SERVER.md).**
 
@@ -273,8 +288,8 @@ the wrong song far more often than an ISRC does.
 
 Caching solves the rate limit. It does not solve the licence: lyrics fetched with your
 `media-user-token` are licensed to *you*, and a server answering for other people is redistributing
-Apple's content however the bytes got there. One person, their own tokens, their own device is a
-defensible line. Account termination is the ordinary outcome of the alternative.
+Apple's content however the bytes got there. One person, their own tokens, their own devices is a
+defensible line, and that is what user keys are for: your phones, or your household. Account termination is the ordinary outcome of the alternative.
 
 The version of this idea that *does* help other people already exists: the
 [AMLL TTML Database](https://github.com/amll-dev/amll-ttml-db) is CC0, community-made, and exactly

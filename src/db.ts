@@ -13,6 +13,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -175,6 +176,8 @@ export interface LibraryRow {
   /** When the track was first seen, as opposed to last touched. */
   createdAt: number;
   lastHitAt: number | null;
+  /** The last request for it; what "recently asked" sorts by. */
+  askedAt: number | null;
   updatedAt: number;
 }
 
@@ -182,11 +185,31 @@ export interface LibraryQuery {
   search?: string;
   /** Search the lyric text as well as the title, artist and album. */
   inLyrics?: boolean;
-  sort?: 'song' | 'recent' | 'hits' | 'lines' | 'added';
+  sort?: 'song' | 'recent' | 'hits' | 'lines' | 'added' | 'asked';
   /** Only songs missing something, for finding the gaps. */
   missing?: 'lyrics' | 'extras' | 'syllables' | 'translation' | 'isrc' | 'analysis';
+  /** Only songs this user asked for (0 is the admin key), with their counts rather than everybody's. */
+  askedBy?: number;
   limit?: number;
   offset?: number;
+}
+
+/** Somebody's own key, beside the admin one. */
+export interface User {
+  id: number;
+  name: string;
+  /** The key's last four characters. The key itself is not kept. */
+  keyHint: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+  /** How many tracks they have asked for. */
+  tracks: number;
+}
+
+/** User keys are random and long, so a fast hash is enough: there is nothing to guess. */
+export function hashKey(key: string): string {
+  return createHash('sha256').update(key).digest('hex');
 }
 
 export interface LogEvent {
@@ -349,6 +372,32 @@ export class Store {
       );
 
       CREATE INDEX IF NOT EXISTS events_at ON events (at DESC);
+
+      -- A key per person or device, beside the admin key. Only a hash is kept: a key is shown once,
+      -- when it is made, and a copy of this file must not be a way in.
+      CREATE TABLE IF NOT EXISTS users (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        name         TEXT NOT NULL,
+        key_hash     TEXT NOT NULL UNIQUE,
+        -- The key's last four characters, to tell two keys apart in the list.
+        key_hint     TEXT NOT NULL,
+        created_at   INTEGER NOT NULL,
+        last_used_at INTEGER,
+        revoked_at   INTEGER
+      );
+
+      -- Who asked for which track. The cache is shared; this is what makes it "mine" for a user.
+      -- user_id 0 is the admin key, and a lookup from the local network without one.
+      CREATE TABLE IF NOT EXISTS requests (
+        user_id  INTEGER NOT NULL,
+        key      TEXT NOT NULL,
+        first_at INTEGER NOT NULL,
+        last_at  INTEGER NOT NULL,
+        count    INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (user_id, key)
+      );
+
+      CREATE INDEX IF NOT EXISTS requests_key ON requests (key);
     `);
 
     // Columns added after the table first shipped. SQLite has no `ADD COLUMN IF NOT EXISTS`, and
@@ -718,6 +767,93 @@ export class Store {
       .run(Date.now(), key);
   }
 
+  // ---- users -------------------------------------------------------------
+
+  /** `key` is hashed here and not kept; the caller shows it once. */
+  createUser(name: string, key: string, at = Date.now()): User {
+    const result = this.db
+      .prepare('INSERT INTO users (name, key_hash, key_hint, created_at) VALUES (?, ?, ?, ?)')
+      .run(name, hashKey(key), key.slice(-4), at);
+    return this.userById(Number(result.lastInsertRowid))!;
+  }
+
+  /** Every user, revoked ones included, newest first. */
+  listUsers(): User[] {
+    const rows = this.db
+      .prepare(`${USER_SELECT} ORDER BY u.revoked_at IS NOT NULL, u.created_at DESC`)
+      .all() as Record<string, unknown>[];
+    return rows.map(toUser);
+  }
+
+  /** Revoked users too, so a caller holding a session can see that it has ended. */
+  userById(id: number): User | null {
+    const row = this.db.prepare(`${USER_SELECT} WHERE u.id = ?`).get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? toUser(row) : null;
+  }
+
+  /** The user a key belongs to, if it is theirs and not revoked. */
+  userByKey(key: string): User | null {
+    if (!key) return null;
+    const row = this.db
+      .prepare(`${USER_SELECT} WHERE u.key_hash = ? AND u.revoked_at IS NULL`)
+      .get(hashKey(key)) as Record<string, unknown> | undefined;
+    return row ? toUser(row) : null;
+  }
+
+  revokeUser(id: number, at = Date.now()): boolean {
+    const result = this.db
+      .prepare('UPDATE users SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+      .run(at, id);
+    return Number(result.changes) > 0;
+  }
+
+  /** At most once a minute, since every lookup would otherwise be a write. */
+  touchUser(id: number, at = Date.now()): void {
+    this.db
+      .prepare(
+        'UPDATE users SET last_used_at = ? WHERE id = ? AND COALESCE(last_used_at, 0) < ?',
+      )
+      .run(at, id, at - 60_000);
+  }
+
+  /** A lookup, by whoever made it. `userId` 0 is the admin key. */
+  recordRequest(userId: number, key: string, at = Date.now()): void {
+    this.db
+      .prepare(
+        `INSERT INTO requests (user_id, key, first_at, last_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(user_id, key) DO UPDATE SET last_at = excluded.last_at, count = count + 1`,
+      )
+      .run(userId, key, at, at);
+  }
+
+  hasAsked(userId: number, key: string): boolean {
+    return Boolean(
+      this.db.prepare('SELECT 1 FROM requests WHERE user_id = ? AND key = ?').get(userId, key),
+    );
+  }
+
+  /** The counters a user's own page shows. */
+  userStats(userId: number): { tracks: number; found: number; misses: number; hits: number } {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS tracks,
+                COALESCE(SUM(e.merged IS NOT NULL), 0) AS found,
+                COALESCE(SUM(e.key IS NOT NULL AND e.merged IS NULL), 0) AS misses,
+                COALESCE(SUM(r.count), 0) AS hits
+           FROM requests r LEFT JOIN entries e ON e.key = r.key
+          WHERE r.user_id = ?`,
+      )
+      .get(userId) as Record<string, number>;
+    return {
+      tracks: Number(row.tracks),
+      found: Number(row.found),
+      misses: Number(row.misses),
+      hits: Number(row.hits),
+    };
+  }
+
   /**
    * Forgets a track, in one of two senses.
    *
@@ -820,7 +956,23 @@ export class Store {
       hits: 'hits DESC, updated_at DESC',
       lines: 'LENGTH(COALESCE(lyrics, \'\')) DESC',
       added: 'created_at DESC',
+      asked: 'asked_at DESC',
     }[query.sort ?? 'song'];
+
+    // Scoped to one asker, the counts and times are theirs rather than everybody's. Unscoped, the last
+    // request from anyone, and before requests were recorded, the last cache hit or first sighting.
+    const scoped = query.askedBy !== undefined;
+    const asked = scoped
+      ? 'mine.count AS hits, mine.last_at AS last_hit_at, mine.last_at AS asked_at'
+      : `COALESCE(e.hits, 0) + COALESCE(x.hits, 0) AS hits,
+          e.last_hit_at AS last_hit_at,
+          COALESCE(
+            (SELECT MAX(r.last_at) FROM requests r WHERE r.key = k.key),
+            e.last_hit_at,
+            NULLIF(e.created_at, 0),
+            x.created_at
+          ) AS asked_at`;
+    const cteParams = scoped ? [query.askedBy!] : [];
 
     // One expression for the row shape, used by both the count and the page, so a filter can
     // never mean two different things depending on which one applied it.
@@ -837,13 +989,12 @@ export class Store {
           COALESCE(e.isrc, x.isrc)                                AS isrc,
           e.merged                                                AS lyrics,
           COALESCE(e.merge_version, 0)                            AS merge_version,
-          COALESCE(e.hits, 0) + COALESCE(x.hits, 0)               AS hits,
+          ${asked},
           MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0)) AS updated_at,
           MIN(
             COALESCE(NULLIF(e.created_at, 0), 9e18),
             COALESCE(NULLIF(x.created_at, 0), 9e18)
           )                                                       AS created_at,
-          e.last_hit_at                                           AS last_hit_at,
           x.updated_at                                            AS extras_updated_at,
           x.cover_url, x.artist_image_url, x.tempo, x.canvas,
           x.palette, x.analysis, x.metadata, x.source             AS extras_source,
@@ -853,10 +1004,12 @@ export class Store {
         FROM (SELECT key FROM entries UNION SELECT key FROM extras) k
         LEFT JOIN entries e ON e.key = k.key
         LEFT JOIN extras  x ON x.key = k.key
+        ${scoped ? 'JOIN requests mine ON mine.key = k.key AND mine.user_id = ?' : ''}
       )
       SELECT * FROM song
       ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
     `;
+    params.unshift(...cteParams);
 
     const totalRow = this.db
       .prepare(`SELECT COUNT(*) AS n FROM (${base})`)
@@ -1169,6 +1322,22 @@ export class Store {
   }
 }
 
+const USER_SELECT = `
+  SELECT u.*, (SELECT COUNT(*) FROM requests r WHERE r.user_id = u.id) AS tracks
+    FROM users u`;
+
+function toUser(row: Record<string, unknown>): User {
+  return {
+    id: Number(row.id),
+    name: String(row.name ?? ''),
+    keyHint: String(row.key_hint ?? ''),
+    createdAt: Number(row.created_at ?? 0),
+    lastUsedAt: (row.last_used_at as number | null) ?? null,
+    revokedAt: (row.revoked_at as number | null) ?? null,
+    tracks: Number(row.tracks ?? 0),
+  };
+}
+
 function toLibraryRow(row: Record<string, unknown>): LibraryRow {
   const merged = parseJson(row.lyrics);
   const lines = Array.isArray(merged?.lines) ? (merged!.lines as Record<string, unknown>[]) : [];
@@ -1227,6 +1396,7 @@ function toLibraryRow(row: Record<string, unknown>): LibraryRow {
     hits: Number(row.hits ?? 0),
     createdAt: Number(row.created_at ?? 0) < 9e17 ? Number(row.created_at ?? 0) : 0,
     lastHitAt: (row.last_hit_at as number | null) ?? null,
+    askedAt: (row.asked_at as number | null) ?? null,
     updatedAt: Number(row.updated_at ?? 0),
   };
 }

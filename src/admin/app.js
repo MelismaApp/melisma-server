@@ -63,6 +63,21 @@ function showApp() {
   $('#app').hidden = false;
 }
 
+/**
+ * Whose page this is. A user's key opens the library on their own songs and nothing else; the server
+ * enforces that, and this only stops the page offering what would be refused.
+ */
+let role = 'admin';
+
+async function applyRole() {
+  const me = await api('/admin/api/me');
+  role = me.role;
+  document.body.classList.toggle('user', role === 'user');
+  const who = $('#whoami');
+  who.hidden = role !== 'user';
+  who.textContent = role === 'user' ? me.name : '';
+}
+
 $('#login-go').addEventListener('click', async () => {
   const apiKey = $('#login-key').value.trim();
   if (!apiKey) return;
@@ -71,7 +86,12 @@ $('#login-go').addEventListener('click', async () => {
     $('#login-key').value = '';
     showApp();
     await boot();
-  } catch {
+  } catch (error) {
+    if (error.message !== 'locked') {
+      // Signed in, then something on the way failed: say what, rather than blaming the key.
+      toast(error.message, true);
+      return;
+    }
     toast('That key was not accepted', true);
   }
 });
@@ -82,6 +102,11 @@ $('#login-key').addEventListener('keydown', (event) => {
 
 $('#logout').addEventListener('click', async () => {
   await api('/admin/api/logout', { method: 'POST' }).catch(() => {});
+  // Nothing of the last person's stays on the page for the next one.
+  $('#cache-table tbody').replaceChildren();
+  $('#entry-detail').replaceChildren();
+  logStream?.close();
+  logStream = null;
   showLogin();
 });
 
@@ -92,6 +117,7 @@ $$('#tabs button').forEach((button) => {
 });
 
 function selectTab(name) {
+  if (role === 'user') name = 'cache';
   $$('#tabs button').forEach((button) =>
     button.setAttribute('aria-selected', String(button.dataset.tab === name)),
   );
@@ -102,6 +128,7 @@ function selectTab(name) {
   if (name === 'cache') void loadCache();
   if (name === 'tokens') void loadRefresh();
   if (name === 'log') startLog();
+  if (name === 'users') void loadUsers();
 }
 
 // ---- sources --------------------------------------------------------------
@@ -632,6 +659,7 @@ function libraryQuery() {
     inLyrics: $('#library-in-lyrics').checked ? '1' : '0',
     sort: $('#library-sort').value,
     missing: $('#library-missing').value,
+    askedBy: role === 'admin' ? $('#library-asked-by').value : '',
     limit: String(LIBRARY_PAGE),
     offset: String(libraryOffset),
   }).toString();
@@ -1028,6 +1056,16 @@ for (const [id, everything, label] of [
  * this would drift, and the one that drifted would be the one nobody watches.
  */
 function renderStats(stats) {
+  if (role === 'user') {
+    $('#cache-stats').replaceChildren(
+      stat(stats.tracks, 'songs asked for'),
+      stat(stats.found, 'with lyrics'),
+      stat(stats.misses, 'nobody had lyrics for'),
+      stat(stats.hits, 'lookups'),
+    );
+    $('#header-stats').textContent = `${stats.tracks} songs · ${stats.found} with lyrics`;
+    return;
+  }
   // Filtered for the same reason as the pager below: a `null` argument to `replaceChildren` is
   // coerced to the text "null", so with nothing stale the row ended "0.2 MB null".
   $('#cache-stats').replaceChildren(
@@ -1103,7 +1141,7 @@ async function loadCache() {
         el('td', {
           class: 'num',
           text: String(row.hits),
-          title: row.lastHitAt ? `last asked for ${when(row.lastHitAt)}` : 'never asked for',
+          title: row.askedAt ? `last asked for ${when(row.askedAt)}` : 'never asked for',
         }),
         el('td', { class: 'desc' }, [
           el('div', { text: when(row.updatedAt) }),
@@ -1260,6 +1298,7 @@ $('#cache-search').addEventListener('input', debounce(reloadLibrary, 250));
 $('#library-in-lyrics').addEventListener('change', reloadLibrary);
 $('#library-sort').addEventListener('change', reloadLibrary);
 $('#library-missing').addEventListener('change', reloadLibrary);
+$('#library-asked-by').addEventListener('change', reloadLibrary);
 $('#cache-backfill-isrc').addEventListener('click', async (event) => {
   const button = event.target;
   button.disabled = true;
@@ -1315,7 +1354,7 @@ async function showEntry(key) {
   const title = about.title || '(no title)';
   const artist = about.artist || '';
 
-  host.replaceChildren(
+  host.replaceChildren(...[
     el('h2', { text: artist ? `${artist} — ${title}` : title }),
     el('div', { class: 'card' }, [
       el('div', { class: 'desc mono', text: key }),
@@ -1339,7 +1378,7 @@ async function showEntry(key) {
           ])
         : el('div', { class: 'desc', text: 'No lyrics were found for this track.' }),
       el('div', { class: 'inline', style: 'margin-top: 12px' }, [
-        el('button', {
+        role === 'admin' ? el('button', {
           class: 'action',
           text: 'Re-merge',
           onclick: async () => {
@@ -1348,12 +1387,10 @@ async function showEntry(key) {
             await showEntry(key);
             await loadCache();
           },
-        }),
+        }) : null,
         el('a', {
           class: 'action',
-          href: `/v1/lyrics?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(
-            artist,
-          )}&durationMs=${data.entry?.durationMs ?? 0}&format=ttml`,
+          href: `/v1/lyrics?${downloadQuery(key, title, artist, data.entry?.durationMs ?? 0)}`,
           target: '_blank',
           rel: 'noreferrer',
           text: 'Download TTML',
@@ -1361,7 +1398,7 @@ async function showEntry(key) {
         }),
         // Two buttons because there are two intents, and one of them is destructive in a way that
         // cannot be undone: the audio analysis came from an endpoint Spotify has since withdrawn.
-        el('button', {
+        role === 'admin' ? el('button', {
           class: 'action danger',
           text: 'Forget the lyrics',
           title: 'Drops the merged lyrics and the archived responses. Artwork and analysis stay.',
@@ -1371,8 +1408,8 @@ async function showEntry(key) {
             host.replaceChildren();
             await loadCache();
           },
-        }),
-        data.extras
+        }) : null,
+        data.extras && role === 'admin'
           ? el('button', {
               class: 'action danger',
               text: 'Forget everything',
@@ -1449,8 +1486,26 @@ async function showEntry(key) {
     data.extras ? extrasCard(data.extras) : null,
 
     data.merged ? el('div', { class: 'card lyric-preview' }, preview(data.merged)) : null,
-  );
+    // `replaceChildren` prints a null as the text "null", so a track with nothing archived, no extras
+    // and no lyrics ended in "nullnullnull".
+  ].filter(Boolean));
   host.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/**
+ * The query that fetches exactly this cached entry.
+ *
+ * By the id in its key, because a track cached under its Spotify id or ISRC has a different key from
+ * its title and artist: asking by name missed the cache and ran a fresh lookup. Cache-only, so a
+ * download never spends a request.
+ */
+function downloadQuery(key, title, artist, durationMs) {
+  const params = new URLSearchParams({ title, artist, durationMs: String(durationMs) });
+  if (key.startsWith('sp:')) params.set('spotifyId', key.slice(3));
+  else if (key.startsWith('isrc:')) params.set('isrc', key.slice(5));
+  params.set('format', 'ttml');
+  params.set('cacheOnly', '1');
+  return params.toString();
 }
 
 /**
@@ -1833,6 +1888,99 @@ $('#log-level').addEventListener('change', () => void refreshLog());
 $('#log-search').addEventListener('input', debounce(() => void refreshLog(), 250));
 
 
+// ---- users ----------------------------------------------------------------
+
+async function loadUsers() {
+  const { users } = await api('/admin/api/users');
+  const body = $('#users-table tbody');
+  body.replaceChildren(
+    ...users.map((user) =>
+      el('tr', {}, [
+        el('td', {}, [
+          el('span', { text: user.name }),
+          user.revokedAt ? el('span', { class: 'pill', text: 'revoked', style: 'margin-left: 8px' }) : null,
+        ]),
+        el('td', { class: 'mono desc', text: `…${user.keyHint}` }),
+        el('td', { class: 'num', text: String(user.tracks) }),
+        el('td', { class: 'desc', text: user.lastUsedAt ? when(user.lastUsedAt) : 'never' }),
+        el('td', { class: 'desc', text: when(user.createdAt) }),
+        el('td', {}, [
+          user.revokedAt
+            ? null
+            : el('button', {
+                class: 'action danger',
+                text: 'Revoke',
+                onclick: async () => {
+                  if (!confirm(`Revoke the key for ${user.name}? Anything using it stops working.`)) return;
+                  await api('/admin/api/users/revoke', {
+                    method: 'POST',
+                    body: JSON.stringify({ id: user.id }),
+                  });
+                  toast(`Revoked ${user.name}`);
+                  await loadUsers();
+                },
+              }),
+        ]),
+      ]),
+    ),
+  );
+  if (users.length === 0) {
+    body.append(el('tr', {}, [el('td', { colspan: '6', class: 'desc', text: 'No keys yet.' })]));
+  }
+  renderAskedBy(users);
+}
+
+/** The library's "asked by" choices, kept in step with the users. */
+function renderAskedBy(users) {
+  const select = $('#library-asked-by');
+  const current = select.value;
+  select.replaceChildren(
+    el('option', { value: '', text: 'Asked by anyone' }),
+    el('option', { value: '0', text: 'Asked with the admin key' }),
+    ...users.map((user) =>
+      el('option', { value: String(user.id), text: `Asked by ${user.name}${user.revokedAt ? ' (revoked)' : ''}` }),
+    ),
+  );
+  select.value = [...select.options].some((option) => option.value === current) ? current : '';
+}
+
+$('#user-add').addEventListener('click', async () => {
+  const name = $('#user-name').value.trim();
+  if (!name) return toast('Give the key a name', true);
+  try {
+    const { user, key } = await api('/admin/api/users', { method: 'POST', body: JSON.stringify({ name }) });
+    $('#user-name').value = '';
+    $('#user-new-name').textContent = user.name;
+    $('#user-new-key').value = key;
+    $('#user-new').hidden = false;
+    $('#user-new-key').select();
+    await loadUsers();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
+$('#user-name').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') $('#user-add').click();
+});
+
+$('#user-new-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('#user-new-key').value);
+    toast('Copied');
+  } catch {
+    // Clipboard access needs a secure context; the field is selected, so copying by hand works.
+    $('#user-new-key').select();
+    toast('Select and copy it by hand', true);
+  }
+});
+
+// Cleared, not only hidden: the key should not sit in the page after it has been copied.
+$('#user-new-done').addEventListener('click', () => {
+  $('#user-new-key').value = '';
+  $('#user-new').hidden = true;
+});
+
 // ---- odds and ends --------------------------------------------------------
 
 function stat(value, label) {
@@ -1873,8 +2021,15 @@ function debounce(fn, ms) {
 }
 
 async function boot() {
+  await applyRole();
+  if (role === 'user') {
+    // Their library, and nothing that would only be refused: no config, no log, no live stream.
+    selectTab('cache');
+    return;
+  }
   await loadConfig();
   await refreshCounters();
+  await api('/admin/api/users').then(({ users }) => renderAskedBy(users)).catch(() => {});
   // A run started before this page was opened, or before it was reloaded, still has a readout — and the
   // readout is in the header, so it is worth having before a tab is even chosen.
   await api('/admin/api/relookup').then(renderRelookup).catch(() => {});

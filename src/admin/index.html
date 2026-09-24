@@ -12,11 +12,11 @@
     <div class="card" id="login" hidden>
       <h1>Melisma Server</h1>
       <p class="hint">
-        The key is printed in the terminal when the server starts. It is also what the app
-        sends, so keep it to yourself.
+        The admin key is printed in the terminal when the server starts. A key made under
+        <strong>Users</strong> works too, and shows the songs asked for with it.
       </p>
       <label class="field">
-        <span>API key</span>
+        <span>Key</span>
         <input type="password" id="login-key" class="mono" autocomplete="current-password" />
       </label>
       <button class="action primary" id="login-go">Unlock</button>
@@ -27,6 +27,7 @@
         <h1>Melisma Server</h1>
         <span class="sub" id="header-stats"></span>
         <span class="spacer"></span>
+        <span class="pill" id="whoami" hidden></span>
         <span class="pill" id="relookup-state" hidden></span>
         <button class="action" id="relookup-pause" hidden>Pause</button>
         <button class="action" id="relookup-stop" hidden>Stop</button>
@@ -34,12 +35,13 @@
       </header>
 
       <nav id="tabs">
-        <button data-tab="sources" aria-selected="true">Sources</button>
-        <button data-tab="tokens">Tokens</button>
+        <button data-tab="sources" data-admin aria-selected="true">Sources</button>
+        <button data-tab="tokens" data-admin>Tokens</button>
         <button data-tab="cache">Cache</button>
-        <button data-tab="try">Try a track</button>
-        <button data-tab="log">Log</button>
-        <button data-tab="settings">Settings</button>
+        <button data-tab="try" data-admin>Try a track</button>
+        <button data-tab="log" data-admin>Log</button>
+        <button data-tab="users" data-admin>Users</button>
+        <button data-tab="settings" data-admin>Settings</button>
       </nav>
 
       <main>
@@ -255,7 +257,11 @@
         <!-- ---- cache ------------------------------------------------------ -->
         <section id="tab-cache" hidden>
           <h2>Library</h2>
-          <p class="hint">
+          <p class="hint" data-user>
+            The songs asked for with your key, and everything the server holds on each. Sort by
+            <strong>Recently asked</strong> to see what was playing lately.
+          </p>
+          <p class="hint" data-admin>
             Every song the server has been asked about, and everything it holds on each — the
             merged lyrics, every provider's raw response, and the artwork, palette, tempo and
             analysis the tokens turned up. Ordered by artist and title by default.
@@ -267,7 +273,7 @@
             cannot: the player told us how long the track was, so a document running past the end of it
             describes a different recording.
           -->
-          <details class="card" id="fit-card">
+          <details class="card" id="fit-card" data-admin>
             <summary>
               <strong>Timings that do not fit the track</strong>
               <span class="pill" id="fit-state">not checked yet</span>
@@ -298,6 +304,7 @@
               <select id="library-sort" style="width: auto">
                 <option value="song">By song</option>
                 <option value="recent">Recently updated</option>
+                <option value="asked">Recently asked</option>
                 <option value="hits">Most asked for</option>
                 <option value="added">Recently added</option>
                 <option value="lines">Biggest</option>
@@ -317,7 +324,12 @@
                 <option value="isrc">Missing an ISRC</option>
                 <option value="analysis">Missing the audio analysis</option>
               </select>
+              <select id="library-asked-by" style="width: auto" data-admin>
+                <option value="">Asked by anyone</option>
+                <option value="0">Asked with the admin key</option>
+              </select>
               <span class="spacer"></span>
+              <span class="inline" data-admin style="flex-wrap: wrap; gap: 8px">
               <button class="action" id="cache-remerge">Re-merge stale</button>
               <button
                 class="action"
@@ -348,6 +360,7 @@
               >
                 Fill in Canvas
               </button>
+              </span>
             </div>
           </div>
 
@@ -447,6 +460,50 @@
             </div>
           </div>
           <div class="card" id="log"></div>
+        </section>
+
+        <!-- ---- users ------------------------------------------------------ -->
+        <section id="tab-users" hidden>
+          <h2>Users</h2>
+          <p class="hint">
+            A key per person or device, beside the admin key. It goes in the app where the admin key
+            would, looks lyrics up the same way, and opens this page on just the songs asked for with
+            it. It reaches nothing else here: not the tokens, the settings, the log, or anything that
+            changes the cache.
+          </p>
+          <div class="card">
+            <div class="inline">
+              <input type="text" id="user-name" placeholder="Whose, or which device — “Pixel 9”, “Mum”" />
+              <button class="action primary" id="user-add">Make a key</button>
+            </div>
+          </div>
+          <!-- Shown once, straight after a key is made: only a hash of it is kept. -->
+          <div class="card" id="user-new" hidden>
+            <div class="title">Key for <span id="user-new-name"></span></div>
+            <div class="desc" style="margin: 4px 0 10px">
+              Copy it now. It is not stored, so it cannot be shown again — make another if it is lost.
+            </div>
+            <div class="inline">
+              <input type="text" id="user-new-key" class="mono" readonly />
+              <button class="action" id="user-new-copy">Copy</button>
+              <button class="action" id="user-new-done">Done</button>
+            </div>
+          </div>
+          <div class="card" style="padding: 0; overflow: hidden">
+            <table id="users-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Key</th>
+                  <th class="num">Songs</th>
+                  <th>Last used</th>
+                  <th>Made</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </section>
 
         <!-- ---- settings --------------------------------------------------- -->

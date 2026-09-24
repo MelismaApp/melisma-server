@@ -6,7 +6,7 @@
  * the browser is not carrying it in a URL or a bookmark.
  *
  * There is no framework here on purpose. The whole router is one switch and it fits on a
- * screen, which is a better trade for a single-user server than a dependency tree.
+ * screen, which is a better trade for a personal server than a dependency tree.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -16,7 +16,7 @@ import { extname, join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 
 import { Settings, jwtExpiry, randomKey, SECRET_NAMES, type SecretName } from './config.ts';
-import { Store, LOG_LEVELS, type LogLevel } from './db.ts';
+import { Store, LOG_LEVELS, type LogLevel, type User } from './db.ts';
 import { Resolver, reparseByFormat } from './resolver.ts';
 import { Refresher } from './refresher.ts';
 import { MERGE_VERSION } from './merge.ts';
@@ -34,8 +34,24 @@ import { redact } from './http.ts';
 // look for a directory literally called `%20`. fileURLToPath is the one that decodes.
 const ADMIN_DIR = fileURLToPath(new URL('./admin/', import.meta.url));
 
+/**
+ * Who a request is from.
+ *
+ * `via` is how they proved it. Only a lookup made with a key is recorded as asked for: that is a
+ * device asking, where a session is somebody looking at the page, and the page's own lookups (a
+ * TTML download) are not listening to anything.
+ */
+type Principal =
+  | { role: 'admin'; via: 'key' | 'session' }
+  | { role: 'user'; user: User; via: 'key' | 'session' }
+  /** No key, from the local network, when that is allowed. Recorded as the admin's. */
+  | { role: 'local' };
+
 /** Browser sessions, in memory: a restart signing everybody out is the safe default. */
-const sessions = new Map<string, number>();
+const sessions = new Map<
+  string,
+  { expiresAt: number; principal: Exclude<Principal, { role: 'local' }> }
+>();
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 export interface App {
@@ -140,34 +156,51 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
   }
   if (method === 'POST' && path === '/admin/api/login') {
     const body = await readJson<{ apiKey?: string }>(request);
-    if (!matchesApiKey(app, body?.apiKey ?? '')) {
-      app.store.log('warn', null, 'admin login rejected');
+    const offered = body?.apiKey?.trim() ?? '';
+    const admin = matchesApiKey(app, offered);
+    const user = admin ? null : app.store.userByKey(offered);
+    if (!admin && !user) {
+      app.store.log('warn', null, 'login rejected');
       return send(response, 401, { error: 'wrong key' });
     }
     const token = randomKey();
-    sessions.set(token, Date.now() + SESSION_TTL_MS);
-    response.setHeader(
-      'Set-Cookie',
-      `bls_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`,
-    );
-    return send(response, 200, { ok: true });
+    sessions.set(token, {
+      expiresAt: Date.now() + SESSION_TTL_MS,
+      principal: user ? { role: 'user', user, via: 'session' } : { role: 'admin', via: 'session' },
+    });
+    if (user) app.store.touchUser(user.id);
+    response.setHeader('Set-Cookie', sessionCookie(request, token, SESSION_TTL_MS / 1000));
+    return send(response, 200, { ok: true, role: user ? 'user' : 'admin' });
   }
 
   // ---- authenticated -----------------------------------------------------
-  if (!isAuthorised(app, request, `${method} ${path}`)) {
-    return send(response, 401, { error: 'unauthorised' });
-  }
+  const route = `${method} ${path}`;
+  const principal = authenticate(app, request, route);
+  if (!principal) return send(response, 401, { error: 'unauthorised' });
+  if (!mayUse(principal, route)) return send(response, 403, { error: 'not with this key' });
+  if (principal.role === 'user') app.store.touchUser(principal.user.id);
 
-  switch (`${method} ${path}`) {
+  // A device's lookup is recorded against whoever's key it carried. See `Principal`.
+  const asker =
+    principal.role === 'local' || principal.via === 'key'
+      ? principal.role === 'user'
+        ? principal.user.id
+        : 0
+      : null;
+  // The user whose view this is, for the routes that show a user only their own tracks.
+  const viewer = principal.role === 'user' ? principal.user : null;
+
+  switch (route) {
     case 'GET /v1/health':
       return send(response, 200, health(app));
 
     case 'GET /v1/lyrics':
-      return lyrics(app, url, response);
+      return lyrics(app, url, response, asker);
 
     case 'POST /v1/warm': {
       const track = trackFromJson(await readJson(request));
       if (!track) return send(response, 400, { error: 'need at least a title' });
+      if (asker !== null) app.store.recordRequest(asker, cacheKey(track));
       // Fire and forget: the app is prefetching, and it is not waiting for an answer — which is
       // exactly what buys the room to find out what the recording is before asking for its words.
       void app.resolver.resolve(track, { identityFirst: true }).catch(() => undefined);
@@ -186,7 +219,34 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
     case 'POST /admin/api/logout': {
       const token = cookie(request, 'bls_session');
       if (token) sessions.delete(token);
-      response.setHeader('Set-Cookie', 'bls_session=; HttpOnly; Path=/; Max-Age=0');
+      response.setHeader('Set-Cookie', sessionCookie(request, '', 0));
+      return send(response, 200, { ok: true });
+    }
+
+    case 'GET /admin/api/me':
+      return send(response, 200, viewer ? { role: 'user', name: viewer.name } : { role: 'admin' });
+
+    case 'GET /admin/api/users':
+      return send(response, 200, { users: app.store.listUsers() });
+
+    case 'POST /admin/api/users': {
+      const body = await readJson<{ name?: string }>(request);
+      const name = body?.name?.trim().slice(0, 80);
+      if (!name) return send(response, 400, { error: 'a user needs a name' });
+      const key = randomKey();
+      const user = app.store.createUser(name, key);
+      app.store.log('info', null, `added a key for "${name}"`);
+      // The only time the key leaves the server: it is kept as a hash.
+      return send(response, 200, { user, key });
+    }
+
+    case 'POST /admin/api/users/revoke': {
+      const body = await readJson<{ id?: number }>(request);
+      const user = app.store.userById(Number(body?.id));
+      if (!user) return send(response, 404, { error: 'no such user' });
+      if (app.store.revokeUser(user.id)) {
+        app.store.log('info', null, `revoked the key for "${user.name}"`);
+      }
       return send(response, 200, { ok: true });
     }
 
@@ -369,6 +429,7 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       return send(response, 200, await app.refresher.run('manual'));
 
     case 'GET /admin/api/stats':
+      if (viewer) return send(response, 200, { ...app.store.userStats(viewer.id), mergeVersion: MERGE_VERSION });
       return send(response, 200, {
         ...app.store.stats(),
         mergeVersion: MERGE_VERSION,
@@ -385,12 +446,21 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
         return (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
       };
 
+      // A user sees their own tracks, whatever they ask for. The admin may narrow to anyone's.
+      const askedParam = url.searchParams.get('askedBy') ?? '';
+      const askedBy = viewer
+        ? viewer.id
+        : /^\d+$/.test(askedParam)
+          ? Number(askedParam)
+          : undefined;
+
       return send(response, 200, {
         ...app.store.library({
           search: url.searchParams.get('search') ?? undefined,
           inLyrics: url.searchParams.get('inLyrics') === '1',
           sort: pick('sort', LIBRARY_SORTS, 'song'),
           missing: pick('missing', LIBRARY_MISSING),
+          askedBy,
           limit: Number(url.searchParams.get('limit') ?? 50),
           offset: Number(url.searchParams.get('offset') ?? 0),
         }),
@@ -408,8 +478,13 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
 
     case 'GET /admin/api/entry': {
       const key = url.searchParams.get('key') ?? '';
+      // Not found rather than forbidden, so a user cannot learn what else is cached.
+      if (viewer && !app.store.hasAsked(viewer.id, key)) {
+        return send(response, 404, { error: 'no such entry' });
+      }
       const entry = app.store.getEntry(key);
-      const extras = app.store.extras(key);
+      // Somebody looking at the page, not somebody asking for the track.
+      const extras = app.store.extras(key, { hit: false });
       // A track can have artwork and a tempo and no lyrics anybody has written down, so either
       // half is enough to have something to show.
       if (!entry && !extras) return send(response, 404, { error: 'no such entry' });
@@ -434,6 +509,9 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
     case 'GET /admin/api/raw': {
       const key = url.searchParams.get('key') ?? '';
       const provider = url.searchParams.get('provider') ?? '';
+      if (viewer && !app.store.hasAsked(viewer.id, key)) {
+        return send(response, 404, { error: 'no such archived response' });
+      }
       const raw = app.store.getRaw(key).find((entry) => entry.provider === provider);
       if (!raw) return send(response, 404, { error: 'no such archived response' });
       response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -493,9 +571,16 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
 
 // ---- the app-facing lookup ------------------------------------------------
 
-async function lyrics(app: App, url: URL, response: ServerResponse): Promise<void> {
+async function lyrics(
+  app: App,
+  url: URL,
+  response: ServerResponse,
+  asker: number | null,
+): Promise<void> {
   const track = trackFromParams(url.searchParams);
   if (!track) return send(response, 400, { error: 'need at least a title' });
+  // Before the lookup, so a track nobody has lyrics for is still on the asker's list.
+  if (asker !== null) app.store.recordRequest(asker, cacheKey(track));
 
   const resolution = await app.resolver.resolve(track, {
     force: url.searchParams.get('force') === '1',
@@ -868,25 +953,35 @@ function trackFromJson(body: unknown): TrackQuery | null {
 }
 
 /**
- * Two different questions, so two different answers.
+ * Who is asking, or null when nobody has shown anything.
  *
- * `/admin` is the only surface that can read a credential, and it always wants the key or a
- * session. `/v1` can only cause lyric lookups, and the app that calls it is designed to send
- * no authentication at all — so a request arriving from this machine or the local network is
- * allowed through, which is what makes the app work as written without leaving the tokens or a
- * public deployment open. See `allowLocalNetwork` for the reverse-proxy caveat.
+ * `/admin` is the only surface that can read a credential, and it always wants a key or a session.
+ * `/v1` can only cause lyric lookups, and the app that calls it can be set up to send no key at
+ * all, so a request arriving from this machine or the local network is allowed through when the
+ * setting says so. See `allowLocalNetwork` for the reverse-proxy caveat. What each of these may do
+ * is `mayUse`'s question, not this one's.
  */
-function isAuthorised(app: App, request: IncomingMessage, route: string): boolean {
+function authenticate(app: App, request: IncomingMessage, route: string): Principal | null {
   const header = request.headers.authorization ?? '';
   if (header.toLowerCase().startsWith('bearer ')) {
-    return matchesApiKey(app, header.slice(7).trim());
+    const offered = header.slice(7).trim();
+    if (matchesApiKey(app, offered)) return { role: 'admin', via: 'key' };
+    // A key that is neither is an error even from here, never a reason to fall back to the local
+    // allowance: a wrong credential should fail loudly.
+    const user = app.store.userByKey(offered);
+    return user ? { role: 'user', user, via: 'key' } : null;
   }
 
   const token = cookie(request, 'bls_session');
   if (token) {
-    const expiry = sessions.get(token);
-    if (expiry && expiry >= Date.now()) return true;
-    if (expiry) sessions.delete(token);
+    const session = sessions.get(token);
+    if (session && session.expiresAt >= Date.now()) {
+      if (session.principal.role === 'admin') return session.principal;
+      // Read again rather than trusted from the session, so revoking a key ends its sessions too.
+      const user = app.store.userById(session.principal.user.id);
+      if (user && !user.revokedAt) return { role: 'user', user, via: 'session' };
+    }
+    if (session) sessions.delete(token);
   }
 
   if (LOCAL_ROUTES.has(route) && app.settings.read().allowLocalNetwork) {
@@ -895,11 +990,32 @@ function isAuthorised(app: App, request: IncomingMessage, route: string): boolea
     // loopback — so without this check the "local network" exception would let the entire
     // internet through. The header cannot be trusted to say *who* the client is, but its mere
     // presence is enough to know the socket does not.
-    if (request.headers['x-forwarded-for'] ?? request.headers.forwarded) return false;
-    return isLocalAddress(request.socket.remoteAddress);
+    if (request.headers['x-forwarded-for'] ?? request.headers.forwarded) return null;
+    return isLocalAddress(request.socket.remoteAddress) ? { role: 'local' } : null;
   }
-  return false;
+  return null;
 }
+
+/**
+ * What each kind of caller may reach. Allowlists, so a route added later is the admin's alone
+ * until somebody decides otherwise.
+ */
+function mayUse(principal: Principal, route: string): boolean {
+  if (principal.role === 'admin') return true;
+  if (principal.role === 'user') return USER_ROUTES.has(route);
+  return LOCAL_ROUTES.has(route);
+}
+
+/** The library's sort and filter options: the single definition the route validates against. */
+const LIBRARY_SORTS = ['song', 'recent', 'hits', 'lines', 'added', 'asked'] as const;
+const LIBRARY_MISSING = [
+  'lyrics',
+  'extras',
+  'syllables',
+  'translation',
+  'isrc',
+  'analysis',
+] as const;
 
 /**
  * The routes the local network may use without a key.
@@ -913,17 +1029,6 @@ function isAuthorised(app: App, request: IncomingMessage, route: string): boolea
  * `POST /v1/warm` is the exception that proves the rule: it accepts no content, only a track to
  * go and look up, so it is a read that happens to populate the cache.
  */
-/** The library's sort and filter options: the single definition the route validates against. */
-const LIBRARY_SORTS = ['song', 'recent', 'hits', 'lines', 'added'] as const;
-const LIBRARY_MISSING = [
-  'lyrics',
-  'extras',
-  'syllables',
-  'translation',
-  'isrc',
-  'analysis',
-] as const;
-
 const LOCAL_ROUTES = new Set([
   'GET /v1/lyrics',
   'GET /v1/health',
@@ -931,6 +1036,36 @@ const LOCAL_ROUTES = new Set([
   'GET /v1/status',
   'POST /v1/warm',
 ]);
+
+/**
+ * What a user's key reaches: what the app needs, and a read-only view of their own tracks.
+ *
+ * Not the settings, the tokens, the log (it names everybody's tracks), the source tests, or
+ * anything that spends the server's tokens or changes the shared cache. `/v1/contribute` writes
+ * to that cache, so it stays the admin's.
+ */
+const USER_ROUTES = new Set([
+  ...LOCAL_ROUTES,
+  'GET /admin/api/me',
+  'POST /admin/api/logout',
+  'GET /admin/api/stats',
+  'GET /admin/api/library',
+  'GET /admin/api/entry',
+  'GET /admin/api/raw',
+]);
+
+/**
+ * `Secure` when the request arrived over HTTPS, which behind a Cloudflare tunnel is what
+ * `X-Forwarded-Proto` says. Trusting the header here is harmless: the worst it can do is make the
+ * cookie stricter. Left off over plain HTTP, where a `Secure` cookie would never be sent back and a
+ * local install could not sign in.
+ */
+function sessionCookie(request: IncomingMessage, token: string, maxAgeSeconds: number): string {
+  const encrypted = Boolean((request.socket as { encrypted?: boolean }).encrypted);
+  const forwarded = String(request.headers['x-forwarded-proto'] ?? '').toLowerCase();
+  const secure = encrypted || forwarded.split(',')[0]?.trim() === 'https' ? '; Secure' : '';
+  return `bls_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}${secure}`;
+}
 
 /**
  * Whether the connecting socket is this machine or the private network.

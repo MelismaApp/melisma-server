@@ -334,3 +334,7 @@ pre {
 .lyric-preview .bg { color: var(--muted); font-size: 13px; padding-left: 20px; }
 .lyric-preview .roman { color: var(--accent); font-size: 12px; padding-left: 20px; }
 .lyric-preview .translated { color: var(--muted); font-size: 12px; padding-left: 20px; }
+
+/* A user's page: their library and nothing else. The server refuses the rest regardless. */
+body.user [data-admin] { display: none !important; }
+body:not(.user) [data-user] { display: none !important; }

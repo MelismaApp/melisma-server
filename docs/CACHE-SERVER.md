@@ -130,6 +130,27 @@ the client says it is.
 look local no matter who is really on the other end. Turn off **Settings → Allow the local
 network to look lyrics up without the key** for that, and give the app the key.
 
+### User keys
+
+Beside the admin key there can be one per person or device, made under **Users**. The app sends one
+exactly as it sends the admin key, as `Authorization: Bearer`, so nothing on the app's side changes.
+
+- **What a user key reaches** is an allowlist: the `/v1` routes the app uses, and a read-only slice
+  of the admin page (their library, an entry, its archived responses, their counters). Everything
+  else answers `403`, including any route added later, until it is listed.
+- **What it sees** is only the tracks asked for with it. The cache stays shared; a `requests` table
+  records who asked for which key, and the library, an entry and its raw bodies are filtered by it.
+  A track the user did not ask for is a `404`, so the answer says nothing about what else is cached.
+- **What counts as asked** is a lookup made with a key, or from the local network without one. A
+  page session is somebody looking, so the page's own lookups (a TTML download) are not recorded.
+  Admin-key lookups are recorded too, as user 0, which is what **Recently asked** sorts by.
+- **Keys are stored as a SHA-256 hash** and shown once. They are random 192-bit values, so a fast
+  hash is enough. **Revoke** stops the key and every session opened with it, because a session is
+  checked against the user on every request rather than trusted.
+- **The session cookie** is `HttpOnly; SameSite=Strict`, and `Secure` when the request arrived over
+  HTTPS, which behind the Cloudflare tunnel is what `X-Forwarded-Proto` says. Over plain HTTP it is
+  left off, since a local install could not sign in otherwise.
+
 ## Everything that is not the words
 
 `GET /v1/extras`, documented on the app's side. There is no write endpoint: the server collects
