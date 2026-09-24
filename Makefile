@@ -119,20 +119,20 @@ restore: ## Load a backup into the LOCAL database (FILE=melisma-....db)
 backup: ## Copy the deployed database here, timestamped
 	@# The one piece of state worth keeping: every archived provider response, and the tokens.
 	@#
-	@# Not `cat` of the file: the database is in WAL mode, and a plain copy misses every write not yet
-	@# checkpointed. See scripts/backup.ts. `umask 077` because the copy holds the tokens in the clear,
-	@# and a failed run removes its empty file rather than leaving one that looks like a backup.
+	@# Not `cat` of the file, and not Kamal's output taken as-is. The database is in WAL mode, so a
+	@# plain copy misses every write not yet checkpointed; and Kamal rewrites the last byte of its
+	@# output when it is a carriage return. scripts/backup.ts makes a consistent copy on the server and
+	@# frames it with its length and checksum, and its `--receive` refuses anything that does not match.
 	@#
-	@# Two things this has to work around. Kamal writes its own progress to stdout, which lands
-	@# in the middle of the file and leaves sqlite saying "file is not a database" -- `-q` quiets
-	@# it, and the tail below drops anything that still gets through by starting the output at
-	@# sqlite's magic header. And the timestamp is computed once, into a variable, because naming
-	@# the file and reporting it in two separate `date` calls can straddle a second and print a
-	@# name that does not exist.
+	@# `umask 077` because the copy holds the tokens in the clear. A failed transfer removes its file
+	@# rather than leaving one that looks like a backup. The timestamp is computed once, into a
+	@# variable, because two separate `date` calls can straddle a second and report a name that does
+	@# not exist.
 	@set -e; umask 077; \
 	  out="melisma-$$(date +%Y%m%d-%H%M%S).db"; \
-	  if ! kamal app exec -q --reuse "node scripts/backup.ts" \
-	    | python3 -c 'import sys; d=sys.stdin.buffer.read(); i=d.find(b"SQLite format 3\x00"); sys.exit("no sqlite header in output") if i<0 else sys.stdout.buffer.write(d[i:])' \
-	    > "$$out"; then rm -f "$$out"; echo "Backup failed; nothing written" >&2; exit 1; fi; \
-	  sqlite3 "$$out" "pragma integrity_check;" | head -1; \
-	  echo "Wrote $$out"
+	  if ! kamal app exec -q --reuse "node scripts/backup.ts" | node scripts/backup.ts --receive > "$$out"; then \
+	    rm -f "$$out"; echo "Backup failed; nothing written" >&2; exit 1; \
+	  fi; \
+	  check="$$(sqlite3 "$$out" 'pragma integrity_check;' | head -1)"; \
+	  if [ "$$check" != ok ]; then echo "Wrote $$out, but integrity_check says: $$check" >&2; exit 1; fi; \
+	  echo "Wrote $$out (checksum verified, integrity ok)"
