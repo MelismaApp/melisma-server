@@ -23,6 +23,17 @@ export interface TrackQuery {
   /** Bare 22-character id, when the app knew it. Beats every kind of name matching. */
   spotifyId?: string;
   isrc?: string;
+  /**
+   * The UPC of the album being played, when known. An ISRC names a recording, which is usually on
+   * several releases; this says which. Not part of `cacheKey`.
+   */
+  upc?: string;
+}
+
+/** UPCs arrive zero-padded to 12, 13 or 14 digits depending on who reports them. */
+export function sameUpc(a: string | null | undefined, b: string | null | undefined): boolean {
+  const bare = (value: string) => value.trim().replace(/^0+/, '');
+  return Boolean(a && b && bare(a) && bare(a) === bare(b));
 }
 
 export const MATCH_THRESHOLD = 0.62;

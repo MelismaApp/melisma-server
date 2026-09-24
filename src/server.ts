@@ -846,6 +846,8 @@ function readExtras(app: App, url: URL, response: ServerResponse): void {
     // Identity lives on the cache entry rather than here, because the matcher is what needs
     // it — but a caller asking about a track may as well be told.
     isrc: app.store.isrcFor(cacheKey(track)) ?? undefined,
+    // The album's, from Spotify's release for this track. Also inside `metadata`, as `albumUpc`.
+    upc: typeof found.metadata?.albumUpc === 'string' ? found.metadata.albumUpc : undefined,
     source: found.source || undefined,
   });
 }

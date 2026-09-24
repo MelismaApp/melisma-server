@@ -1406,3 +1406,21 @@ test('the stream reports a re-lookup ending, not only its running', { timeout: 3
     app.settings.update({ 'cache.relookupPauseMs': String(before) });
   }
 });
+
+test('/v1/extras names the album UPC beside the ISRC', async () => {
+  const key = cacheKey({ title: 'Has A Barcode', artist: 'Someone', album: '', durationMs: 200_000 });
+  app.store.saveExtras({ key, metadata: { albumUpc: '00602557382457' }, source: 'spotify' });
+  const read = await fetch(`${base}/v1/extras?title=Has%20A%20Barcode&artist=Someone&durationMs=200000`);
+  assert.equal(((await read.json()) as Record<string, unknown>).upc, '00602557382457');
+});
+
+test('a lookup hands the sources the album UPC it knows', () => {
+  // So the Apple source can take the song on the release being played, not the first of several.
+  const key = cacheKey({ title: 'Known Release', artist: 'Someone', album: '', durationMs: 200_000 });
+  app.store.saveExtras({ key, metadata: { albumUpc: '602557382457' }, source: 'spotify' });
+  const resolver = app.resolver as unknown as {
+    withKnownIdentity(key: string, track: unknown): { upc?: string };
+  };
+  const track = { title: 'Known Release', artist: 'Someone', album: '', durationMs: 200_000 };
+  assert.equal(resolver.withKnownIdentity(key, track).upc, '602557382457');
+});

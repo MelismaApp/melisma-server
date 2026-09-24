@@ -31,6 +31,7 @@ import { spotifyAppToken } from './spotifyApp.ts';
 import { json, query, redact, request, sleep } from './http.ts';
 import { MATCH_THRESHOLD, score, type TrackQuery } from './match.ts';
 import { decode, integer, lengthDelimited, submessage, submessages, text } from './protobuf.ts';
+import { songByIsrc, type AppleSong } from './providers/apple.ts';
 import { pastedToken } from './providers/spotify.ts';
 
 const SPOTIFY_API = 'https://api.spotify.com/v1';
@@ -98,14 +99,31 @@ export async function harvest(
 ): Promise<void> {
   const results: Harvest[] = [];
 
-  const spotify = await fromSpotify(config, track, { canvas }, (level, message) =>
+  // What is already known about the recording, so each step can ask by identity rather than by name.
+  const known = store.identityFor(key);
+  const asked: TrackQuery = {
+    ...track,
+    isrc: track.isrc ?? known.isrc ?? undefined,
+    upc: track.upc ?? known.upc ?? undefined,
+    durationMs: track.durationMs > 0 ? track.durationMs : (known.durationMs ?? 0),
+  };
+
+  const spotify = await fromSpotify(config, asked, { canvas }, (level, message) =>
     store.log(level, 'spotify', message),
   ).catch(() => null);
   if (spotify) results.push(spotify);
   if (spotify?.canvas) store.saveCanvas(key, spotify.canvas);
 
-  const apple = await fromApple(config, track, (level, message) =>
-    store.log(level, 'applemusic', message),
+  // Spotify's own answer first: for its track id it is exact, and it names the release being played.
+  const spotifyUpc = spotify?.metadata?.albumUpc;
+  const apple = await fromApple(
+    config,
+    {
+      ...asked,
+      isrc: spotify?.isrc ?? asked.isrc,
+      upc: typeof spotifyUpc === 'string' ? spotifyUpc : asked.upc,
+    },
+    (level, message) => store.log(level, 'applemusic', message),
   ).catch(() => null);
   if (apple) results.push(apple);
 
@@ -763,6 +781,20 @@ async function findSpotifyId(
   track: TrackQuery,
   headers: Record<string, string>,
 ): Promise<{ id: string | null; detail: string | null }> {
+  // By ISRC first, which is exact rather than scored. Only a result carrying the same ISRC counts.
+  if (track.isrc) {
+    const isrc = track.isrc.toUpperCase();
+    const byIsrc = await json<{
+      tracks?: { items?: Array<{ id?: string; name?: string; external_ids?: { isrc?: string } }> };
+    }>(`${SPOTIFY_API}/search?${query({ q: `isrc:${isrc}`, type: 'track', limit: '10' })}`, {
+      headers,
+    });
+    const exact = byIsrc.value?.tracks?.items?.find(
+      (item) => item.id && item.external_ids?.isrc?.toUpperCase() === isrc,
+    );
+    if (exact?.id) return { id: exact.id, detail: `found "${exact.name}" on Spotify by ISRC` };
+  }
+
   const terms = [track.title, track.artist].filter(Boolean).join(' ');
   if (!terms.trim()) return { id: null, detail: null };
 
@@ -839,9 +871,9 @@ function compactAnalysis(analysis: Record<string, unknown>): Record<string, unkn
 /**
  * Apple: the song, then its artist.
  *
- * A search rather than an id lookup, because the media session gives us no Apple id. The result
- * is not scored here — the caller has already decided which recording this is, and the lyrics
- * provider does the scoring where it matters. What this can get wrong is a cover, not a lyric.
+ * By ISRC when one is known, on the release whose UPC matches when that is known too. Otherwise a
+ * scored search, because the media session gives us no Apple id. What this can get wrong is a
+ * cover, not a lyric.
  */
 async function fromApple(
   config: Config,
@@ -860,51 +892,14 @@ async function fromApple(
   const storefront = config.appleStorefront || 'us';
   const base = config.appleApiBase || APPLE_API_DEFAULT;
 
-  const term = `${track.title} ${track.artist}`.trim();
-  const search = await json<AppleSearch>(
-    `${base}/v1/catalog/${storefront}/search?${query({
-      term,
-      types: 'songs',
-      limit: 5,
-    })}`,
-    { headers },
-  );
-
-  // Scored, not taken on trust. An unscored first result is fine for artwork — a wrong cover is a
-  // cosmetic annoyance — but this call also reports an ISRC, and `noteIdentity` keeps the first
-  // ISRC it is given. A remaster, a live take or a cover sitting at the top of the results would
-  // pin the wrong recording permanently, and every later lookup would treat it as an exact match.
-  const candidates = search.value?.results?.songs?.data ?? [];
-  let song: (typeof candidates)[number] | undefined;
-  let best = 0;
-  for (const candidate of candidates) {
-    const attributes = candidate.attributes;
-    if (!attributes) continue;
-    const scored = score(
-      track,
-      attributes.name ?? '',
-      attributes.artistName ?? '',
-      attributes.durationInMillis ?? 0,
-    );
-    if (scored > best) {
-      best = scored;
-      song = candidate;
-    }
+  let song: AppleSong | undefined;
+  if (track.isrc) {
+    const byIsrc = await songByIsrc(base, storefront, track.isrc, track.upc, headers);
+    if (byIsrc.song?.attributes) song = byIsrc.song;
+    else if (byIsrc.status !== 200) log('debug', `harvest: Apple ISRC lookup returned HTTP ${byIsrc.status}`);
   }
-
-  if (!song?.attributes || best < MATCH_THRESHOLD) {
-    if (candidates.length > 0) {
-      // `store` was never a parameter here, so this threw a ReferenceError that the caller's `catch`
-      // swallowed — the branch still returned null, so the only casualty was the diagnostic it
-      // exists to produce.
-      log(
-        'info',
-        `harvest: ${candidates.length} results for "${term}", best scored ${best.toFixed(2)} — ` +
-          'not recording an identity from that',
-      );
-    }
-    return null;
-  }
+  if (!song) song = await searchApple(base, storefront, track, headers, log);
+  if (!song?.attributes) return null;
   const attributes = song.attributes;
 
   const artistId = song.relationships?.artists?.data?.[0]?.id;
@@ -939,6 +934,60 @@ async function fromApple(
       appleMusicId: song.id,
     }),
   };
+}
+
+/**
+ * Scored, not taken on trust. An unscored first result is fine for artwork — a wrong cover is a
+ * cosmetic annoyance — but this also reports an ISRC, and `noteIdentity` keeps the first ISRC it is
+ * given. A remaster, a live take or a cover sitting at the top of the results would pin the wrong
+ * recording permanently, and every later lookup would treat it as an exact match.
+ */
+async function searchApple(
+  base: string,
+  storefront: string,
+  track: TrackQuery,
+  headers: Record<string, string>,
+  log: (level: LogLevel, message: string) => void,
+): Promise<AppleSong | undefined> {
+  const term = `${track.title} ${track.artist}`.trim();
+  const search = await json<AppleSearch>(
+    `${base}/v1/catalog/${storefront}/search?${query({
+      term,
+      types: 'songs',
+      limit: 5,
+    })}`,
+    { headers },
+  );
+
+  const candidates = search.value?.results?.songs?.data ?? [];
+  let song: AppleSong | undefined;
+  let best = 0;
+  for (const candidate of candidates) {
+    const attributes = candidate.attributes;
+    if (!attributes) continue;
+    const scored = score(
+      track,
+      attributes.name ?? '',
+      attributes.artistName ?? '',
+      attributes.durationInMillis ?? 0,
+    );
+    if (scored > best) {
+      best = scored;
+      song = candidate;
+    }
+  }
+
+  if (!song?.attributes || best < MATCH_THRESHOLD) {
+    if (candidates.length > 0) {
+      log(
+        'info',
+        `harvest: ${candidates.length} results for "${term}", best scored ${best.toFixed(2)} — ` +
+          'not recording an identity from that',
+      );
+    }
+    return undefined;
+  }
+  return song;
 }
 
 async function appleArtistImage(
@@ -987,31 +1036,5 @@ interface SpotifyTrack {
 }
 
 interface AppleSearch {
-  results?: {
-    songs?: {
-      data?: Array<{
-        id?: string;
-        attributes?: {
-          isrc?: string;
-          durationInMillis?: number;
-          albumName?: string;
-          composerName?: string;
-          genreNames?: string[];
-          releaseDate?: string;
-          trackNumber?: number;
-          discNumber?: number;
-          contentRating?: string;
-          artwork?: {
-            url?: string;
-            bgColor?: string;
-            textColor1?: string;
-            textColor2?: string;
-            textColor3?: string;
-            textColor4?: string;
-          };
-        };
-        relationships?: { artists?: { data?: Array<{ id?: string }> } };
-      }>;
-    };
-  };
+  results?: { songs?: { data?: AppleSong[] } };
 }

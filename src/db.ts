@@ -572,19 +572,25 @@ export class Store {
    * on ISRC directly and Apple filters on it, so a recording seen once by name can be found by
    * identity ever after — which is worth more than any amount of tuning the name matcher.
    */
-  identityFor(key: string): { isrc: string | null; durationMs: number | null } {
+  identityFor(key: string): { isrc: string | null; durationMs: number | null; upc: string | null } {
     const entry = this.db
       .prepare('SELECT isrc, duration_ms FROM entries WHERE key = ?')
       .get(key) as { isrc: string | null; duration_ms: number | null } | undefined;
     const extras = this.db
-      .prepare('SELECT isrc, duration_ms FROM extras WHERE key = ?')
-      .get(key) as { isrc: string | null; duration_ms: number | null } | undefined;
+      .prepare(
+        "SELECT isrc, duration_ms, json_extract(metadata, '$.albumUpc') AS upc FROM extras WHERE key = ?",
+      )
+      .get(key) as
+      | { isrc: string | null; duration_ms: number | null; upc: string | number | null }
+      | undefined;
 
     const isrc = entry?.isrc?.trim() || extras?.isrc?.trim() || null;
     const durationMs =
       (entry?.duration_ms && entry.duration_ms > 0 ? entry.duration_ms : null) ??
       (extras?.duration_ms && extras.duration_ms > 0 ? extras.duration_ms : null);
-    return { isrc, durationMs };
+    // Spotify's, from the album of the track id: the release actually being played.
+    const upc = extras?.upc != null ? String(extras.upc).trim() || null : null;
+    return { isrc, durationMs, upc };
   }
 
   /**
@@ -1240,6 +1246,8 @@ export function identityFrom(
   const ids: Record<string, string> = {};
   if (row.isrc) ids.isrc = String(row.isrc);
   if (row.spotify_id) ids.spotify = String(row.spotify_id);
+  // The album's barcode, which the suffix rule below would not pick up.
+  if (metadata?.albumUpc) ids.upc = String(metadata.albumUpc);
 
   for (const [field, value] of Object.entries(metadata ?? {})) {
     if (value === null || value === undefined || value === '') continue;

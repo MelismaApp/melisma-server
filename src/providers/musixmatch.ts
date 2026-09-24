@@ -110,6 +110,9 @@ export const musixmatch: Provider = {
         q_artist: primaryArtistOf(track),
         q_album: track.album,
         q_duration: track.durationMs > 0 ? Math.round(track.durationMs / 1000) : undefined,
+        // Checked against the live service: an ISRC it knows wins over the names, one it does not
+        // falls back to them. The score below still has to pass either way.
+        track_isrc: track.isrc,
       })}`,
       { headers: clientHeaders() },
     );

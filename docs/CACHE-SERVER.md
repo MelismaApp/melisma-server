@@ -183,6 +183,12 @@ directly. An authoritative duration in milliseconds turns the matcher's duration
 neutral 0.5 into a decision, which is precisely what is missing for AMLL results, since that
 corpus carries no durations at all.
 
+The album's UPC is identity too, one level up. An ISRC names a recording, which usually appears on
+several releases (single, album, compilation), each with its own cover and its own Apple song id.
+Spotify's UPC for the album of the track id says which release is playing. It is kept in `metadata`
+as `albumUpc`, served as `upc`, and used to pick the Apple song for an ISRC. UPCs arrive
+zero-padded to different widths, so they are compared without the padding.
+
 Both are only ever filled in, never overwritten. The first source to identify a recording is as
 good as the second, and overwriting invites a worse answer to replace a better one — LRCLIB's
 duration is in whole seconds where Spotify's is in milliseconds, and whichever arrives first

@@ -519,10 +519,11 @@ export class Resolver {
    */
   private withKnownIdentity(key: string, track: TrackQuery): TrackQuery {
     const known = this.store.identityFor(key);
-    if (!known.isrc && !known.durationMs) return track;
+    if (!known.isrc && !known.durationMs && !known.upc) return track;
     return {
       ...track,
       isrc: track.isrc ?? known.isrc ?? undefined,
+      upc: track.upc ?? known.upc ?? undefined,
       durationMs: track.durationMs > 0 ? track.durationMs : (known.durationMs ?? 0),
     };
   }

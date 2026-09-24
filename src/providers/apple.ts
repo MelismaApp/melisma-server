@@ -25,7 +25,14 @@
 
 import { json, query, request } from '../http.ts';
 import { jwtExpiry } from '../config.ts';
-import { MATCH_THRESHOLD, cleanTitleOf, primaryArtistOf, score, type TrackQuery } from '../match.ts';
+import {
+  MATCH_THRESHOLD,
+  cleanTitleOf,
+  primaryArtistOf,
+  sameUpc,
+  score,
+  type TrackQuery,
+} from '../match.ts';
 import { parseTtml } from '../format/ttml.ts';
 import type { Provider, ProviderAnswer, ProviderContext } from './types.ts';
 
@@ -67,8 +74,13 @@ interface Song {
       textColor4?: string;
     };
   };
-  relationships?: { artists?: { data?: Array<{ id?: string }> } };
+  relationships?: {
+    artists?: { data?: Array<{ id?: string }> };
+    albums?: { data?: Array<{ id?: string; attributes?: { upc?: string } }> };
+  };
 }
+
+export type AppleSong = Song;
 
 interface SearchResponse {
   results?: { songs?: { data?: Song[] } };
@@ -218,6 +230,37 @@ export const apple: Provider = {
   reparse: (body) => parseTtml(body),
 };
 
+/**
+ * The catalogue song for an ISRC, on the release being played when that can be told.
+ *
+ * One recording is usually several songs here, one per release (single, album, compilation), each
+ * with its own id, cover and album. The ISRC cannot tell them apart; the album's UPC can. Without a
+ * UPC, or when none matches, the first is taken, as before.
+ */
+export async function songByIsrc(
+  base: string,
+  storefront: string,
+  isrc: string,
+  upc: string | undefined,
+  headers: Record<string, string>,
+): Promise<{ song: Song | null; status: number }> {
+  const found = await json<SongsResponse>(
+    `${base}/v1/catalog/${storefront}/songs?${query({
+      'filter[isrc]': isrc,
+      // Named explicitly: the artists for the artist image, the albums for their UPCs.
+      include: 'albums,artists',
+    })}`,
+    { headers },
+  );
+  const songs = (found.value?.data ?? []).filter((song) => song.id);
+  const onRelease = upc
+    ? songs.find((song) =>
+        song.relationships?.albums?.data?.some((album) => sameUpc(album.attributes?.upc, upc)),
+      )
+    : undefined;
+  return { song: onRelease ?? songs[0] ?? null, status: found.result.status };
+}
+
 /** Finds the Apple song id, preferring the ISRC because it identifies the recording. */
 async function identify(
   track: TrackQuery,
@@ -226,15 +269,12 @@ async function identify(
   const { appleApiBase: base, appleStorefront: storefront } = ctx.config;
 
   if (track.isrc) {
-    const byIsrc = await json<SongsResponse>(
-      `${base}/v1/catalog/${storefront}/songs?${query({ 'filter[isrc]': track.isrc })}`,
-      { headers: headers(ctx) },
-    );
-    const first = byIsrc.value?.data?.[0];
-    if (first?.id) {
-      reportSongDetails(first, ctx);
-      return { id: first.id, match: 1 };
+    const byIsrc = await songByIsrc(base, storefront, track.isrc, track.upc, headers(ctx));
+    if (byIsrc.song?.id) {
+      reportSongDetails(byIsrc.song, ctx);
+      return { id: byIsrc.song.id, match: 1 };
     }
+    if (byIsrc.status !== 200) ctx.log('info', `apple: ISRC lookup returned HTTP ${byIsrc.status}`);
   }
 
   const term = `${cleanTitleOf(track)} ${primaryArtistOf(track)}`.trim();
