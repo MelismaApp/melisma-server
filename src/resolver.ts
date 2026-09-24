@@ -28,6 +28,8 @@ import type { LearnedExtras } from './providers/types.ts';
 export interface ResolveOptions {
   /** Ignore the cache and ask every source again. */
   force?: boolean;
+  /** Count an answer from the cache as a hit. Off for the admin page's own lookups. */
+  countHit?: boolean;
   /** Do not fetch; answer only if it is already cached. */
   cacheOnly?: boolean;
   /**
@@ -201,7 +203,7 @@ export class Resolver {
     if (!options.force) {
       const cached = this.fromCache(key, config);
       if (cached) {
-        this.store.recordHit(key);
+        if (options.countHit !== false) this.store.recordHit(key);
         this.harvestAfter(config, key, track);
         // Only when there is something to improve on. A cached miss has no document to better, and
         // `cacheOnly` is a promise not to make requests.

@@ -1381,7 +1381,7 @@ async function showEntry(key) {
   const provenance = data.merged?.provenance;
   // A song can be here for its artwork alone, with no lyrics anybody has written down, so the
   // title has to come from whichever half exists.
-  const about = data.entry ?? data.extras ?? {};
+  const about = data.entry ?? data.extras ?? data.asked ?? {};
   const title = about.title || '(no title)';
   const artist = about.artist || '';
 
@@ -1407,7 +1407,12 @@ async function showEntry(key) {
                 : null,
             ]),
           ])
-        : el('div', { class: 'desc', text: 'No lyrics were found for this track.' }),
+        : el('div', {
+            class: 'desc',
+            text: data.asked
+              ? 'Asked for, and nothing is cached for it: no source could be reached, or the lookup was cache-only.'
+              : 'No lyrics were found for this track.',
+          }),
       el('div', { class: 'inline', style: 'margin-top: 12px' }, [
         role === 'admin' ? el('button', {
           class: 'action',
@@ -1440,7 +1445,7 @@ async function showEntry(key) {
             await loadCache();
           },
         }) : null,
-        data.extras && role === 'admin'
+        (data.extras || data.asked) && role === 'admin'
           ? el('button', {
               class: 'action danger',
               text: 'Forget everything',

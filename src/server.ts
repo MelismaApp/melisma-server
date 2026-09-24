@@ -200,10 +200,12 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
     case 'POST /v1/warm': {
       const track = trackFromJson(await readJson(request));
       if (!track) return send(response, 400, { error: 'need at least a title' });
-      if (asker !== null) app.store.recordRequest(asker, cacheKey(track));
+      if (asker !== null) app.store.recordRequest(asker, cacheKey(track), track);
       // Fire and forget: the app is prefetching, and it is not waiting for an answer — which is
       // exactly what buys the room to find out what the recording is before asking for its words.
-      void app.resolver.resolve(track, { identityFirst: true }).catch(() => undefined);
+      void app.resolver
+        .resolve(track, { identityFirst: true, countHit: asker !== null })
+        .catch(() => undefined);
       return send(response, 202, { ok: true });
     }
 
@@ -489,10 +491,13 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       // Somebody looking at the page, not somebody asking for the track.
       const extras = app.store.extras(key, { hit: false });
       // A track can have artwork and a tempo and no lyrics anybody has written down, so either
-      // half is enough to have something to show.
-      if (!entry && !extras) return send(response, 404, { error: 'no such entry' });
+      // half is enough to have something to show. And one can have been asked for with nothing
+      // cached at all, when every source was unreachable.
+      const asked = entry || extras ? null : app.store.askedFor(key);
+      if (!entry && !extras && !asked) return send(response, 404, { error: 'no such entry' });
       return send(response, 200, {
         key,
+        asked,
         entry: entry ? { ...entry, merged: undefined } : null,
         merged: entry?.merged ? JSON.parse(entry.merged) : null,
         extras,
@@ -546,7 +551,8 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       const body = await readJson<Record<string, unknown>>(request);
       const track = trackFromJson(body);
       if (!track) return send(response, 400, { error: 'need at least a title' });
-      const resolution = await app.resolver.resolve(track, { force: body?.force === true });
+      // A test from the page, not somebody asking for the track.
+      const resolution = await app.resolver.resolve(track, { force: body?.force === true, countHit: false });
       return send(response, 200, resolution);
     }
 
@@ -583,11 +589,13 @@ async function lyrics(
   const track = trackFromParams(url.searchParams);
   if (!track) return send(response, 400, { error: 'need at least a title' });
   // Before the lookup, so a track nobody has lyrics for is still on the asker's list.
-  if (asker !== null) app.store.recordRequest(asker, cacheKey(track));
+  if (asker !== null) app.store.recordRequest(asker, cacheKey(track), track);
 
   const resolution = await app.resolver.resolve(track, {
     force: url.searchParams.get('force') === '1',
     cacheOnly: url.searchParams.get('cacheOnly') === '1',
+    // Only a device's lookup counts as asked for; the page's (a TTML download) does not.
+    countHit: asker !== null,
   });
 
   if (!resolution.document) {

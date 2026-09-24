@@ -329,3 +329,78 @@ test('a song asked for once counts as asked once, not zero', async () => {
   app.store.deleteEntry(forgotten.key);
   assert.equal(await hits(forgotten.key), 2);
 });
+
+// ---- from a Codex review --------------------------------------------------
+
+test('a song asked for with nothing cached is still on the asker\'s list, named as it was asked', async () => {
+  const one = await addUser('Outage');
+  // The sources are off, so this is a lookup that caches nothing: what an outage looks like.
+  const path = '/v1/lyrics?title=Nothing%20Cached&artist=Nobody%20Home&durationMs=180000';
+  assert.equal((await withKey(one.key, path)).status, 404);
+  const key = cacheKey({ title: 'Nothing Cached', artist: 'Nobody Home', album: '', durationMs: 180_000 });
+  assert.equal(app.store.getEntry(key), null);
+
+  const rows = ((await (await withKey(one.key, '/admin/api/library?limit=500')).json()) as {
+    rows: { key: string; title: string; artist: string; hits: number; hasLyrics: boolean }[];
+    total: number;
+  });
+  const row = rows.rows.find((candidate) => candidate.key === key);
+  assert.ok(row, 'the song is missing from the list');
+  assert.equal(row.title, 'Nothing Cached');
+  assert.equal(row.artist, 'Nobody Home');
+  assert.equal(row.hasLyrics, false);
+
+  // The counter and the list agree.
+  const stats = (await (await withKey(one.key, '/admin/api/stats')).json()) as { tracks: number };
+  assert.equal(stats.tracks, rows.total);
+
+  // It opens, and says why there is nothing.
+  const entry = await withKey(one.key, `/admin/api/entry?key=${encodeURIComponent(key)}`);
+  assert.equal(entry.status, 200);
+  assert.equal(((await entry.json()) as { asked: { title: string } }).asked.title, 'Nothing Cached');
+
+  // The admin sees it too, with a count that agrees, and forgetting everything takes it off every list.
+  assert.ok((await libraryKeys(adminKey)).includes(key));
+  const everything = (await (await withKey(adminKey, '/admin/api/library?limit=1')).json()) as { total: number };
+  const adminStats = (await (await withKey(adminKey, '/admin/api/stats')).json()) as { tracks: number };
+  assert.equal(adminStats.tracks, everything.total);
+  await withKey(adminKey, `/admin/api/entry?key=${encodeURIComponent(key)}&everything=1`, { method: 'DELETE' });
+  assert.ok(!(await libraryKeys(one.key)).includes(key));
+});
+
+test('an empty merged document is a miss, in a user\'s counters and in "missing lyrics"', async () => {
+  const one = await addUser('Emptied');
+  const track = cached('Emptied By A Re-merge');
+  // What a re-merge writes when every archived body is rejected.
+  app.store.putEntry({ ...app.store.getEntry(track.key)!, merged: '' });
+  await withKey(one.key, track.path);
+
+  const stats = (await (await withKey(one.key, '/admin/api/stats')).json()) as { found: number; misses: number };
+  assert.equal(stats.found, 0);
+  assert.equal(stats.misses, 1);
+  assert.ok((await libraryKeys(one.key, '&missing=lyrics')).includes(track.key));
+});
+
+test('the page\'s own lookups do not count as asked for', async () => {
+  const track = cached('Only Looked At');
+  app.store.recordRequest(0, track.key);
+  const hits = async () =>
+    ((await (await withKey(adminKey, '/admin/api/library?limit=500')).json()) as {
+      rows: { key: string; hits: number }[];
+    }).rows.find((row) => row.key === track.key)?.hits;
+  assert.equal(await hits(), 1);
+
+  const session = await login(adminKey);
+  // A TTML download from the entry, and Try a track, both answered from the cache.
+  await fetch(`${base}${track.path}&format=ttml&cacheOnly=1`, { headers: { Cookie: session } });
+  await fetch(`${base}/admin/api/lookup`, {
+    method: 'POST',
+    headers: { Cookie: session, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Only Looked At', artist: 'Someone', durationMs: 200_000 }),
+  });
+  assert.equal(await hits(), 1);
+
+  // A device's lookup still counts.
+  await withKey(adminKey, track.path);
+  assert.equal(await hits(), 2);
+});

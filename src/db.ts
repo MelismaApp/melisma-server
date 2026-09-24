@@ -394,6 +394,10 @@ export class Store {
         first_at INTEGER NOT NULL,
         last_at  INTEGER NOT NULL,
         count    INTEGER NOT NULL DEFAULT 1,
+        -- What was asked, so a track nothing was cached for can still be named in the library.
+        title    TEXT NOT NULL DEFAULT '',
+        artist   TEXT NOT NULL DEFAULT '',
+        album    TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (user_id, key)
       );
 
@@ -410,6 +414,15 @@ export class Store {
     ]) {
       try {
         this.db.exec(`ALTER TABLE extras ADD COLUMN ${column}`);
+      } catch {
+        // Already there.
+      }
+    }
+
+    // Added to `requests` after it first shipped.
+    for (const column of ["title TEXT NOT NULL DEFAULT ''", "artist TEXT NOT NULL DEFAULT ''", "album TEXT NOT NULL DEFAULT ''"]) {
+      try {
+        this.db.exec(`ALTER TABLE requests ADD COLUMN ${column}`);
       } catch {
         // Already there.
       }
@@ -819,13 +832,42 @@ export class Store {
   }
 
   /** A lookup, by whoever made it. `userId` 0 is the admin key. */
-  recordRequest(userId: number, key: string, at = Date.now()): void {
+  recordRequest(
+    userId: number,
+    key: string,
+    track: { title?: string; artist?: string; album?: string } = {},
+    at = Date.now(),
+  ): void {
     this.db
       .prepare(
-        `INSERT INTO requests (user_id, key, first_at, last_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT(user_id, key) DO UPDATE SET last_at = excluded.last_at, count = count + 1`,
+        `INSERT INTO requests (user_id, key, first_at, last_at, title, artist, album)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, key) DO UPDATE SET
+           last_at = excluded.last_at,
+           count   = count + 1,
+           title   = CASE WHEN excluded.title  <> '' THEN excluded.title  ELSE requests.title  END,
+           artist  = CASE WHEN excluded.artist <> '' THEN excluded.artist ELSE requests.artist END,
+           album   = CASE WHEN excluded.album  <> '' THEN excluded.album  ELSE requests.album  END`,
       )
-      .run(userId, key, at, at);
+      .run(userId, key, at, at, track.title ?? '', track.artist ?? '', track.album ?? '');
+  }
+
+  /** What was asked for a track, when nothing else is held on it. */
+  askedFor(key: string): { title: string; artist: string; album: string; lastAt: number } | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(NULLIF(title, '')) AS title, MAX(NULLIF(artist, '')) AS artist,
+                MAX(NULLIF(album, '')) AS album, MAX(last_at) AS last_at
+           FROM requests WHERE key = ?`,
+      )
+      .get(key) as Record<string, unknown> | undefined;
+    if (!row || row.last_at === null) return null;
+    return {
+      title: String(row.title ?? ''),
+      artist: String(row.artist ?? ''),
+      album: String(row.album ?? ''),
+      lastAt: Number(row.last_at),
+    };
   }
 
   hasAsked(userId: number, key: string): boolean {
@@ -839,8 +881,8 @@ export class Store {
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS tracks,
-                COALESCE(SUM(e.merged IS NOT NULL), 0) AS found,
-                COALESCE(SUM(e.key IS NOT NULL AND e.merged IS NULL), 0) AS misses,
+                COALESCE(SUM(NULLIF(e.merged, '') IS NOT NULL), 0) AS found,
+                COALESCE(SUM(e.key IS NOT NULL AND NULLIF(e.merged, '') IS NULL), 0) AS misses,
                 COALESCE(SUM(r.count), 0) AS hits
            FROM requests r LEFT JOIN entries e ON e.key = r.key
           WHERE r.user_id = ?`,
@@ -873,6 +915,8 @@ export class Store {
     this.db.prepare('DELETE FROM raw WHERE key = ?').run(key);
     if (options.includeExtras) {
       this.db.prepare('DELETE FROM extras WHERE key = ?').run(key);
+      // Who asked, too: a request with nothing else held on it would keep the track listed.
+      this.db.prepare('DELETE FROM requests WHERE key = ?').run(key);
     }
   }
 
@@ -969,16 +1013,11 @@ export class Store {
     const asked = scoped
       ? 'mine.count AS hits, mine.last_at AS last_hit_at, mine.last_at AS asked_at'
       : `MAX(
-            COALESCE((SELECT SUM(r.count) FROM requests r WHERE r.key = k.key), 0),
+            COALESCE(q.count, 0),
             CASE WHEN e.key IS NOT NULL THEN COALESCE(e.hits, 0) + 1 ELSE 0 END
           ) AS hits,
           e.last_hit_at AS last_hit_at,
-          COALESCE(
-            (SELECT MAX(r.last_at) FROM requests r WHERE r.key = k.key),
-            e.last_hit_at,
-            NULLIF(e.created_at, 0),
-            x.created_at
-          ) AS asked_at`;
+          COALESCE(q.last_at, e.last_hit_at, NULLIF(e.created_at, 0), x.created_at) AS asked_at`;
     const cteParams = scoped ? [query.askedBy!] : [];
 
     // One expression for the row shape, used by both the count and the page, so a filter can
@@ -987,20 +1026,27 @@ export class Store {
       WITH song AS (
         SELECT
           k.key                                                   AS key,
-          COALESCE(NULLIF(e.title, ''),  x.title,  '')            AS title,
-          COALESCE(NULLIF(e.artist, ''), x.artist, '')            AS artist,
-          COALESCE(e.album, '')                                   AS album,
+          -- A track only asked for, with nothing cached, is named by what was asked.
+          COALESCE(NULLIF(e.title, ''),  NULLIF(x.title, ''),  q.title,  '') AS title,
+          COALESCE(NULLIF(e.artist, ''), NULLIF(x.artist, ''), q.artist, '') AS artist,
+          COALESCE(NULLIF(e.album, ''), q.album, '')              AS album,
           COALESCE(NULLIF(e.duration_ms, 0), x.duration_ms, 0)    AS duration_ms,
           e.spotify_id                                            AS spotify_id,
           -- Identity is written to whichever row existed at the time, so either can hold it.
           COALESCE(e.isrc, x.isrc)                                AS isrc,
-          e.merged                                                AS lyrics,
+          -- Empty is this cache's "asked, and nobody had it", the same as null. See stats().
+          NULLIF(e.merged, '')                                    AS lyrics,
           COALESCE(e.merge_version, 0)                            AS merge_version,
           ${asked},
-          MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0)) AS updated_at,
+          COALESCE(
+            NULLIF(MAX(COALESCE(e.updated_at, 0), COALESCE(x.updated_at, 0)), 0),
+            q.last_at,
+            0
+          )                                                       AS updated_at,
           MIN(
             COALESCE(NULLIF(e.created_at, 0), 9e18),
-            COALESCE(NULLIF(x.created_at, 0), 9e18)
+            COALESCE(NULLIF(x.created_at, 0), 9e18),
+            COALESCE(q.first_at, 9e18)
           )                                                       AS created_at,
           x.updated_at                                            AS extras_updated_at,
           x.cover_url, x.artist_image_url, x.tempo, x.canvas,
@@ -1008,9 +1054,17 @@ export class Store {
           CASE WHEN e.merged LIKE '%\"hasTranslation\":true%' THEN 1 ELSE 0 END AS hasTranslationFlag,
           (SELECT GROUP_CONCAT(provider) FROM raw WHERE raw.key = k.key) AS providers,
           (SELECT COALESCE(SUM(LENGTH(body)), 0) FROM raw WHERE raw.key = k.key) AS archived_bytes
-        FROM (SELECT key FROM entries UNION SELECT key FROM extras) k
+        -- Requests too: a lookup that cached nothing (every source unreachable, or cache-only) is
+        -- still a song somebody asked for, and it is on their list.
+        FROM (SELECT key FROM entries UNION SELECT key FROM extras UNION SELECT key FROM requests) k
         LEFT JOIN entries e ON e.key = k.key
         LEFT JOIN extras  x ON x.key = k.key
+        LEFT JOIN (
+          SELECT key, MIN(first_at) AS first_at, MAX(last_at) AS last_at, SUM(count) AS count,
+                 MAX(NULLIF(title, '')) AS title, MAX(NULLIF(artist, '')) AS artist,
+                 MAX(NULLIF(album, '')) AS album
+            FROM requests GROUP BY key
+        ) q ON q.key = k.key
         ${scoped ? 'JOIN requests mine ON mine.key = k.key AND mine.user_id = ?' : ''}
       )
       SELECT * FROM song
@@ -1068,7 +1122,8 @@ export class Store {
     // extras and no entry — artwork harvested for a track whose lyrics were later forgotten, which keeps
     // the extras on purpose.
     const tracks = count(
-      'SELECT COUNT(*) AS n FROM (SELECT key FROM entries UNION SELECT key FROM extras)',
+      'SELECT COUNT(*) AS n FROM ' +
+        '(SELECT key FROM entries UNION SELECT key FROM extras UNION SELECT key FROM requests)',
     );
 
     return {

@@ -79,16 +79,17 @@ restore: ## Load a backup into the LOCAL database (FILE=melisma-....db)
 	@# Whatever is here already is a cache and a set of tokens. Moved aside, never overwritten: the
 	@# whole point of a restore is that you are unsure, and an unsure operation must not destroy.
 	@# The `-wal` and `-shm` files go with it. Left behind, SQLite would replay the old database's
-	@# pending writes onto the restored one the next time it opened. Stop a local server first.
+	@# pending writes onto the restored one the next time it opened. Each is moved on its own, so a
+	@# sidecar left by an interrupted restore goes even when the main file is already gone. Stop a
+	@# local server first.
 	@mkdir -p data
-	@if [ -f data/better-lyrics.db ]; then \
-	  aside="data/replaced-$$(date +%Y%m%d-%H%M%S).db"; \
-	  mv data/better-lyrics.db "$$aside"; \
-	  for side in -wal -shm; do \
-	    if [ -f "data/better-lyrics.db$$side" ]; then mv "data/better-lyrics.db$$side" "$$aside$$side"; fi; \
+	@aside="data/replaced-$$(date +%Y%m%d-%H%M%S).db"; moved=""; \
+	  for part in "" -wal -shm; do \
+	    if [ -f "data/better-lyrics.db$$part" ]; then \
+	      mv "data/better-lyrics.db$$part" "$$aside$$part"; moved="$$moved data/better-lyrics.db$$part"; \
+	    fi; \
 	  done; \
-	  echo "Moved the current local database to $$aside"; \
-	fi
+	  if [ -n "$$moved" ]; then echo "Moved aside to $$aside*:$$moved"; fi
 	@cp "$(FILE)" data/better-lyrics.db
 	@chmod 600 data/better-lyrics.db
 	@echo "Restored $(FILE). It holds real tokens — it is chmod 600 and gitignored."
