@@ -23,7 +23,7 @@ import { MERGE_VERSION } from './merge.ts';
 import { relookupCandidates, timingFit } from './report.ts';
 import { PROVIDERS, providerById } from './providers/index.ts';
 import { testSources, TEST_TRACK } from './selftest.ts';
-import { backfillCanvas, backfillIsrc } from './harvest.ts';
+import { backfillCanvas, backfillIsrc, canvasBackfillProgress } from './harvest.ts';
 import { parseTtml, writeTtml } from './format/ttml.ts';
 import { parseLrc, writePlainText } from './format/lrc.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
@@ -325,6 +325,9 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       );
       return send(response, 200, result);
     }
+
+    case 'GET /admin/api/backfill-canvas':
+      return send(response, 200, canvasBackfillProgress());
 
     case 'POST /admin/api/backfill-canvas': {
       const { pending, skipped } = backfillCanvas(app.store, app.settings.read(), (level, message) =>
@@ -761,6 +764,7 @@ function stream(app: App, request: IncomingMessage, response: ServerResponse): v
   // tests fail and the page is left showing a live job with its controls disabled until it is
   // reloaded.
   let lastRelookupState = '';
+  let lastCanvasState = '';
   const push = () => {
     const events = app.store.recentEvents(50).filter((event) => event.id > lastId);
     for (const event of events.reverse()) {
@@ -776,6 +780,14 @@ function stream(app: App, request: IncomingMessage, response: ServerResponse): v
     if (relookup.running || relookupState !== lastRelookupState) {
       lastRelookupState = relookupState;
       response.write(`data: ${JSON.stringify({ kind: 'relookup', ...relookup })}\n\n`);
+    }
+
+    // The same for a Canvas backfill, and for the same reason.
+    const canvas = canvasBackfillProgress();
+    const canvasState = `${canvas.startedAt}:${canvas.running}`;
+    if (canvas.running || canvasState !== lastCanvasState) {
+      lastCanvasState = canvasState;
+      response.write(`data: ${JSON.stringify({ kind: 'canvas', ...canvas })}\n\n`);
     }
 
     // And whether the library changed, so the page can refresh itself instead of being reloaded.

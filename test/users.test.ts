@@ -298,3 +298,34 @@ test('"recently asked" for everyone goes by the last request from anybody', asyn
   );
   assert.deepEqual(order, [early.key, late.key]);
 });
+
+test('a song asked for once counts as asked once, not zero', async () => {
+  const hits = async (key: string) => {
+    const rows = ((await (await withKey(adminKey, '/admin/api/library?limit=500')).json()) as {
+      rows: { key: string; hits: number }[];
+    }).rows;
+    return rows.find((row) => row.key === key)?.hits;
+  };
+
+  // What a first lookup does: record the request, fetch, write the entry. The sources are off here,
+  // so a real miss would write nothing; the two writes stand in for it.
+  const track = cached('Asked Once');
+  app.store.recordRequest(0, track.key);
+  assert.equal(await hits(track.key), 1);
+  // The second is answered from the cache, and counts once, not twice.
+  await withKey(adminKey, track.path);
+  assert.equal(await hits(track.key), 2);
+
+  // From before requests were recorded: five answers from the cache, after the lookup that fetched it.
+  const old = cached('From Before');
+  for (let i = 0; i < 5; i++) app.store.recordHit(old.key);
+  assert.equal(await hits(old.key), 6);
+
+  // Lyrics forgotten, artwork kept: no entry left to count hits on, and the requests still say twice.
+  const forgotten = cached('Lyrics Forgotten');
+  app.store.recordRequest(0, forgotten.key);
+  app.store.recordRequest(0, forgotten.key);
+  app.store.saveExtras({ key: forgotten.key, title: 'Lyrics Forgotten', coverUrl: 'https://i.scdn.co/x', source: 'spotify' });
+  app.store.deleteEntry(forgotten.key);
+  assert.equal(await hits(forgotten.key), 2);
+});

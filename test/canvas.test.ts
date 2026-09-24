@@ -6,6 +6,7 @@ import { Settings } from '../src/config.ts';
 import { Store, type StoredCanvas } from '../src/db.ts';
 import {
   backfillCanvas,
+  canvasBackfillProgress,
   CANVAS_RECHECK_MS,
   canvasIsDue,
   harvest,
@@ -347,7 +348,9 @@ test('the backfill asks each Spotify track once and records both answers', async
   const run = backfillCanvas(store, config, (_level, message) => messages.push(message), 0);
   assert.equal(run.pending, 2);
   // One at a time: a second run would ask every track twice.
-  assert.equal(backfillCanvas(store, config, quiet).skipped, 'already filling in Canvas');
+  assert.match(backfillCanvas(store, config, quiet).skipped ?? '', /^already filling in Canvas — \d+ of 2$/);
+  assert.equal(canvasBackfillProgress().running, true);
+  assert.equal(canvasBackfillProgress().total, 2);
   await run.done;
 
   assert.equal(asked.length, 2);
@@ -355,6 +358,12 @@ test('the backfill asks each Spotify track once and records both answers', async
   assert.equal(store.extras(`sp:${OTHER}`, { hit: false })?.canvas?.url, null);
   assert.ok(store.extras(`sp:${OTHER}`, { hit: false })?.canvasCheckedAt);
   assert.match(messages.at(-1)!, /1 of 2 tracks have one, 1 have none/);
+  // Said at the start too, so a run of several minutes is visible from its first second.
+  assert.match(messages[0]!, /asking Spotify about 2 tracks/);
+  assert.deepEqual(
+    { ...canvasBackfillProgress(), startedAt: 0 },
+    { running: false, total: 2, done: 2, found: 1, none: 1, startedAt: 0, stopped: null },
+  );
 
   // Both answered, so a second run has nothing to do.
   assert.equal(backfillCanvas(store, config, quiet).pending, 0);
@@ -371,6 +380,7 @@ test('the backfill stops at a refused token rather than grinding through the res
   await backfillCanvas(store, config, (_level, message) => messages.push(message), 0).done;
   assert.equal(asked.length, 1);
   assert.match(messages.at(-1)!, /stopped at HTTP 401, 1 not reached/);
+  assert.equal(canvasBackfillProgress().stopped, 'stopped at HTTP 401');
   assert.equal(store.keysNeedingCanvas(Date.now()).length, 2);
 });
 

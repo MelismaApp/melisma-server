@@ -1329,13 +1329,44 @@ $('#cache-backfill-isrc').addEventListener('click', async (event) => {
 $('#cache-backfill-canvas').addEventListener('click', async () => {
   try {
     const result = await api('/admin/api/backfill-canvas', { method: 'POST' });
-    if (result.skipped) toast(result.skipped, true);
+    if (result.skipped) toast(result.skipped, !result.skipped.startsWith('already'));
     else if (result.pending === 0) toast('Every Spotify track has a Canvas answer from the last week');
-    else toast(`Asking Spotify about ${result.pending} tracks — the result will be in the Log`);
+    else {
+      toast(`Asking Spotify about ${result.pending} tracks, one a second`);
+      // Straight away, rather than on the stream's next tick a second from now.
+      renderCanvas(await api('/admin/api/backfill-canvas'));
+    }
   } catch (error) {
     toast(error.message, true);
   }
 });
+
+/**
+ * The Canvas backfill's readout, on its own button: the button is where it was started, and a run of
+ * several minutes needs to say how far it has got. Disabled while it runs, so it cannot be started
+ * twice.
+ */
+let canvasRun = null;
+function renderCanvas(state) {
+  const button = $('#cache-backfill-canvas');
+  const finished = canvasRun !== null && canvasRun === state.startedAt && !state.running;
+  button.disabled = state.running;
+  button.textContent = state.running
+    ? `Filling in Canvas · ${state.done} of ${state.total}`
+    : 'Fill in Canvas';
+  if (state.running) {
+    canvasRun = state.startedAt;
+  } else if (finished) {
+    canvasRun = null;
+    toast(
+      state.stopped
+        ? `Canvas ${state.stopped} after ${state.done} of ${state.total}`
+        : `Canvas: ${state.found} of ${state.done} tracks have one`,
+      Boolean(state.stopped),
+    );
+    void loadCache();
+  }
+}
 
 $('#cache-remerge').addEventListener('click', async () => {
   const result = await api('/admin/api/remerge', { method: 'POST', body: '{}' });
@@ -1830,6 +1861,11 @@ function startStream() {
       return;
     }
 
+    if (event.kind === 'canvas') {
+      renderCanvas(event);
+      return;
+    }
+
     // A log line. Rendered even when the log tab is hidden, so switching to it shows what happened
     // rather than only what happens next.
     if (!logVisible(event, logFilter())) return;
@@ -2033,6 +2069,7 @@ async function boot() {
   // A run started before this page was opened, or before it was reloaded, still has a readout — and the
   // readout is in the header, so it is worth having before a tab is even chosen.
   await api('/admin/api/relookup').then(renderRelookup).catch(() => {});
+  await api('/admin/api/backfill-canvas').then(renderCanvas).catch(() => {});
   // Before the first tab is chosen, so the page is live wherever it opens.
   startStream();
   selectTab(location.hash.slice(1) || 'sources');

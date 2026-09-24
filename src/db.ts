@@ -961,10 +961,17 @@ export class Store {
 
     // Scoped to one asker, the counts and times are theirs rather than everybody's. Unscoped, the last
     // request from anyone, and before requests were recorded, the last cache hit or first sighting.
+    //
+    // The unscoped count is lookups, the first included: `hits` only counts answers from the cache, so
+    // a song asked for once showed 0. Its entry came from one lookup, hence `+ 1`; and since requests
+    // were recorded, their sum, whichever is larger, since each also counts in the other.
     const scoped = query.askedBy !== undefined;
     const asked = scoped
       ? 'mine.count AS hits, mine.last_at AS last_hit_at, mine.last_at AS asked_at'
-      : `COALESCE(e.hits, 0) + COALESCE(x.hits, 0) AS hits,
+      : `MAX(
+            COALESCE((SELECT SUM(r.count) FROM requests r WHERE r.key = k.key), 0),
+            CASE WHEN e.key IS NOT NULL THEN COALESCE(e.hits, 0) + 1 ELSE 0 END
+          ) AS hits,
           e.last_hit_at AS last_hit_at,
           COALESCE(
             (SELECT MAX(r.last_at) FROM requests r WHERE r.key = k.key),

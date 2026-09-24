@@ -399,13 +399,38 @@ export async function harvestCanvas(
   return asked;
 }
 
-let backfilling = false;
+/** Where a Canvas backfill has got to, for the page's readout. */
+export interface CanvasProgress {
+  running: boolean;
+  total: number;
+  done: number;
+  found: number;
+  none: number;
+  startedAt: number | null;
+  /** Why it stopped early, when it did. */
+  stopped: string | null;
+}
+
+let progress: CanvasProgress = {
+  running: false,
+  total: 0,
+  done: 0,
+  found: 0,
+  none: 0,
+  startedAt: null,
+  stopped: null,
+};
+
+export function canvasBackfillProgress(): CanvasProgress {
+  return { ...progress };
+}
 
 /**
  * Asks about the Canvas of every track named by a Spotify id that has no current answer.
  *
  * Starts the run and returns at once, because four hundred requests outlast the reverse proxy's
- * response timeout; the outcome goes to the log. `done` is for tests.
+ * response timeout; progress is in `canvasBackfillProgress`, and the start and the outcome go to the
+ * log. `done` is for tests.
  *
  * `gapMs` between tracks, because this shares its host with Spotify's lyrics, and a 429 here would
  * stop those for a minute too.
@@ -417,7 +442,13 @@ export function backfillCanvas(
   gapMs = 1_000,
 ): { pending: number; skipped: string | null; done: Promise<void> } {
   const idle = Promise.resolve();
-  if (backfilling) return { pending: 0, skipped: 'already filling in Canvas', done: idle };
+  if (progress.running) {
+    return {
+      pending: progress.total - progress.done,
+      skipped: `already filling in Canvas — ${progress.done} of ${progress.total}`,
+      done: idle,
+    };
+  }
   const token = pastedToken(config.secrets.spotifyWebToken);
   if (!token) {
     return {
@@ -432,32 +463,43 @@ export function backfillCanvas(
     .filter((key) => SPOTIFY_ID.test(key.slice(3)));
   if (keys.length === 0) return { pending: 0, skipped: null, done: idle };
 
-  backfilling = true;
+  progress = {
+    running: true,
+    total: keys.length,
+    done: 0,
+    found: 0,
+    none: 0,
+    startedAt: Date.now(),
+    stopped: null,
+  };
+  const seconds = Math.ceil((keys.length * gapMs) / 1000);
+  log(
+    'info',
+    `Canvas backfill: asking Spotify about ${keys.length} tracks, about ` +
+      (seconds < 90 ? `${seconds} s` : `${Math.round(seconds / 60)} min`),
+  );
   const done = (async () => {
-    let found = 0;
-    let none = 0;
-    let looked = 0;
-    let stopped: string | null = null;
     try {
       for (const key of keys) {
-        if (looked > 0) await sleep(gapMs);
-        looked++;
+        if (progress.done > 0) await sleep(gapMs);
         const asked = await askCanvas(key.slice(3), token, log);
+        progress.done++;
         if (asked.canvas) {
           store.saveCanvas(key, asked.canvas);
-          if (asked.canvas.url) found++;
-          else none++;
+          if (asked.canvas.url) progress.found++;
+          else progress.none++;
           continue;
         }
         // A refused or throttled token will refuse the rest too.
         if ([401, 403, 429].includes(asked.status)) {
-          stopped = `stopped at HTTP ${asked.status}`;
+          progress.stopped = `stopped at HTTP ${asked.status}`;
           break;
         }
       }
     } finally {
-      backfilling = false;
+      progress.running = false;
     }
+    const { found, none, done: looked, stopped } = progress;
     log(
       stopped ? 'warn' : 'info',
       `Canvas backfill: ${found} of ${looked} tracks have one, ${none} have none` +
