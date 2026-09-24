@@ -14,6 +14,7 @@ import {
   similarity,
   splitArtists,
 } from './text.ts';
+import { toSimplified } from './han.ts';
 
 export interface TrackQuery {
   title: string;
@@ -33,6 +34,19 @@ export interface TrackQuery {
 /** UPCs arrive zero-padded to 12, 13 or 14 digits depending on who reports them. */
 export function sameUpc(a: string | null | undefined, b: string | null | undefined): boolean {
   const bare = (value: string) => value.trim().replace(/^0+/, '');
+  return Boolean(a && b && bare(a) && bare(a) === bare(b));
+}
+
+/** Apple names a release with its format appended; the other stores do not. */
+const RELEASE_FORMAT = /\s+-\s+(single|ep)$/i;
+
+/**
+ * Two album names for the same release, for when the UPCs differ: a label can issue each store its
+ * own barcode for one album. Exact after folding case, punctuation, script and Apple's format suffix,
+ * because a near match between two releases of one song is exactly the case this has to separate.
+ */
+export function sameAlbum(a: string | null | undefined, b: string | null | undefined): boolean {
+  const bare = (value: string) => foldTight(toSimplified(value.trim().replace(RELEASE_FORMAT, '')));
   return Boolean(a && b && bare(a) && bare(a) === bare(b));
 }
 

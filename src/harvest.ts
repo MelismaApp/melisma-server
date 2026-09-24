@@ -115,13 +115,16 @@ export async function harvest(
   if (spotify?.canvas) store.saveCanvas(key, spotify.canvas);
 
   // Spotify's own answer first: for its track id it is exact, and it names the release being played.
+  // The album name is the phone's when it sent one, since that is what is playing.
   const spotifyUpc = spotify?.metadata?.albumUpc;
+  const spotifyAlbum = spotify?.metadata?.albumName;
   const apple = await fromApple(
     config,
     {
       ...asked,
       isrc: spotify?.isrc ?? asked.isrc,
       upc: typeof spotifyUpc === 'string' ? spotifyUpc : asked.upc,
+      album: asked.album || (typeof spotifyAlbum === 'string' ? spotifyAlbum : ''),
     },
     (level, message) => store.log(level, 'applemusic', message),
   ).catch(() => null);
@@ -894,7 +897,13 @@ async function fromApple(
 
   let song: AppleSong | undefined;
   if (track.isrc) {
-    const byIsrc = await songByIsrc(base, storefront, track.isrc, track.upc, headers);
+    const byIsrc = await songByIsrc(
+      base,
+      storefront,
+      track.isrc,
+      { upc: track.upc, album: track.album },
+      headers,
+    );
     if (byIsrc.song?.attributes) song = byIsrc.song;
     else if (byIsrc.status !== 200) log('debug', `harvest: Apple ISRC lookup returned HTTP ${byIsrc.status}`);
   }

@@ -6,7 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { Settings } from '../src/config.ts';
 import { Store } from '../src/db.ts';
 import { harvest } from '../src/harvest.ts';
-import { sameUpc } from '../src/match.ts';
+import { sameAlbum, sameUpc } from '../src/match.ts';
 import { songByIsrc } from '../src/providers/apple.ts';
 
 /**
@@ -134,7 +134,7 @@ test('the right result is chosen even when it is not first', async () => {
 // ---- by identity ----------------------------------------------------------
 
 /** One Apple song per release: same ISRC, its own id, cover and album UPC. */
-function onRelease(id: string, isrc: string, upc: string) {
+function onRelease(id: string, isrc: string, upc: string, albumName = `release ${id}`) {
   return {
     id,
     attributes: {
@@ -142,7 +142,7 @@ function onRelease(id: string, isrc: string, upc: string) {
       artistName: 'Kenshi Yonezu',
       durationInMillis: 255_000,
       isrc,
-      albumName: `release ${id}`,
+      albumName,
       artwork: { url: `https://example.invalid/${id}/{w}x{h}.jpg` },
     },
     relationships: { albums: { data: [{ id: `album-${id}`, attributes: { upc } }] } },
@@ -215,11 +215,11 @@ test('the Apple lyrics provider picks the release by UPC too', async () => {
     onRelease('single', 'JPU901800227', '4988031270000'),
     onRelease('album', 'JPU901800227', '4988031290411'),
   ];
-  const found = await songByIsrc(base, 'us', 'JPU901800227', '4988031290411', {});
+  const found = await songByIsrc(base, 'us', 'JPU901800227', { upc: '4988031290411' }, {});
   assert.equal(found.song?.id, 'album');
-  assert.equal((await songByIsrc(base, 'us', 'JPU901800227', undefined, {})).song?.id, 'single');
+  assert.equal((await songByIsrc(base, 'us', 'JPU901800227', {}, {})).song?.id, 'single');
   // A UPC that matches none of them is not a reason to take nothing.
-  assert.equal((await songByIsrc(base, 'us', 'JPU901800227', '0000000000017', {})).song?.id, 'single');
+  assert.equal((await songByIsrc(base, 'us', 'JPU901800227', { upc: '0000000000017' }, {})).song?.id, 'single');
 });
 
 test('UPCs compare without their zero padding, and never match when absent', () => {
@@ -236,4 +236,70 @@ test('the album UPC is part of what is known about a track', () => {
   assert.equal(store.identityFor('sp:upc').upc, '602557382457');
   assert.equal(store.library({}).rows.find((row) => row.key === 'sp:upc')?.ids.upc, '602557382457');
   store.close();
+});
+
+test('when no UPC matches, the release named like the one playing is taken', async () => {
+  // BOOMPALA, measured: Spotify's album UPC matched none of Apple's seven releases, because the label
+  // gave each store its own barcode for the same album.
+  byIsrc = [
+    onRelease('single', 'KRA382600001', '823375160922', 'BOOMPALA - Single'),
+    onRelease('album', 'KRA382600001', '823375107286', "'PUREFLOW', Pt. 1"),
+  ];
+  const found = await songByIsrc(
+    base,
+    'us',
+    'KRA382600001',
+    { upc: '823375107262', album: "'PUREFLOW', Pt. 1" },
+    {},
+  );
+  assert.equal(found.song?.id, 'album');
+
+  // Apple's format suffix is not part of the name. The single is second here, so taking the first
+  // would not pass for this.
+  byIsrc = [
+    onRelease('album', 'KRA382600001', '823375107286', "'PUREFLOW', Pt. 1"),
+    onRelease('single', 'KRA382600001', '823375160922', 'BOOMPALA - Single'),
+  ];
+  const single = await songByIsrc(base, 'us', 'KRA382600001', { album: 'BOOMPALA' }, {});
+  assert.equal(single.song?.id, 'single');
+  byIsrc = [
+    onRelease('single', 'KRA382600001', '823375160922', 'BOOMPALA - Single'),
+    onRelease('album', 'KRA382600001', '823375107286', "'PUREFLOW', Pt. 1"),
+  ];
+
+  // And a UPC match still comes first.
+  const byUpc = await songByIsrc(
+    base,
+    'us',
+    'KRA382600001',
+    { upc: '823375160922', album: "'PUREFLOW', Pt. 1" },
+    {},
+  );
+  assert.equal(byUpc.song?.id, 'single');
+});
+
+test('the harvest names the album the phone is playing', async () => {
+  const { store, config } = harness();
+  byIsrc = [
+    onRelease('single', 'JPU901800227', '4988031270000', 'Lemon - Single'),
+    onRelease('album', 'JPU901800227', '4988031299999', 'STRAY SHEEP'),
+  ];
+  store.noteIdentity('sp:named', { isrc: 'JPU901800227' });
+
+  await harvest(store, config, 'sp:named', { ...lemon, album: 'STRAY SHEEP' });
+
+  assert.equal(store.extras('sp:named', { hit: false })?.metadata?.appleMusicId, 'album');
+  store.close();
+});
+
+test('album names compare exactly, after folding what differs between stores', () => {
+  assert.equal(sameAlbum('BOOMPALA - Single', 'BOOMPALA'), true);
+  assert.equal(sameAlbum('Lemon - EP', 'lemon'), true);
+  assert.equal(sameAlbum("'PUREFLOW', Pt. 1", 'PUREFLOW Pt 1'), true);
+  assert.equal(sameAlbum('我肯定在幾百年前就說過愛你', '我肯定在几百年前就说过爱你'), true);
+  // Two releases of one song are exactly what this has to keep apart.
+  assert.equal(sameAlbum('BOOMPALA (Remixes)', 'BOOMPALA'), false);
+  assert.equal(sameAlbum("'PUREFLOW', Pt. 1", "'PUREFLOW', Pt. 2"), false);
+  assert.equal(sameAlbum('', ''), false);
+  assert.equal(sameAlbum(undefined, 'x'), false);
 });

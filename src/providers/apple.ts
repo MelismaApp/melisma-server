@@ -29,6 +29,7 @@ import {
   MATCH_THRESHOLD,
   cleanTitleOf,
   primaryArtistOf,
+  sameAlbum,
   sameUpc,
   score,
   type TrackQuery,
@@ -234,14 +235,15 @@ export const apple: Provider = {
  * The catalogue song for an ISRC, on the release being played when that can be told.
  *
  * One recording is usually several songs here, one per release (single, album, compilation), each
- * with its own id, cover and album. The ISRC cannot tell them apart; the album's UPC can. Without a
- * UPC, or when none matches, the first is taken, as before.
+ * with its own id, cover and album. The ISRC cannot tell them apart. The album's UPC usually can, but
+ * a label may give each store its own barcode for one album, so the album's name is the second
+ * check. Failing both, the first is taken.
  */
 export async function songByIsrc(
   base: string,
   storefront: string,
   isrc: string,
-  upc: string | undefined,
+  release: { upc?: string; album?: string },
   headers: Record<string, string>,
 ): Promise<{ song: Song | null; status: number }> {
   const found = await json<SongsResponse>(
@@ -253,12 +255,15 @@ export async function songByIsrc(
     { headers },
   );
   const songs = (found.value?.data ?? []).filter((song) => song.id);
-  const onRelease = upc
+  const byUpc = release.upc
     ? songs.find((song) =>
-        song.relationships?.albums?.data?.some((album) => sameUpc(album.attributes?.upc, upc)),
+        song.relationships?.albums?.data?.some((album) => sameUpc(album.attributes?.upc, release.upc)),
       )
     : undefined;
-  return { song: onRelease ?? songs[0] ?? null, status: found.result.status };
+  const byName = release.album
+    ? songs.find((song) => sameAlbum(song.attributes?.albumName, release.album))
+    : undefined;
+  return { song: byUpc ?? byName ?? songs[0] ?? null, status: found.result.status };
 }
 
 /** Finds the Apple song id, preferring the ISRC because it identifies the recording. */
@@ -269,7 +274,13 @@ async function identify(
   const { appleApiBase: base, appleStorefront: storefront } = ctx.config;
 
   if (track.isrc) {
-    const byIsrc = await songByIsrc(base, storefront, track.isrc, track.upc, headers(ctx));
+    const byIsrc = await songByIsrc(
+      base,
+      storefront,
+      track.isrc,
+      { upc: track.upc, album: track.album },
+      headers(ctx),
+    );
     if (byIsrc.song?.id) {
       reportSongDetails(byIsrc.song, ctx);
       return { id: byIsrc.song.id, match: 1 };

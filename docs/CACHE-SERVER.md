@@ -187,7 +187,9 @@ The album's UPC is identity too, one level up. An ISRC names a recording, which 
 several releases (single, album, compilation), each with its own cover and its own Apple song id.
 Spotify's UPC for the album of the track id says which release is playing. It is kept in `metadata`
 as `albumUpc`, served as `upc`, and used to pick the Apple song for an ISRC. UPCs arrive
-zero-padded to different widths, so they are compared without the padding.
+zero-padded to different widths, so they are compared without the padding. A label can also give
+each store its own barcode for one album, so when no UPC matches, the release whose name matches
+the album being played is taken, ignoring Apple's " - Single" and " - EP" suffixes.
 
 Both are only ever filled in, never overwritten. The first source to identify a recording is as
 good as the second, and overwriting invites a worse answer to replace a better one — LRCLIB's
