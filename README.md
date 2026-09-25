@@ -335,4 +335,8 @@ The sources, none of them affiliated with this:
 [AMLL TTML Database](https://github.com/amll-dev/amll-ttml-db) (CC0, community-timed),
 [LRCLIB](https://lrclib.net), NetEase Cloud Music, Musixmatch, Spotify, Apple Music.
 
+The Hokkien detector's tables (`src/hokkien/`) are built from 台華線頂對照典 by 鄭良偉 and 楊允言
+and English Wiktionary (CC BY-SA 4.0), iTaigi (CC0) and OpenCC (Apache-2.0); see
+[NOTICE.txt](src/hokkien/NOTICE.txt).
+
 Lyrics belong to their writers and publishers. This stores a cache on one machine.

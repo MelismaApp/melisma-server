@@ -233,11 +233,12 @@ no token knows a title and an artist, which is why it is asking in the first pla
 ## What language a song is sung in
 
 Taiwanese Hokkien is often written in the same characters as Mandarin, so the words alone cannot
-say which to romanize it as. The server answers with what it knows, and the admin can tag the rest.
+say which to romanize it as. The server detects Hokkien in the lyrics it holds, and the admin can tag
+what detection misses.
 
 ```
-GET /v1/lyrics …   →  X-Lyrics-Language: nan          X-Lyrics-Language-Source: tagged
-GET /v1/extras …   →  {"language": "nan", "languageSource": "tagged", …}
+GET /v1/lyrics …   →  X-Lyrics-Language: nan          X-Lyrics-Language-Source: tagged|detected
+GET /v1/extras …   →  {"language": "nan", "languageSource": "tagged"|"detected", …}
 PUT /v1/language   {spotifyId?, isrc?, title, artist, album?, durationMs?, language}   →  204
 GET /admin/api/languages   →  {tags: [{key, language, isrc, spotifyId, title, artist, album, durationMs, taggedAt}]}
 ```
@@ -251,9 +252,15 @@ GET /admin/api/languages   →  {tags: [{key, language, isrc, spotifyId, title, 
   about the recording, so it also reaches another key with the same ISRC (a song's single and
   album releases share one), including an ISRC learned after the tag was made. Setting or clearing
   it from any of those keys sets or clears it for all of them.
-- **Only the admin key writes it**, and the tag always wins: anything added later, a detector over
-  the held lyrics included, comes after it and never overwrites it. **Forget everything** drops
-  it; **Forget the lyrics** keeps it.
+- **Only the admin key writes it**, and the tag always wins over detection. **Forget everything**
+  drops it; **Forget the lyrics** keeps it.
+- **Detection** (`src/hokkien.ts`) is a port of the app's `HokkienDetector`, with its tables, so
+  the two reach the same answer. It runs over the cached lyrics when a song has no tag, and only
+  ever answers `nan`: a song it does not flag is unknown, not Mandarin. Kana anywhere makes a song
+  Japanese and skips it, as the app does. It is built to rather miss a Hokkien song than misread
+  a Mandarin one, and a song written in characters both languages share is the miss a tag is for.
+  The tables in `src/hokkien/` are copies of the app's and are updated with it; they are CC BY-SA
+  4.0 data (see `NOTICE.txt` there), not AGPL code.
 - **The export** is `GET /admin/api/languages`, with the names and ids each tag was made on, for
   contributing upstream.
 

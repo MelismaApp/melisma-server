@@ -625,7 +625,7 @@ async function lyrics(
   });
 
   // Headers, because `format=ttml` has no envelope to put it in. On a miss too: a tag is still true.
-  const language = languageOf(app.store, resolution.key, track.isrc);
+  const language = languageOf(app.store, resolution.key, track.isrc, resolution.document);
   if (language) {
     response.setHeader('X-Lyrics-Language', language.language);
     response.setHeader('X-Lyrics-Language-Source', language.source);
