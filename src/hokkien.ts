@@ -54,7 +54,7 @@ function load(): Model {
     }
   }
 
-  // One UTF-16 unit each side, as the app reads it; a pair whose Simplified form is astral is skipped.
+  // One UTF-16 unit each side, as the app reads it.
   const fold = new Map<string, string>();
   for (const line of read('fold.txt')) {
     if (line.length === 3 && line[1] === '\t') fold.set(line[0]!, line[2]!);
@@ -71,8 +71,8 @@ const MARKERS_NEEDED = 2;
 const MARKERS = ['明仔载', '知影', '按怎', '啥物', '囡仔', '查某', '恁', '袂', '毋', '喙', '厝', '媠', '佇', '拢是'];
 const NOT_MARKERS = ['佇立', '佇候', '佇足'];
 
-/** Characters written Cantonese uses and Hokkien does not. */
-const CANTONESE = '嘅唔咗喺冇佢哋乜嘢啲睇嚟諗嗰咁咩梗攞嘥';
+/** Characters written Cantonese uses and Hokkien does not, folded like the text they are counted in. */
+const CANTONESE = '嘅唔咗喺冇佢哋乜嘢啲睇嚟谂嗰咁咩梗攞嘥';
 
 /** "作词 : …", "编曲：…": credits, in Mandarin whatever the song is in. */
 const CREDIT = /^[ \t\n\x0B\f\r]*[^:： \t\n\x0B\f\r]{1,16}[ \t\n\x0B\f\r]*[:：]/;

@@ -62,6 +62,9 @@ test('too little text decides nothing', () => {
 
 test('written Cantonese is not Hokkien', () => {
   assert.equal(isHokkien(['我唔知你喺邊度', '佢哋啲嘢好靚', '你食咗飯未呀', '我哋今日冇嘢做']), false);
+  // Counted after folding, so a Traditional 諗 counts as its Simplified 谂.
+  assert.deepEqual(hokkienScore([...hokkien, '諗']), hokkienScore([...hokkien, '谂']));
+  assert.equal(hokkienScore([...hokkien, '諗'])!.cantonese, true);
 });
 
 test('kana anywhere makes it Japanese, as the app decides before asking', () => {
