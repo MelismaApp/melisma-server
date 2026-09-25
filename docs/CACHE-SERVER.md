@@ -117,6 +117,8 @@ But the two concerns are not actually in tension, because they are about differe
 - **`/v1/contribute` writes to the archive permanently**, so it is on the admin side of the
   line and always wants the key. An allowlist of routes rather than a `/v1/` prefix, because the
   prefix would have let anything on the Wi-Fi persist arbitrary lyrics into the merge.
+- **`PUT /v1/language` writes a tag every lookup of that song is then told**, so it is the admin
+  key's alone: `401` without a key, from the local network too, and `403` with a user key.
 
 The result: the app works exactly as written, the credentials are never reachable without the
 key, and a server exposed to the internet is not open by default. An explicit `Authorization:
@@ -227,6 +229,31 @@ One consequence worth knowing: extras are filed under the key the *asking* phone
 is the name-and-duration form. `cacheKey` prefers an ISRC when it has one, so filing under an ISRC
 the server has just learned would put the row under an identity no reader has yet — a phone with
 no token knows a title and an artist, which is why it is asking in the first place.
+
+## What language a song is sung in
+
+Taiwanese Hokkien is often written in the same characters as Mandarin, so the words alone cannot
+say which to romanize it as. The server answers with what it knows, and the admin can tag the rest.
+
+```
+GET /v1/lyrics …   →  X-Lyrics-Language: nan          X-Lyrics-Language-Source: tagged
+GET /v1/extras …   →  {"language": "nan", "languageSource": "tagged", …}
+PUT /v1/language   {spotifyId?, isrc?, title, artist, album?, durationMs?, language}   →  204
+GET /admin/api/languages   →  {tags: [{key, language, isrc, spotifyId, title, artist, album, durationMs, taggedAt}]}
+```
+
+- **Values** are BCP 47 primary subtags: `nan` Hokkien, `zh` Mandarin, `yue` Cantonese. `null`
+  clears a tag; anything else, a missing `language` included, is a `400`. Absent means unknown.
+- **Headers on a lookup**, because `format=ttml` has no envelope. On a `404` too: a tagged song
+  nobody has lyrics for is still that language. `/v1/extras` answers `200` for a tagged track even
+  when nothing else is held for it.
+- **Keyed like the lyrics:** the Spotify id, else the ISRC, else the name and duration. A tag also
+  reaches another key with the same ISRC, so a song's single and album releases share one.
+- **Only the admin key writes it**, and the tag always wins: anything added later, a detector over
+  the held lyrics included, comes after it and never overwrites it. **Forget everything** drops
+  it; **Forget the lyrics** keeps it.
+- **The export** is `GET /admin/api/languages`, with the names and ids each tag was made on, for
+  contributing upstream.
 
 ## Asking the server about itself
 

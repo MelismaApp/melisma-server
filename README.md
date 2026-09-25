@@ -258,12 +258,14 @@ GET  /v1/lyrics?title=&artist=&album=&durationMs=&spotifyId=&isrc=
      [&format=ttml|json] [&force=1] [&cacheOnly=1]
 POST /v1/warm        {title, artist, album, durationMs, spotifyId?}
 POST /v1/contribute  {track:{…}, provider, format:"lrc"|"ttml"|"json", body}
+PUT  /v1/language    {spotifyId?, isrc?, title, artist, language:"nan"|"zh"|"yue"|null}
 ```
 
 A lookup returns TTML in an envelope — `{status, data:{format, lyrics, source, providerName}}` —
 which is what the app expects and any other lyrics server could produce. `format=json` gives the
 structured model with its provenance and candidate list; `format=ttml` the bare file. `X-Cache` is
-`cache`, `remerge`, `network` or `absent`.
+`cache`, `remerge`, `network` or `absent`. A tagged song's language comes as `X-Lyrics-Language` and
+`X-Lyrics-Language-Source`; only the admin key can tag one.
 
 Authentication follows what a route can reach: `/admin/*` always needs the key, since it is the only
 surface that can read a credential, while a lookup is let through from your own network. A user key

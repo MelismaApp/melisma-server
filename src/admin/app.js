@@ -1384,6 +1384,9 @@ $('#cache-remerge').addEventListener('click', async () => {
   await loadCache();
 });
 
+/** The languages a track can be tagged with. See src/language.ts. */
+const LANGUAGE_NAMES = { nan: 'Taiwanese Hokkien', zh: 'Mandarin', yue: 'Cantonese' };
+
 async function showEntry(key) {
   const data = await api(`/admin/api/entry?key=${encodeURIComponent(key)}`);
   const host = $('#entry-detail');
@@ -1399,6 +1402,12 @@ async function showEntry(key) {
     el('h2', { text: artist ? `${artist} — ${title}` : title }),
     el('div', { class: 'card' }, [
       el('div', { class: 'desc mono', text: key }),
+      data.language
+        ? el('div', {
+            class: 'desc',
+            text: `Sung in ${LANGUAGE_NAMES[data.language.language] ?? data.language.language} (${data.language.source})`,
+          })
+        : null,
       provenance
         ? el('div', { style: 'margin-top: 8px' }, [
             el('div', {}, [

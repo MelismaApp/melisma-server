@@ -17,6 +17,8 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+import type { Language } from './language.ts';
+
 export interface CacheEntry {
   key: string;
   title: string;
@@ -69,6 +71,20 @@ function storedCanvas(value: Record<string, unknown> | null): StoredCanvas | nul
   return {
     ...(rest as unknown as StoredCanvas),
     thumbnails: variants.map((still) => ({ width: still.height, height: still.width, url: still.url })),
+  };
+}
+
+function toLanguageTag(row: Record<string, unknown>): LanguageTag {
+  return {
+    key: String(row.key),
+    language: row.language as Language,
+    isrc: (row.isrc as string | null) ?? null,
+    spotifyId: (row.spotify_id as string | null) ?? null,
+    title: String(row.title ?? ''),
+    artist: String(row.artist ?? ''),
+    album: String(row.album ?? ''),
+    durationMs: Number(row.duration_ms ?? 0),
+    taggedAt: Number(row.tagged_at),
   };
 }
 
@@ -208,6 +224,19 @@ export interface LibraryQuery {
   staleBelow?: number;
   limit?: number;
   offset?: number;
+}
+
+/** The admin's word on what language a track is sung in. See `src/language.ts`. */
+export interface LanguageTag {
+  key: string;
+  language: Language;
+  isrc: string | null;
+  spotifyId: string | null;
+  title: string;
+  artist: string;
+  album: string;
+  durationMs: number;
+  taggedAt: number;
 }
 
 /** Somebody's own key, beside the admin one. */
@@ -419,6 +448,22 @@ export class Store {
       );
 
       CREATE INDEX IF NOT EXISTS requests_key ON requests (key);
+
+      -- What language a track is sung in, as the admin tagged it. The names and ids are kept so the
+      -- tags can be exported and contributed upstream without the rest of the cache.
+      CREATE TABLE IF NOT EXISTS language_tags (
+        key         TEXT PRIMARY KEY,
+        language    TEXT NOT NULL,
+        isrc        TEXT,
+        spotify_id  TEXT,
+        title       TEXT NOT NULL DEFAULT '',
+        artist      TEXT NOT NULL DEFAULT '',
+        album       TEXT NOT NULL DEFAULT '',
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        tagged_at   INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS language_tags_isrc ON language_tags (isrc);
     `);
 
     // Columns added after the table first shipped. SQLite has no `ADD COLUMN IF NOT EXISTS`, and
@@ -953,7 +998,59 @@ export class Store {
       this.db.prepare('DELETE FROM extras WHERE key = ?').run(key);
       // Who asked, too: a request with nothing else held on it would keep the track listed.
       this.db.prepare('DELETE FROM requests WHERE key = ?').run(key);
+      this.db.prepare('DELETE FROM language_tags WHERE key = ?').run(key);
     }
+  }
+
+  /** Tags a track's language, or clears the tag with `language` null. */
+  tagLanguage(
+    key: string,
+    language: Language | null,
+    track: { title?: string; artist?: string; album?: string; durationMs?: number; spotifyId?: string; isrc?: string } = {},
+    at = Date.now(),
+  ): void {
+    if (language === null) {
+      this.db.prepare('DELETE FROM language_tags WHERE key = ?').run(key);
+      return;
+    }
+    const isrc = (track.isrc ?? this.identityFor(key).isrc)?.toUpperCase() ?? null;
+    const spotifyId = track.spotifyId ?? (key.startsWith('sp:') ? key.slice(3) : null);
+    this.db
+      .prepare(
+        `INSERT INTO language_tags
+           (key, language, isrc, spotify_id, title, artist, album, duration_ms, tagged_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           language = excluded.language, isrc = excluded.isrc, spotify_id = excluded.spotify_id,
+           title = excluded.title, artist = excluded.artist, album = excluded.album,
+           duration_ms = excluded.duration_ms, tagged_at = excluded.tagged_at`,
+      )
+      .run(
+        key, language, isrc, spotifyId, track.title ?? '', track.artist ?? '', track.album ?? '',
+        Math.max(0, Math.round(track.durationMs ?? 0)), at,
+      );
+  }
+
+  /**
+   * The tag for a track: on its own key, or else on another key for the same recording. A song's
+   * single and album releases have different Spotify ids and one ISRC.
+   */
+  languageTag(key: string, isrc?: string | null): LanguageTag | null {
+    const own = this.db.prepare('SELECT * FROM language_tags WHERE key = ?').get(key);
+    if (own) return toLanguageTag(own as Record<string, unknown>);
+    const recording = isrc ?? this.identityFor(key).isrc;
+    if (!recording) return null;
+    const shared = this.db
+      .prepare('SELECT * FROM language_tags WHERE isrc = ? ORDER BY tagged_at DESC LIMIT 1')
+      .get(recording.toUpperCase());
+    return shared ? toLanguageTag(shared as Record<string, unknown>) : null;
+  }
+
+  /** Every tag, newest first, for exporting. */
+  languageTags(): LanguageTag[] {
+    return (
+      this.db.prepare('SELECT * FROM language_tags ORDER BY tagged_at DESC').all() as Record<string, unknown>[]
+    ).map(toLanguageTag);
   }
 
   listEntries(options: { search?: string; limit?: number; offset?: number } = {}): CacheEntry[] {

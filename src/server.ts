@@ -27,6 +27,7 @@ import { backfillCanvas, backfillIsrc, canvasBackfillProgress } from './harvest.
 import { parseTtml, writeTtml } from './format/ttml.ts';
 import { parseLrc, writePlainText } from './format/lrc.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
+import { isLanguage, languageOf, LANGUAGES } from './language.ts';
 import type { LyricsDocument, MergedDocument } from './model.ts';
 import { redact } from './http.ts';
 
@@ -211,6 +212,29 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
 
     case 'POST /v1/contribute':
       return contribute(app, request, response);
+
+    // The one write the app makes, and only with the admin key: it is not on any allowlist.
+    case 'PUT /v1/language': {
+      const body = await readJson<Record<string, unknown>>(request);
+      const track = trackFromJson(body);
+      if (!track) return send(response, 400, { error: 'need at least a title' });
+      // Null clears; leaving it out is a mistake rather than a way of clearing.
+      const language = body?.language;
+      if (language !== null && !isLanguage(language)) {
+        return send(response, 400, { error: `language must be one of ${LANGUAGES.join(', ')}, or null` });
+      }
+      app.store.tagLanguage(cacheKey(track), language, track);
+      app.store.log(
+        'info',
+        null,
+        `${track.artist} — ${track.title}: ${language ? `tagged as ${language}` : 'language tag cleared'}`,
+      );
+      response.writeHead(204);
+      return void response.end();
+    }
+
+    case 'GET /admin/api/languages':
+      return send(response, 200, { tags: app.store.languageTags() });
 
     case 'GET /v1/extras':
       return readExtras(app, url, response);
@@ -499,6 +523,7 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       return send(response, 200, {
         key,
         asked,
+        language: languageOf(app.store, key),
         entry: entry ? { ...entry, merged: undefined } : null,
         merged: entry?.merged ? JSON.parse(entry.merged) : null,
         extras,
@@ -598,6 +623,13 @@ async function lyrics(
     // Only a device's lookup counts as asked for; the page's (a TTML download) does not.
     countHit: asker !== null,
   });
+
+  // Headers, because `format=ttml` has no envelope to put it in. On a miss too: a tag is still true.
+  const language = languageOf(app.store, resolution.key, track.isrc);
+  if (language) {
+    response.setHeader('X-Lyrics-Language', language.language);
+    response.setHeader('X-Lyrics-Language-Source', language.source);
+  }
 
   if (!resolution.document) {
     // Any non-2xx reads as "nothing found" to the app, which does not distinguish a miss
@@ -950,8 +982,12 @@ function readExtras(app: App, url: URL, response: ServerResponse): void {
   const track = trackFromParams(url.searchParams);
   if (!track) return void send(response, 400, { error: 'need at least a title' });
 
-  const found = app.store.extras(cacheKey(track));
-  if (!found) return void send(response, 404, { error: 'nothing held for this track' });
+  const key = cacheKey(track);
+  const held = app.store.extras(key);
+  const language = languageOf(app.store, key, track.isrc);
+  if (!held && !language) return void send(response, 404, { error: 'nothing held for this track' });
+  // A tagged track with nothing else held still answers, with only its language.
+  const found: Partial<NonNullable<typeof held>> = held ?? {};
 
   // Only for the Spotify id asked about. The key already implies it; checking the stored id too means
   // a Canvas can never be served for a track it was not fetched for.
@@ -969,9 +1005,11 @@ function readExtras(app: App, url: URL, response: ServerResponse): void {
     metadata: found.metadata ?? undefined,
     // Identity lives on the cache entry rather than here, because the matcher is what needs
     // it — but a caller asking about a track may as well be told.
-    isrc: app.store.isrcFor(cacheKey(track)) ?? undefined,
+    isrc: app.store.isrcFor(key) ?? undefined,
     // The album's, from Spotify's release for this track. Also inside `metadata`, as `albumUpc`.
     upc: typeof found.metadata?.albumUpc === 'string' ? found.metadata.albumUpc : undefined,
+    language: language?.language,
+    languageSource: language?.source,
     source: found.source || undefined,
   });
 }
