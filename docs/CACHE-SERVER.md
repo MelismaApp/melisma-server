@@ -247,8 +247,10 @@ GET /admin/api/languages   →  {tags: [{key, language, isrc, spotifyId, title, 
 - **Headers on a lookup**, because `format=ttml` has no envelope. On a `404` too: a tagged song
   nobody has lyrics for is still that language. `/v1/extras` answers `200` for a tagged track even
   when nothing else is held for it.
-- **Keyed like the lyrics:** the Spotify id, else the ISRC, else the name and duration. A tag also
-  reaches another key with the same ISRC, so a song's single and album releases share one.
+- **Keyed like the lyrics:** the Spotify id, else the ISRC, else the name and duration. A tag is
+  about the recording, so it also reaches another key with the same ISRC (a song's single and
+  album releases share one), including an ISRC learned after the tag was made. Setting or clearing
+  it from any of those keys sets or clears it for all of them.
 - **Only the admin key writes it**, and the tag always wins: anything added later, a detector over
   the held lyrics included, comes after it and never overwrites it. **Forget everything** drops
   it; **Forget the lyrics** keeps it.

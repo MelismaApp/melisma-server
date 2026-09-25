@@ -74,11 +74,21 @@ function storedCanvas(value: Record<string, unknown> | null): StoredCanvas | nul
   };
 }
 
+/**
+ * A tag's recording: the ISRC it was tagged with, or one learned for its key since, so a Spotify
+ * track tagged before its ISRC was known is still found by it once it is.
+ */
+const TAG_ISRC = `UPPER(COALESCE(
+  t.isrc,
+  (SELECT isrc FROM entries WHERE key = t.key),
+  (SELECT isrc FROM extras WHERE key = t.key)
+))`;
+
 function toLanguageTag(row: Record<string, unknown>): LanguageTag {
   return {
     key: String(row.key),
     language: row.language as Language,
-    isrc: (row.isrc as string | null) ?? null,
+    isrc: (row.recording as string | null) ?? null,
     spotifyId: (row.spotify_id as string | null) ?? null,
     title: String(row.title ?? ''),
     artist: String(row.artist ?? ''),
@@ -1002,33 +1012,58 @@ export class Store {
     }
   }
 
-  /** Tags a track's language, or clears the tag with `language` null. */
+  /**
+   * Tags a track's language, or clears the tag with `language` null.
+   *
+   * A tag is about the recording, so it is set or cleared on every key tagged for the same ISRC too:
+   * otherwise a release cleared here would inherit another release's tag straight back.
+   */
   tagLanguage(
     key: string,
     language: Language | null,
     track: { title?: string; artist?: string; album?: string; durationMs?: number; spotifyId?: string; isrc?: string } = {},
     at = Date.now(),
   ): void {
+    // The ISRC asked with, else the one this tag already has, else one learned for the key.
+    const stored = this.db.prepare('SELECT isrc FROM language_tags WHERE key = ?').get(key) as
+      | { isrc: string | null }
+      | undefined;
+    const isrc = (track.isrc ?? stored?.isrc ?? this.identityFor(key).isrc)?.toUpperCase() ?? null;
+    const sameRecording = isrc
+      ? (this.db
+          .prepare(`SELECT t.key AS key FROM language_tags t WHERE ${TAG_ISRC} = ?`)
+          .all(isrc) as { key: string }[]).map((row) => row.key)
+      : [];
+
     if (language === null) {
-      this.db.prepare('DELETE FROM language_tags WHERE key = ?').run(key);
+      const remove = this.db.prepare('DELETE FROM language_tags WHERE key = ?');
+      for (const tagged of new Set([key, ...sameRecording])) remove.run(tagged);
       return;
     }
-    const isrc = (track.isrc ?? this.identityFor(key).isrc)?.toUpperCase() ?? null;
+
     const spotifyId = track.spotifyId ?? (key.startsWith('sp:') ? key.slice(3) : null);
+    // A retag that leaves something out keeps what was stored.
     this.db
       .prepare(
         `INSERT INTO language_tags
            (key, language, isrc, spotify_id, title, artist, album, duration_ms, tagged_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET
-           language = excluded.language, isrc = excluded.isrc, spotify_id = excluded.spotify_id,
-           title = excluded.title, artist = excluded.artist, album = excluded.album,
-           duration_ms = excluded.duration_ms, tagged_at = excluded.tagged_at`,
+           language    = excluded.language,
+           isrc        = excluded.isrc,
+           spotify_id  = COALESCE(excluded.spotify_id, language_tags.spotify_id),
+           title       = COALESCE(NULLIF(excluded.title, ''), language_tags.title),
+           artist      = COALESCE(NULLIF(excluded.artist, ''), language_tags.artist),
+           album       = COALESCE(NULLIF(excluded.album, ''), language_tags.album),
+           duration_ms = COALESCE(NULLIF(excluded.duration_ms, 0), language_tags.duration_ms),
+           tagged_at   = excluded.tagged_at`,
       )
       .run(
         key, language, isrc, spotifyId, track.title ?? '', track.artist ?? '', track.album ?? '',
         Math.max(0, Math.round(track.durationMs ?? 0)), at,
       );
+    const retag = this.db.prepare('UPDATE language_tags SET language = ?, tagged_at = ? WHERE key = ?');
+    for (const tagged of sameRecording) if (tagged !== key) retag.run(language, at, tagged);
   }
 
   /**
@@ -1036,12 +1071,15 @@ export class Store {
    * single and album releases have different Spotify ids and one ISRC.
    */
   languageTag(key: string, isrc?: string | null): LanguageTag | null {
-    const own = this.db.prepare('SELECT * FROM language_tags WHERE key = ?').get(key);
+    const own = this.db.prepare(`SELECT t.*, ${TAG_ISRC} AS recording FROM language_tags t WHERE t.key = ?`).get(key);
     if (own) return toLanguageTag(own as Record<string, unknown>);
     const recording = isrc ?? this.identityFor(key).isrc;
     if (!recording) return null;
     const shared = this.db
-      .prepare('SELECT * FROM language_tags WHERE isrc = ? ORDER BY tagged_at DESC LIMIT 1')
+      .prepare(
+        `SELECT t.*, ${TAG_ISRC} AS recording FROM language_tags t
+          WHERE ${TAG_ISRC} = ? ORDER BY t.tagged_at DESC LIMIT 1`,
+      )
       .get(recording.toUpperCase());
     return shared ? toLanguageTag(shared as Record<string, unknown>) : null;
   }
@@ -1049,7 +1087,9 @@ export class Store {
   /** Every tag, newest first, for exporting. */
   languageTags(): LanguageTag[] {
     return (
-      this.db.prepare('SELECT * FROM language_tags ORDER BY tagged_at DESC').all() as Record<string, unknown>[]
+      this.db
+        .prepare(`SELECT t.*, ${TAG_ISRC} AS recording FROM language_tags t ORDER BY t.tagged_at DESC`)
+        .all() as Record<string, unknown>[]
     ).map(toLanguageTag);
   }
 

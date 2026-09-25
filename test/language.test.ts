@@ -147,3 +147,50 @@ test('"Forget everything" forgets the tag; "Forget the lyrics" keeps it', async 
   await forget(true);
   assert.equal(app.store.languageTag(`sp:${ID}`), null);
 });
+
+// ---- one recording, several keys ---------------------------------------------
+
+const SINGLE = '1111111111111111111111';
+const ALBUM = '2222222222222222222222';
+const LATER = '3333333333333333333333';
+
+test('a track tagged before its ISRC was known is found by it once it is', async () => {
+  const isrc = 'TWA451500002';
+  await tag({ ...song, spotifyId: SINGLE, language: 'nan' }, adminKey);
+  assert.equal((await extras(query(ALBUM, isrc))).status, 404);
+
+  app.store.noteIdentity(`sp:${SINGLE}`, { isrc });
+  assert.equal((await extras(query(ALBUM, isrc))).body.language, 'nan');
+  const { tags } = (await (
+    await fetch(`${base}/admin/api/languages`, { headers: { Authorization: `Bearer ${adminKey}` } })
+  ).json()) as { tags: { key: string; isrc: string | null }[] };
+  assert.equal(tags.find((row) => row.key === `sp:${SINGLE}`)?.isrc, isrc);
+});
+
+test('clearing a release clears the tag it inherited, and setting one sets them all', async () => {
+  const isrc = 'TWA451500003';
+  await tag({ ...song, spotifyId: SINGLE, isrc, language: 'nan' }, adminKey);
+  await tag({ ...song, spotifyId: LATER, isrc, language: 'nan' }, adminKey);
+
+  // Retagged from the album release: the single says the same, not what it was tagged first.
+  await tag({ ...song, spotifyId: ALBUM, isrc, language: 'zh' }, adminKey);
+  assert.equal((await extras(query(SINGLE, isrc))).body.language, 'zh');
+  assert.equal((await extras(query(LATER))).body.language, 'zh');
+
+  // Cleared from a release that only inherited it: gone from all of them.
+  await tag({ ...song, spotifyId: '4444444444444444444444', isrc, language: null }, adminKey);
+  for (const id of [SINGLE, ALBUM, LATER]) {
+    assert.equal((await extras(query(id, isrc))).body.language, undefined, id);
+  }
+});
+
+test('a retag that leaves the ISRC out keeps the one stored', async () => {
+  const isrc = 'TWA451500004';
+  const only = '5555555555555555555555';
+  await tag({ ...song, spotifyId: only, isrc, album: 'The Single', language: 'nan' }, adminKey);
+  await tag({ title: song.title, artist: song.artist, spotifyId: only, language: 'zh' }, adminKey);
+
+  assert.equal((await extras(query(ALBUM, isrc))).body.language, 'zh');
+  const stored = app.store.languageTag(`sp:${only}`)!;
+  assert.deepEqual([stored.isrc, stored.album, stored.durationMs], [isrc, 'The Single', 240_000]);
+});
