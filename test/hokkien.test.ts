@@ -67,6 +67,28 @@ test('written Cantonese is not Hokkien', () => {
   assert.equal(hokkienScore([...hokkien, '諗'])!.cantonese, true);
 });
 
+test('a song not written in Chinese characters is not Hokkien', () => {
+  const korean = ['어지러워 너의 그 미소', '눈이 멀어 Stuck in your halo', '빠져버려 난 이제 포로', '너의 눈빛에 갇혀버린 나'];
+  assert.equal(isHokkien(korean), false);
+  assert.equal(isHokkien([...korean, ...korean, '我毋知影你佇佗位，阮兜的囡仔攏足乖']), false);
+  // Enough Hokkien to score on its own, and still outnumbered by the Hangul.
+  assert.equal(isHokkien(hokkien), true);
+  assert.equal(isHokkien([...korean, ...korean, ...hokkien]), false);
+});
+
+test('English lines do not count against a Hokkien song', () => {
+  const song = [
+    ...Array.from({ length: 8 }, () => 'Spent a lifetime seeking love, thought you would be the one'),
+    '我毋知影你佇佗位', '阮兜的囡仔攏足乖', '伊講明仔載欲來揣我',
+  ];
+  assert.equal(isHokkien(song), true);
+});
+
+test('Hangul is not Han', () => {
+  // U+F900 and U+8C48 look alike; a range typed from the second takes in every Hangul syllable.
+  assert.equal(hokkienScore(Array.from({ length: 5 }, () => '어지러워너의그미소')), null);
+});
+
 test('kana anywhere makes it Japanese, as the app decides before asking', () => {
   assert.equal(isHokkien([...hokkien, 'ありがとう']), false);
 });

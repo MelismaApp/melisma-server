@@ -1,5 +1,5 @@
 Taiwanese Hokkien detector tables, copied from the Melisma app (github.com/MelismaApp/melisma,
-commit a40ed5c, app/src/main/resources/hokkien/), where tools/hokkien/build_tables.py builds them.
+commit 564cb87, app/src/main/resources/hokkien/), where tools/hokkien/build_tables.py builds them.
 They are data, not code, and are not covered by this repository's AGPL-3.0 licence.
 
 detect.txt holds weights computed from:

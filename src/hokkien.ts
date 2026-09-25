@@ -80,6 +80,10 @@ const CREDIT = /^[ \t\n\x0B\f\r]*[^:： \t\n\x0B\f\r]{1,16}[ \t\n\x0B\f\r]*[:：
 /** Kana anywhere makes the Han Japanese, as the app decides before it asks this. */
 const KANA = /[぀-ヿㇰ-ㇿ]/;
 
+/** A letter of a script that is neither Han nor Latin: Hangul, Cyrillic, Thai… */
+const OTHER_LETTER = /\p{L}/u;
+const LATIN = /\p{Script=Latin}/u;
+
 function fold(text: string, table: Map<string, string>): string {
   let out = '';
   for (let i = 0; i < text.length; i++) out += table.get(text[i]!) ?? text[i];
@@ -98,7 +102,7 @@ function isHan(char: string): boolean {
 /**
  * The detector's working: the song's average weight, how many Hokkien-only words it has, and whether
  * it reads as written Cantonese. Null when there is nothing to decide on: kana, too few Han characters,
- * or no tables.
+ * a song mostly in another script, or no tables.
  */
 export function hokkienScore(lines: string[]): { score: number; markers: number; cantonese: boolean } | null {
   model ??= load();
@@ -110,6 +114,15 @@ export function hokkienScore(lines: string[]): { score: number; markers: number;
   let han = '';
   for (let i = 0; i < text.length; i++) if (isHan(text[i]!)) han += text[i];
   if (han.length < MIN_CHARACTERS) return null;
+
+  // Only a song whose own script is Chinese: a Korean one with a line or two of Chinese is not Hokkien,
+  // whatever those lines score. Latin does not count against it; 愛到明仔載 is half English.
+  let otherScripts = 0;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!;
+    if (OTHER_LETTER.test(char) && !isHan(char) && !LATIN.test(char)) otherScripts++;
+  }
+  if (otherScripts > han.length) return null;
 
   let cantonese = 0;
   for (let i = 0; i < han.length; i++) if (CANTONESE.includes(han[i]!)) cantonese++;
