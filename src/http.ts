@@ -54,8 +54,10 @@ export const MUSIXMATCH_HOST = 'apic.musixmatch.com';
  * refilled over the interval. Four rather than three, because a retry inside a lookup should not cost it
  * the lyrics. Every other host is one, which is the old behaviour.
  */
+export const MUSIXMATCH_BURST = 4;
+
 const BURST: Record<string, number> = {
-  [/* musixmatch */ 'apic.musixmatch.com']: 4,
+  [MUSIXMATCH_HOST]: MUSIXMATCH_BURST,
 };
 
 const DEFAULT_BURST = 1;

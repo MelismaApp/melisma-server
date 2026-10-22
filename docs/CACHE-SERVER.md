@@ -297,6 +297,25 @@ reach. Its own developer menu can say why LRCLIB found nothing; it cannot say wh
 found nothing, and "the server returned no lyrics" covers a source switched off, a token that
 expired last week and a track nobody has transcribed. Those need telling apart from a phone.
 
+## Musixmatch, through a relay
+
+Musixmatch's AWS load balancer answers the deployed server's address with a `403` to every
+request, token or not, while the same requests from a home connection or from Cloudflare are
+answered. So `endpoint.musixmatchRelay` can point the server at `worker/relay.js`, a Cloudflare
+Worker, instead. Its setup is in the README.
+
+- **Gated by Cloudflare Access**, with a service token the server sends as
+  `CF-Access-Client-Id`/`-Secret`. The Worker also verifies the `Cf-Access-Jwt-Assertion` itself
+  (signature, audience, issuer, expiry), so a request that reaches it some other way is refused.
+  Until it is told the Access application, it refuses everything. Its `workers.dev` and preview
+  addresses are off, since those would skip Access.
+- **Not an open proxy:** only `token.get`, `matcher.track.get`, `track.richsync.get` and
+  `track.subtitle.get`, by GET, to `apic.musixmatch.com`, with none of the request's headers.
+- **HTTPS only** on the server's side, since the service token goes with every request. An
+  `http://` relay is ignored.
+- **Paced as Musixmatch is**: same interval, same allowance per lookup.
+- **Logs off** on the Worker. The query carries the Musixmatch user token.
+
 ## What the server deliberately does not do
 
 - **Interludes.** The app inserts its own three-dot lines from the gaps between lines. The

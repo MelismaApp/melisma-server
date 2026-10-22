@@ -610,6 +610,7 @@ function fillSettings(config) {
   $('#set-endpoint-netease').value = config.neteaseBaseUrl ?? '';
   $('#set-endpoint-apple').value = config.appleApiBase ?? '';
   $('#set-endpoint-appleStorefront').value = config.appleStorefront ?? '';
+  $('#set-endpoint-musixmatchRelay').value = config.musixmatchRelayUrl ?? '';
   $('#set-server-host').value = config.host ?? '';
   $('#set-server-port').value = config.port ?? '';
   $('#set-allowLocalNetwork').checked = config.allowLocalNetwork !== false;
@@ -638,6 +639,7 @@ $('#settings-save').addEventListener('click', async () => {
     'endpoint.netease': $('#set-endpoint-netease').value,
     'endpoint.apple': $('#set-endpoint-apple').value,
     'endpoint.appleStorefront': $('#set-endpoint-appleStorefront').value,
+    'endpoint.musixmatchRelay': $('#set-endpoint-musixmatchRelay').value,
     'server.host': $('#set-server-host').value,
     'server.port': $('#set-server-port').value,
     'server.allowLocalNetwork': $('#set-allowLocalNetwork').checked ? '1' : '0',

@@ -228,6 +228,34 @@ stage, no lockfile to keep in step.
 > `kamal-proxy` always sets, so there are two locks. The consequence is that a deployed server always
 > wants the key, including from the app, which is the right way round.
 
+### The Musixmatch relay
+
+Musixmatch's load balancer answers some cloud hosts with a `403` to every request, token or not;
+an Oracle Cloud VM is one. `worker/` is a Cloudflare Worker that asks from Cloudflare's network
+instead. It relays only the four calls the server makes, and it sits behind Cloudflare Access with
+a service token. It checks the Access token itself as well, and refuses everything until it knows
+the Access application.
+
+In this order, so the gate exists before anything is relayed:
+
+1. **Zero Trust → Access → Service auth → Service tokens:** create one, and copy its Client ID and
+   Client Secret.
+2. **Access → Applications → Self-hosted:** the relay's hostname (`mxm-relay.asu.tw` in
+   `worker/wrangler.toml`), with one policy: action **Service Auth**, include that service token.
+   Note its **Application Audience (AUD) tag** and your team domain
+   (`https://<team>.cloudflareaccess.com`).
+3. **Deploy and configure the Worker:**
+   ```sh
+   cd worker
+   npx wrangler deploy
+   npx wrangler secret put ACCESS_TEAM_DOMAIN   # https://<team>.cloudflareaccess.com
+   npx wrangler secret put ACCESS_AUD           # the AUD tag
+   ```
+4. **Check the gate:** `curl -i https://mxm-relay.asu.tw/ws/1.1/token.get` must be refused by
+   Access, not answered.
+5. **Admin page:** **Settings → Endpoints → Musixmatch relay** is `https://mxm-relay.asu.tw`, and
+   the Client ID and Secret go in the **Musixmatch** card. **Test** should then match a song.
+
 ## Configuration
 
 All of this is editable in the admin page and stored in the database, so none of it needs a restart.

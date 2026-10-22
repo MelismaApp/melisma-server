@@ -11,7 +11,7 @@
  */
 
 import type { Store } from './db.ts';
-import { MUSIXMATCH_HOST, pace } from './http.ts';
+import { MUSIXMATCH_BURST, MUSIXMATCH_HOST, pace } from './http.ts';
 
 export interface ProviderSetting {
   enabled: boolean;
@@ -83,6 +83,8 @@ export interface Config {
   amllBaseUrl: string;
   appleApiBase: string;
   appleStorefront: string;
+  /** Empty for none. Musixmatch refuses the server's own address; see `worker/relay.js`. */
+  musixmatchRelayUrl: string;
 
   secrets: Record<SecretName, string>;
 }
@@ -113,6 +115,9 @@ export const SECRET_NAMES = [
   'spotifyClientId',
   'spotifyClientSecret',
   'musixmatchUserToken',
+  /** The Cloudflare Access service token the Musixmatch relay is gated by. */
+  'musixmatchRelayClientId',
+  'musixmatchRelayClientSecret',
   'neteaseCookie',
   'appleBearerToken',
   'appleMediaUserToken',
@@ -153,6 +158,7 @@ const DEFAULTS = {
   amllBaseUrl: 'https://api.amll.dev',
   appleApiBase: 'https://amp-api.music.apple.com',
   appleStorefront: 'us',
+  musixmatchRelayUrl: '',
 };
 
 export class Settings {
@@ -237,6 +243,10 @@ export class Settings {
       appleApiBase: trimSlash(value('endpoint.apple', 'BL_APPLE_API') ?? DEFAULTS.appleApiBase),
       appleStorefront: (value('endpoint.appleStorefront', 'BL_APPLE_STOREFRONT') ?? DEFAULTS.appleStorefront)
         .toLowerCase(),
+      // HTTPS only: the Access service token rides along with every request to it.
+      musixmatchRelayUrl: httpsOnly(
+        trimSlash(value('endpoint.musixmatchRelay', 'BL_MUSIXMATCH_RELAY') ?? DEFAULTS.musixmatchRelayUrl),
+      ),
 
       secrets,
     };
@@ -265,7 +275,11 @@ export class Settings {
 
   /** Pushes the configured per-host pacing into the transport. Called on read-at-boot and on save. */
   applyPacing(): void {
-    pace(MUSIXMATCH_HOST, this.read().musixmatchPaceMs);
+    const config = this.read();
+    pace(MUSIXMATCH_HOST, config.musixmatchPaceMs);
+    // The relay is the same account asking, so it gets the same pace and the same burst.
+    const relay = hostOf(config.musixmatchRelayUrl);
+    if (relay) pace(relay, config.musixmatchPaceMs, MUSIXMATCH_BURST);
   }
 
   /**
@@ -327,6 +341,7 @@ function isWritable(key: string): boolean {
     'endpoint.amll',
     'endpoint.apple',
     'endpoint.appleStorefront',
+    'endpoint.musixmatchRelay',
   ].includes(key);
 }
 
@@ -344,6 +359,18 @@ function bool(raw: string | undefined, fallback: boolean): boolean {
 function int(raw: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(raw ?? '', 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function httpsOnly(url: string): string {
+  return url.startsWith('https://') ? url : '';
+}
+
+function hostOf(url: string): string | null {
+  try {
+    return url ? new URL(url).host : null;
+  } catch {
+    return null;
+  }
 }
 
 function trimSlash(url: string): string {

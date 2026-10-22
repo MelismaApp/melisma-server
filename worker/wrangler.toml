@@ -1,0 +1,14 @@
+# The Musixmatch relay. See relay.js and docs/CACHE-SERVER.md.
+#
+# Reachable only on the custom domain, which Cloudflare Access gates with a service token. No
+# workers.dev or preview address, since those would skip Access. ACCESS_TEAM_DOMAIN and ACCESS_AUD are
+# set with `wrangler secret put`; until both are, every request is refused.
+name = "melisma-musixmatch-relay"
+main = "relay.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+preview_urls = false
+routes = [{ pattern = "mxm-relay.asu.tw", custom_domain = true }]
+
+[observability]
+enabled = false

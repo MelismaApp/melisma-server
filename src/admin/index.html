@@ -239,6 +239,19 @@
               <button class="action" data-reveal="musixmatchUserToken">Reveal</button>
               <button class="action primary" data-save-secret="musixmatchUserToken">Save</button>
             </div>
+            <div class="desc" style="margin: 14px 0 10px">
+              Musixmatch refuses some cloud hosts' addresses. Through the relay in <code>worker/</code>,
+              set under <strong>Endpoints</strong>, it is asked from Cloudflare instead. These are the
+              Access service token that relay is gated by.
+            </div>
+            <div class="inline">
+              <input type="password" class="mono" id="secret-musixmatchRelayClientId" placeholder="Client ID" />
+              <button class="action primary" data-save-secret="musixmatchRelayClientId">Save</button>
+            </div>
+            <div class="inline" style="margin-top: 8px">
+              <input type="password" class="mono" id="secret-musixmatchRelayClientSecret" placeholder="Client Secret" />
+              <button class="action primary" data-save-secret="musixmatchRelayClientSecret">Save</button>
+            </div>
           </div>
 
           <div class="card">
@@ -575,6 +588,7 @@
               <label class="field"><span>NetEase</span><input type="text" id="set-endpoint-netease" class="mono" /></label>
               <label class="field"><span>Apple API</span><input type="text" id="set-endpoint-apple" class="mono" /></label>
               <label class="field"><span>Apple storefront</span><input type="text" id="set-endpoint-appleStorefront" class="mono" placeholder="us" /></label>
+              <label class="field"><span>Musixmatch relay (HTTPS)</span><input type="text" id="set-endpoint-musixmatchRelay" class="mono" placeholder="https://mxm-relay.example.com" /></label>
             </div>
           </div>
 

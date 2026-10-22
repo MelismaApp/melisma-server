@@ -19,9 +19,15 @@ import { backOff, isUnavailable, json, query, request } from '../http.ts';
 import { MATCH_THRESHOLD, cleanTitleOf, primaryArtistOf, score, type TrackQuery } from '../match.ts';
 import { parseRichSync } from '../format/musixmatch.ts';
 import { parseLrc } from '../format/lrc.ts';
+import type { Config } from '../config.ts';
 import type { Provider, ProviderAnswer, ProviderContext } from './types.ts';
 
 const API = 'https://apic.musixmatch.com/ws/1.1';
+
+/** The API, or the relay in front of it when one is set. See `worker/relay.js`. */
+function apiOf(config: Config): string {
+  return config.musixmatchRelayUrl ? `${config.musixmatchRelayUrl}/ws/1.1` : API;
+}
 
 /**
  * Body statuses that mean "I will not answer", not "there is nothing to answer with".
@@ -63,6 +69,11 @@ const COOKIE_APP_IDS = [
  * from a cloud host, while the same requests from home were answered.
  */
 const ADDRESS_REFUSED = "Musixmatch refuses this server's address (HTTP 403); a new token will not help";
+const RELAY_REFUSED = 'the Musixmatch relay refused the request (HTTP 403): check its Access service token';
+
+function refused(config: Config): string {
+  return config.musixmatchRelayUrl ? RELAY_REFUSED : ADDRESS_REFUSED;
+}
 
 /** A token and the client id it was issued for. Neither works without the other. */
 interface Credential {
@@ -108,7 +119,7 @@ export const musixmatch: Provider = {
     if (!credential) return null;
 
     const matched = await json<Envelope<MatcherBody>>(
-      `${API}/matcher.track.get?${query({
+      `${apiOf(ctx.config)}/matcher.track.get?${query({
         format: 'json',
         app_id: credential.appId,
         usertoken: credential.token,
@@ -120,10 +131,10 @@ export const musixmatch: Provider = {
         // falls back to them. The score below still has to pass either way.
         track_isrc: track.isrc,
       })}`,
-      { headers: clientHeaders() },
+      { headers: clientHeaders(ctx.config) },
     );
 
-    if (matched.result.status === 403) ctx.unreachable(ADDRESS_REFUSED);
+    if (matched.result.status === 403) ctx.unreachable(refused(ctx.config));
     else if (isUnavailable(matched.result)) ctx.unreachable(`matcher: ${matched.result.error}`);
     const found = matched.value?.message?.body?.track;
     if (!found?.track_id) {
@@ -173,13 +184,13 @@ export const musixmatch: Provider = {
     // merely another line-timed opinion.
     if (found.has_richsync) {
       const rich = await json<Envelope<{ richsync?: { richsync_body?: string } }>>(
-        `${API}/track.richsync.get?${query({
+        `${apiOf(ctx.config)}/track.richsync.get?${query({
           format: 'json',
           app_id: credential.appId,
           usertoken: credential.token,
           track_id: found.track_id,
         })}`,
-        { headers: clientHeaders() },
+        { headers: clientHeaders(ctx.config) },
       );
       const body = rich.value?.message?.body?.richsync?.richsync_body;
       if (body) {
@@ -197,13 +208,13 @@ export const musixmatch: Provider = {
 
     if (found.has_subtitles) {
       const subtitle = await json<Envelope<{ subtitle?: { subtitle_body?: string } }>>(
-        `${API}/track.subtitle.get?${query({
+        `${apiOf(ctx.config)}/track.subtitle.get?${query({
           format: 'json',
           app_id: credential.appId,
           usertoken: credential.token,
           track_id: found.track_id,
         })}`,
-        { headers: clientHeaders() },
+        { headers: clientHeaders(ctx.config) },
       );
       const body = subtitle.value?.message?.body?.subtitle?.subtitle_body;
       if (body) {
@@ -234,16 +245,16 @@ export const musixmatch: Provider = {
       };
     }
     const matched = await json<Envelope<MatcherBody>>(
-      `${API}/matcher.track.get?${query({
+      `${apiOf(ctx.config)}/matcher.track.get?${query({
         format: 'json',
         app_id: credential.appId,
         usertoken: credential.token,
         q_track: 'Bohemian Rhapsody',
         q_artist: 'Queen',
       })}`,
-      { headers: clientHeaders() },
+      { headers: clientHeaders(ctx.config) },
     );
-    if (matched.result.status === 403) return { ok: false, ms: matched.result.ms, detail: ADDRESS_REFUSED };
+    if (matched.result.status === 403) return { ok: false, ms: matched.result.ms, detail: refused(ctx.config) };
     const status = matched.value?.message?.header?.status_code;
     const name = matched.value?.message?.body?.track?.track_name;
     return {
@@ -271,12 +282,12 @@ async function resolveCredential(ctx: ProviderContext): Promise<Credential | nul
   }
 
   const minted = await json<Envelope<{ user_token?: string }>>(
-    `${API}/token.get?${query({ format: 'json', app_id: APP_ID })}`,
-    { headers: clientHeaders() },
+    `${apiOf(ctx.config)}/token.get?${query({ format: 'json', app_id: APP_ID })}`,
+    { headers: clientHeaders(ctx.config) },
   );
 
   if (minted.result.status === 403) {
-    ctx.unreachable(ADDRESS_REFUSED);
+    ctx.unreachable(refused(ctx.config));
     return null;
   }
 
@@ -372,11 +383,18 @@ function looksLikeToken(token: string): boolean {
  * Tested against the live service: a plain browser user agent is enough on this host, and the
  * `musixmatch://` origin the desktop app sent is not required.
  */
-function clientHeaders(): Record<string, string> {
+function clientHeaders(config: Config): Record<string, string> {
   return {
     Accept: 'application/json',
     'User-Agent':
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ' +
       'Chrome/124.0.0.0 Safari/537.36',
+    // The relay's Cloudflare Access service token. Sent only to the relay.
+    ...(config.musixmatchRelayUrl
+      ? {
+          'CF-Access-Client-Id': config.secrets.musixmatchRelayClientId,
+          'CF-Access-Client-Secret': config.secrets.musixmatchRelayClientSecret,
+        }
+      : {}),
   };
 }
