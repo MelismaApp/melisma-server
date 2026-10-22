@@ -282,7 +282,7 @@ and each source's on/off switch and priority.
 
 ```
 GET  /v1/health
-GET  /v1/lyrics?title=&artist=&album=&durationMs=&spotifyId=&isrc=
+GET  /v1/lyrics?title=&artist=&album=&durationMs=&spotifyId=&isrc=&playerId=
      [&format=ttml|json] [&force=1] [&cacheOnly=1]
 POST /v1/warm        {title, artist, album, durationMs, spotifyId?}
 POST /v1/contribute  {track:{…}, provider, format:"lrc"|"ttml"|"json", body}

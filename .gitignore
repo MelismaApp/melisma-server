@@ -10,3 +10,4 @@ node_modules/
 
 # Real deployment credentials. Only the sample is tracked.
 .kamal/secrets
+worker/.wrangler/

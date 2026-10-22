@@ -15,6 +15,7 @@ import {
   splitArtists,
 } from './text.ts';
 import { toSimplified } from './han.ts';
+import type { PlayerId } from './playerId.ts';
 
 export interface TrackQuery {
   title: string;
@@ -29,6 +30,8 @@ export interface TrackQuery {
    * several releases; this says which. Not part of `cacheKey`.
    */
   upc?: string;
+  /** The player's own id for the track, when the player is not Spotify. Resolved to an ISRC; not part of `cacheKey`. */
+  playerId?: PlayerId;
 }
 
 /** UPCs arrive zero-padded to 12, 13 or 14 digits depending on who reports them. */

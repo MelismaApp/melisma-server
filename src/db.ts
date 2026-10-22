@@ -474,6 +474,16 @@ export class Store {
       );
 
       CREATE INDEX IF NOT EXISTS language_tags_isrc ON language_tags (isrc);
+
+      -- A player's own track id and the ISRC it resolved to, so each id is asked about once for everyone.
+      -- A null isrc is the service answering that it has none, kept so it is not asked on every play.
+      CREATE TABLE IF NOT EXISTS player_ids (
+        service     TEXT NOT NULL,
+        id          TEXT NOT NULL,
+        isrc        TEXT,
+        resolved_at INTEGER NOT NULL,
+        PRIMARY KEY (service, id)
+      );
     `);
 
     // Columns added after the table first shipped. SQLite has no `ADD COLUMN IF NOT EXISTS`, and
@@ -1082,6 +1092,26 @@ export class Store {
       )
       .get(recording.toUpperCase());
     return shared ? toLanguageTag(shared as Record<string, unknown>) : null;
+  }
+
+  /** What a player's id resolved to, if it has been asked about. See `src/playerId.ts`. */
+  playerIsrc(service: string, id: string): { isrc: string | null; resolvedAt: number } | null {
+    const row = this.db
+      .prepare('SELECT isrc, resolved_at FROM player_ids WHERE service = ? AND id = ?')
+      .get(service, id) as { isrc: string | null; resolved_at: number } | undefined;
+    return row ? { isrc: row.isrc, resolvedAt: Number(row.resolved_at) } : null;
+  }
+
+  /** An ISRC once known is kept: a later "none" does not unlearn it. */
+  rememberPlayerId(service: string, id: string, isrc: string | null, at = Date.now()): void {
+    this.db
+      .prepare(
+        `INSERT INTO player_ids (service, id, isrc, resolved_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(service, id) DO UPDATE SET
+           isrc        = COALESCE(excluded.isrc, player_ids.isrc),
+           resolved_at = excluded.resolved_at`,
+      )
+      .run(service, id, isrc, at);
   }
 
   /** Every tag, newest first, for exporting. */

@@ -9,7 +9,7 @@ Nothing needs configuring in the app beyond the URL. That is the point of the de
 ## The request
 
 ```
-GET {baseUrl}/v1/lyrics?title=…&artist=…&album=…&durationMs=…&spotifyId=…
+GET {baseUrl}/v1/lyrics?title=…&artist=…&album=…&durationMs=…&spotifyId=…&isrc=…&playerId=…
 ```
 
 Sent by the app with no authentication and no identifying header. `title` and `artist` arrive
@@ -19,8 +19,20 @@ player's queue, which publishes neither; `spotifyId` is present when playing fro
 is the most useful of the five, because it lets Apple and the community database be queried by
 id instead of searched for by name.
 
-`isrc` is also accepted, and preferred over `spotifyId` when present. The app has no way to get
-one from a media session so it never sends it — it is there for anything else that can.
+`isrc` is also accepted, and preferred over `spotifyId` when present. The app sends it when it has
+learned one: from `/v1/extras` or the `isrc` fields below, or on the phone from Deezer's own API.
+
+`playerId=<service>:<id>` is the player's own id for the track when the player is not Spotify:
+`deezer:2981739661`, `tidal:134858527`, `amazon:B0DX1H5KT5`, `soundcloud:<id>`. A malformed one is
+dropped, as a malformed `spotifyId` is. With no `isrc` beside it the server resolves it, once per id
+for everyone (`src/playerId.ts`): Deezer through its public track API; TIDAL through its developer
+API, with client credentials set under **Tokens**; Amazon has no keyless resolver, so the track is
+found in Apple's catalogue by name and accepted only when the duration matches to the second, since
+Amazon's durations are exact to the millisecond. SoundCloud is only remembered once an ISRC arrives
+beside it. The ISRC found is used for the lookup itself, so AMLL and Apple are asked exactly, and is
+returned as `isrc` in `/v1/extras`, as `data.isrc` in the lyrics envelope, and as `X-Lyrics-Isrc` on
+every lyrics response, a `404` included. A service that could not be asked leaves the lookup as it
+was and is asked again next time; one that answered "none" is asked again after a week.
 
 A request for a track that is *about to* play looks identical to one for a track playing now.
 The app prefetches the next queued item, and no special handling is needed: warming the cache

@@ -115,6 +115,12 @@ export const SECRET_NAMES = [
   'spotifyClientId',
   'spotifyClientSecret',
   'musixmatchUserToken',
+  /**
+   * A TIDAL developer application's client credentials, for turning the track id the TIDAL app
+   * publishes into an ISRC. See `src/playerId.ts`.
+   */
+  'tidalClientId',
+  'tidalClientSecret',
   /** The Cloudflare Access service token the Musixmatch relay is gated by. */
   'musixmatchRelayClientId',
   'musixmatchRelayClientSecret',

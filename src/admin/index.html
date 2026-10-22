@@ -244,14 +244,47 @@
               set under <strong>Endpoints</strong>, it is asked from Cloudflare instead. These are the
               Access service token that relay is gated by.
             </div>
-            <div class="inline">
-              <input type="password" class="mono" id="secret-musixmatchRelayClientId" placeholder="Client ID" />
-              <button class="action primary" data-save-secret="musixmatchRelayClientId">Save</button>
+            <label class="field" style="margin-top: 8px">
+              <span>Access Client ID (the one ending in <code>.access</code>)</span>
+              <div class="inline">
+                <input type="password" class="mono" id="secret-musixmatchRelayClientId" placeholder="…….access" />
+                <button class="action" data-reveal="musixmatchRelayClientId">Reveal</button>
+                <button class="action primary" data-save-secret="musixmatchRelayClientId">Save</button>
+              </div>
+            </label>
+            <label class="field" style="margin-top: 8px">
+              <span>Access Client Secret (64 hex characters)</span>
+              <div class="inline">
+                <input type="password" class="mono" id="secret-musixmatchRelayClientSecret" placeholder="64 hex characters" />
+                <button class="action" data-reveal="musixmatchRelayClientSecret">Reveal</button>
+                <button class="action primary" data-save-secret="musixmatchRelayClientSecret">Save</button>
+              </div>
+            </label>
+          </div>
+
+          <div class="card">
+            <div class="title">TIDAL developer application</div>
+            <div class="desc" style="margin-bottom: 10px">
+              Optional. Turns the track id the TIDAL app publishes into an ISRC, so the sources are
+              asked for the exact recording. Client credentials from
+              <a href="https://developer.tidal.com/dashboard" target="_blank" rel="noreferrer">developer.tidal.com</a>.
             </div>
-            <div class="inline" style="margin-top: 8px">
-              <input type="password" class="mono" id="secret-musixmatchRelayClientSecret" placeholder="Client Secret" />
-              <button class="action primary" data-save-secret="musixmatchRelayClientSecret">Save</button>
-            </div>
+            <label class="field">
+              <span>Client ID</span>
+              <div class="inline">
+                <input type="password" class="mono" id="secret-tidalClientId" placeholder="client id" />
+                <button class="action" data-reveal="tidalClientId">Reveal</button>
+                <button class="action primary" data-save-secret="tidalClientId">Save</button>
+              </div>
+            </label>
+            <label class="field" style="margin-top: 8px">
+              <span>Client Secret</span>
+              <div class="inline">
+                <input type="password" class="mono" id="secret-tidalClientSecret" placeholder="client secret" />
+                <button class="action" data-reveal="tidalClientSecret">Reveal</button>
+                <button class="action primary" data-save-secret="tidalClientSecret">Save</button>
+              </div>
+            </label>
           </div>
 
           <div class="card">

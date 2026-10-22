@@ -28,6 +28,7 @@ import { parseTtml, writeTtml } from './format/ttml.ts';
 import { parseLrc, writePlainText } from './format/lrc.ts';
 import { cacheKey, type TrackQuery } from './match.ts';
 import { isLanguage, languageOf, LANGUAGES } from './language.ts';
+import { parsePlayerId, withPlayerIsrc } from './playerId.ts';
 import type { LyricsDocument, MergedDocument } from './model.ts';
 import { redact } from './http.ts';
 
@@ -199,13 +200,15 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
       return lyrics(app, url, response, asker);
 
     case 'POST /v1/warm': {
-      const track = trackFromJson(await readJson(request));
-      if (!track) return send(response, 400, { error: 'need at least a title' });
-      if (asker !== null) app.store.recordRequest(asker, cacheKey(track), track);
+      const asked = trackFromJson(await readJson(request));
+      if (!asked) return send(response, 400, { error: 'need at least a title' });
       // Fire and forget: the app is prefetching, and it is not waiting for an answer — which is
       // exactly what buys the room to find out what the recording is before asking for its words.
-      void app.resolver
-        .resolve(track, { identityFirst: true, countHit: asker !== null })
+      void identified(app, asked)
+        .then((track) => {
+          if (asker !== null) app.store.recordRequest(asker, cacheKey(track), track);
+          return app.resolver.resolve(track, { identityFirst: true, countHit: asker !== null });
+        })
         .catch(() => undefined);
       return send(response, 202, { ok: true });
     }
@@ -606,14 +609,23 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
 
 // ---- the app-facing lookup ------------------------------------------------
 
+/** The track with its player id resolved to an ISRC, where it had one. See `src/playerId.ts`. */
+function identified(app: App, track: TrackQuery): Promise<TrackQuery> {
+  return withPlayerIsrc(app.store, app.settings.read(), track, (level, service, message) =>
+    app.store.log(level, service, message),
+  );
+}
+
 async function lyrics(
   app: App,
   url: URL,
   response: ServerResponse,
   asker: number | null,
 ): Promise<void> {
-  const track = trackFromParams(url.searchParams);
-  if (!track) return send(response, 400, { error: 'need at least a title' });
+  const asked = trackFromParams(url.searchParams);
+  if (!asked) return send(response, 400, { error: 'need at least a title' });
+  // Resolved first, so the request and the lookup are both keyed by the recording.
+  const track = await identified(app, asked);
   // Before the lookup, so a track nobody has lyrics for is still on the asker's list.
   if (asker !== null) app.store.recordRequest(asker, cacheKey(track), track);
 
@@ -630,6 +642,9 @@ async function lyrics(
     response.setHeader('X-Lyrics-Language', language.language);
     response.setHeader('X-Lyrics-Language-Source', language.source);
   }
+  // What the recording turned out to be, so the app can ask by it next time.
+  const isrc = track.isrc ?? app.store.isrcFor(resolution.key) ?? undefined;
+  if (isrc) response.setHeader('X-Lyrics-Isrc', isrc);
 
   if (!resolution.document) {
     // Any non-2xx reads as "nothing found" to the app, which does not distinguish a miss
@@ -638,6 +653,7 @@ async function lyrics(
     return send(response, 404, {
       status: 404,
       key: resolution.key,
+      isrc,
       source: resolution.source,
       candidates: resolution.candidates,
       ms: resolution.ms,
@@ -660,6 +676,7 @@ async function lyrics(
   if (format === 'json') {
     return send(response, 200, {
       key: resolution.key,
+      isrc,
       source: resolution.source,
       ms: resolution.ms,
       document: resolution.document,
@@ -684,6 +701,7 @@ async function lyrics(
       lyrics: unsynced ? writePlainText(resolution.document) : writeTtml(resolution.document),
       source: resolution.document.provenance.timing,
       providerName: credit,
+      isrc,
       // Not part of the contract; useful when watching what the server is doing.
       key: resolution.key,
       cache: resolution.source,
@@ -968,6 +986,7 @@ function trackFromParams(params: URLSearchParams): TrackQuery | null {
     durationMs: Number.parseInt(params.get('durationMs') ?? '0', 10) || 0,
     spotifyId: spotifyIdFrom(params.get('spotifyId')),
     isrc: isrcFrom(params.get('isrc')),
+    playerId: parsePlayerId(params.get('playerId')),
   };
 }
 
@@ -978,15 +997,18 @@ function trackFromParams(params: URLSearchParams): TrackQuery | null {
  * a few months, but a cover URL and a tempo, once known, are true forever. A phone with no
  * token can still be told what one found.
  */
-function readExtras(app: App, url: URL, response: ServerResponse): void {
-  const track = trackFromParams(url.searchParams);
-  if (!track) return void send(response, 400, { error: 'need at least a title' });
+async function readExtras(app: App, url: URL, response: ServerResponse): Promise<void> {
+  const asked = trackFromParams(url.searchParams);
+  if (!asked) return void send(response, 400, { error: 'need at least a title' });
 
+  const track = await identified(app, asked);
   const key = cacheKey(track);
   const held = app.store.extras(key);
   const language = languageOf(app.store, key, track.isrc);
-  if (!held && !language) return void send(response, 404, { error: 'nothing held for this track' });
-  // A tagged track with nothing else held still answers, with only its language.
+  // An ISRC the server worked out from the player's id is an answer in itself: the app re-asks by it.
+  const learned = !asked.isrc && track.isrc;
+  if (!held && !language && !learned) return void send(response, 404, { error: 'nothing held for this track' });
+  // A tagged or identified track with nothing else held still answers, with just that.
   const found: Partial<NonNullable<typeof held>> = held ?? {};
 
   // Only for the Spotify id asked about. The key already implies it; checking the stored id too means
@@ -1005,7 +1027,7 @@ function readExtras(app: App, url: URL, response: ServerResponse): void {
     metadata: found.metadata ?? undefined,
     // Identity lives on the cache entry rather than here, because the matcher is what needs
     // it — but a caller asking about a track may as well be told.
-    isrc: app.store.isrcFor(key) ?? undefined,
+    isrc: track.isrc ?? app.store.isrcFor(key) ?? undefined,
     // The album's, from Spotify's release for this track. Also inside `metadata`, as `albumUpc`.
     upc: typeof found.metadata?.albumUpc === 'string' ? found.metadata.albumUpc : undefined,
     language: language?.language,
@@ -1026,6 +1048,7 @@ function trackFromJson(body: unknown): TrackQuery | null {
     durationMs: Number(record.durationMs ?? 0) || 0,
     spotifyId: spotifyIdFrom(record.spotifyId),
     isrc: isrcFrom(record.isrc),
+    playerId: parsePlayerId(record.playerId),
   };
 }
 
