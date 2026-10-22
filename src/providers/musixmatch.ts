@@ -91,7 +91,7 @@ interface Credential {
  * belongs to a web client and does not work under the Android client id it is paired with here, and
  * not every token in a cookie is accepted either. A different paste is tried at once.
  */
-let refusedOwn: { token: string; at: number } | null = null;
+let refusedOwn: { paste: string; at: number } | null = null;
 const REFUSED_OWN_RETRY_MS = 60 * 60 * 1000;
 /** The cookie client that last worked, tried first from then on. */
 let workingClient: string | null = null;
@@ -137,7 +137,7 @@ async function matchWithCredentials(
     warn(`musixmatch: the pasted token for ${credential.appId} was refused (${bodyStatus(matched)})`);
   }
   if (own.length > 0) {
-    refusedOwn = { token: own[0]!.token, at: Date.now() };
+    refusedOwn = { paste: ctx.config.secrets.musixmatchUserToken.trim(), at: Date.now() };
     warn(`musixmatch: ${own[0]!.fromCookie ? COOKIE_STALE : PASTE_THE_COOKIE}. Asking as a guest meanwhile`);
   }
   const guest = await anonymousCredential(ctx);
@@ -145,12 +145,14 @@ async function matchWithCredentials(
   return { credential: guest, matched: await askMatcher(track, guest, ctx) };
 }
 
-/** The pasted tokens worth trying now: none while set aside, the client that worked first. */
+/** The pasted tokens worth trying now: none while the paste is set aside, the client that worked first. */
 function ownCredentials(config: Config): Credential[] {
-  const own = parseUserTokens(config.secrets.musixmatchUserToken);
+  const paste = config.secrets.musixmatchUserToken.trim();
+  const own = parseUserTokens(paste);
   if (own.length === 0) return [];
-  const setAside =
-    refusedOwn && refusedOwn.token === own[0]!.token && Date.now() - refusedOwn.at < REFUSED_OWN_RETRY_MS;
+  // By the whole paste rather than any one token: which token comes first changes with the client
+  // that last worked, and a paste changed since is tried at once.
+  const setAside = refusedOwn && refusedOwn.paste === paste && Date.now() - refusedOwn.at < REFUSED_OWN_RETRY_MS;
   if (setAside) return [];
   const preferred = own.filter((credential) => credential.appId === workingClient);
   return [...preferred, ...own.filter((credential) => credential.appId !== workingClient)];

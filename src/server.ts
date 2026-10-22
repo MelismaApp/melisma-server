@@ -610,9 +610,13 @@ async function handle(app: App, request: IncomingMessage, response: ServerRespon
 // ---- the app-facing lookup ------------------------------------------------
 
 /** The track with its player id resolved to an ISRC, where it had one. See `src/playerId.ts`. */
-function identified(app: App, track: TrackQuery): Promise<TrackQuery> {
-  return withPlayerIsrc(app.store, app.settings.read(), track, (level, service, message) =>
-    app.store.log(level, service, message),
+function identified(app: App, track: TrackQuery, options: { network?: boolean } = {}): Promise<TrackQuery> {
+  return withPlayerIsrc(
+    app.store,
+    app.settings.read(),
+    track,
+    (level, service, message) => app.store.log(level, service, message),
+    options,
   );
 }
 
@@ -624,14 +628,16 @@ async function lyrics(
 ): Promise<void> {
   const asked = trackFromParams(url.searchParams);
   if (!asked) return send(response, 400, { error: 'need at least a title' });
-  // Resolved first, so the request and the lookup are both keyed by the recording.
-  const track = await identified(app, asked);
+  const cacheOnly = url.searchParams.get('cacheOnly') === '1';
+  // Resolved first, so the request and the lookup are both keyed by the recording. Cache-only is a
+  // promise not to make requests, and that covers asking a catalogue what the recording is.
+  const track = await identified(app, asked, { network: !cacheOnly });
   // Before the lookup, so a track nobody has lyrics for is still on the asker's list.
   if (asker !== null) app.store.recordRequest(asker, cacheKey(track), track);
 
   const resolution = await app.resolver.resolve(track, {
     force: url.searchParams.get('force') === '1',
-    cacheOnly: url.searchParams.get('cacheOnly') === '1',
+    cacheOnly,
     // Only a device's lookup counts as asked for; the page's (a TTML download) does not.
     countHit: asker !== null,
   });

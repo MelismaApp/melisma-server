@@ -37,6 +37,9 @@ const ISRC = /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/;
 
 export type Log = (level: LogLevel, service: PlayerService, message: string) => void;
 
+/** Resolutions under way, by `service:id`, so a prefetch and a live lookup for the same track ask once. */
+const inFlight = new Map<string, Promise<string | null | undefined>>();
+
 /** `<service>:<id>`, as the app sends it. */
 export function parsePlayerId(value: unknown): PlayerId | undefined {
   if (typeof value !== 'string') return undefined;
@@ -53,13 +56,15 @@ export function parsePlayerId(value: unknown): PlayerId | undefined {
  * An ISRC the caller sent wins, and is remembered against the id. One remembered earlier is used.
  * Otherwise the service is asked, once: a failure to ask leaves the track as it was and is not
  * remembered, so the next lookup asks again; a service that answered "no such track" or "no ISRC"
- * is remembered as none, and asked again after a week.
+ * is remembered as none, and asked again after a week. With `network: false` nobody is asked at
+ * all, which is what a cache-only lookup promised.
  */
 export async function withPlayerIsrc(
   store: Store,
   config: Config,
   track: TrackQuery,
   log: Log,
+  options: { network?: boolean } = {},
 ): Promise<TrackQuery> {
   const player = track.playerId;
   if (!player) return track;
@@ -73,12 +78,35 @@ export async function withPlayerIsrc(
   if (known && (known.isrc || Date.now() - known.resolvedAt < NONE_RECHECK_MS)) {
     return known.isrc ? { ...track, isrc: known.isrc } : track;
   }
+  if (options.network === false) return track;
 
-  const answer = await resolve(player, track, config, log);
-  if (answer === undefined) return track;
-  store.rememberPlayerId(player.service, player.id, answer);
-  log('info', player.service, answer ? `${player.id} is ${answer}` : `${player.id}: no ISRC to be had`);
+  const answer = await resolveOnce(store, player, track, config, log);
   return answer ? { ...track, isrc: answer } : track;
+}
+
+/** One resolution per id at a time; whoever asks while it is under way gets the same answer. */
+function resolveOnce(
+  store: Store,
+  player: PlayerId,
+  track: TrackQuery,
+  config: Config,
+  log: Log,
+): Promise<string | null | undefined> {
+  const key = `${player.service}:${player.id}`;
+  let pending = inFlight.get(key);
+  if (!pending) {
+    pending = resolve(player, track, config, log)
+      .then((answer) => {
+        if (answer !== undefined) {
+          store.rememberPlayerId(player.service, player.id, answer);
+          log('info', player.service, answer ? `${player.id} is ${answer}` : `${player.id}: no ISRC to be had`);
+        }
+        return answer;
+      })
+      .finally(() => inFlight.delete(key));
+    inFlight.set(key, pending);
+  }
+  return pending;
 }
 
 /** An ISRC, `null` for a definite "none", `undefined` when the service could not be asked. */

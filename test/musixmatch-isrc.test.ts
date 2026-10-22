@@ -342,3 +342,48 @@ test("a guest token Musixmatch will not serve from this address says so: 401 cap
     store.close();
   }
 });
+
+test('a cookie whose working client later stops working is still set aside, whichever token came first', async () => {
+  // The client that worked goes first from then on, so the refusal must be remembered against the
+  // paste as a whole, or the reordered cookie is never recognised as the one set aside.
+  // Clients no test above has found working, so the cookie's own order holds at first.
+  const PROWEB = tokenLike('dd');
+  const STUDIO = tokenLike('ee');
+  const GUEST = 'f1e2d3c4b5a6'.repeat(4) + '7890';
+  let studioWorks = true;
+  const asked: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    asked.push(url.pathname.endsWith('/token.get') ? 'mint' : `${url.searchParams.get('app_id')}`);
+    if (url.pathname.endsWith('/token.get')) return Response.json({ message: { header: { status_code: 200 }, body: { user_token: GUEST } } });
+    const token = url.searchParams.get('usertoken');
+    // Anything that is not one of the cookie's two tokens is the guest's, whichever guest token is kept.
+    const works = token === STUDIO ? studioWorks : token !== PROWEB;
+    return works
+      ? Response.json({ message: { header: { status_code: 200 }, body: { track: { track_id: 7, track_name: 'Bohemian Rhapsody', artist_name: 'Queen', track_length: 354 } } } })
+      : Response.json({ message: { header: { status_code: 401, hint: 'renew' }, body: [] } });
+  }) as typeof fetch;
+
+  const store = new Store(':memory:');
+  const settings = new Settings(store);
+  const quiet = () => ({ config: settings.read(), log: () => {}, unreachable: () => {}, learn: () => {} });
+  const track = { title: 'Bohemian Rhapsody', artist: 'Queen', album: '', durationMs: 354_000 };
+  try {
+    settings.update({ 'throttle.musixmatchMs': '0', 'secret.musixmatchUserToken': cookie({ 'mxm-pro-web-v1.0': PROWEB, 'mxm-studio-v1.0': STUDIO }) });
+    await musixmatch.fetch(track, quiet());
+    assert.deepEqual(asked, ['mxm-pro-web-v1.0', 'mxm-studio-v1.0'], 'mxm-studio found working');
+
+    // Now mxm-studio is refused too: both tried, in the remembered order, then the cookie is set aside.
+    studioWorks = false;
+    asked.length = 0;
+    await musixmatch.fetch(track, quiet());
+    assert.deepEqual(asked.filter((call) => call !== 'mint'), ['mxm-studio-v1.0', 'mxm-pro-web-v1.0', 'android-player-v1.0']);
+
+    asked.length = 0;
+    await musixmatch.fetch(track, quiet());
+    assert.deepEqual(asked, ['android-player-v1.0'], 'set aside: the cookie is not tried again');
+  } finally {
+    settings.update({ 'throttle.musixmatchMs': null });
+    store.close();
+  }
+});

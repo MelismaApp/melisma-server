@@ -32,7 +32,9 @@ Amazon's durations are exact to the millisecond. SoundCloud is only remembered o
 beside it. The ISRC found is used for the lookup itself, so AMLL and Apple are asked exactly, and is
 returned as `isrc` in `/v1/extras`, as `data.isrc` in the lyrics envelope, and as `X-Lyrics-Isrc` on
 every lyrics response, a `404` included. A service that could not be asked leaves the lookup as it
-was and is asked again next time; one that answered "none" is asked again after a week.
+was and is asked again next time; one that answered "none" is asked again after a week. A
+`cacheOnly=1` lookup asks nobody: it uses an ISRC already remembered for the id, or goes by name.
+Two lookups for one new id at once (a prefetch and the live one) share a single resolution.
 
 A request for a track that is *about to* play looks identical to one for a track playing now.
 The app prefetches the next queued item, and no special handling is needed: warming the cache

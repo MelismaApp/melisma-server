@@ -246,3 +246,45 @@ test('a warm-up resolves the id too, and records the request by the recording', 
   }
   assert.ok(app.store.hasAsked(0, 'isrc:KRA302400096'));
 });
+
+test('a cache-only lookup asks no catalogue about a player id, and still uses one remembered', async () => {
+  const asked = stub(() => undefined);
+  // Unseen: nobody is asked, and the lookup goes by name.
+  const fresh = await lyrics(`${SONG}&playerId=deezer:444&cacheOnly=1`);
+  assert.equal((await keyOf(fresh)).slice(0, 2), 'q:');
+  assert.equal(asked.length, 0);
+  assert.equal(app.store.playerIsrc('deezer', '444'), null);
+  // Remembered by an earlier test: used without asking.
+  const known = await lyrics(`${SONG}&playerId=deezer:2981739661&cacheOnly=1`);
+  assert.equal(known.headers.get('x-lyrics-isrc'), 'KRA302400093');
+  assert.equal(asked.length, 0);
+});
+
+test('a prefetch and a live lookup for one new id share a single resolution', async () => {
+  let deezerCalls = 0;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.hostname === '127.0.0.1') return realFetch(input, init);
+    if (url.href !== 'https://api.deezer.com/track/555555') throw new Error(`unexpected request to ${url}`);
+    deezerCalls++;
+    // Slow enough that the second lookup arrives while the first is still waiting on Deezer.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return Response.json({ id: 555555, isrc: 'KRA302400097' });
+  }) as typeof fetch;
+
+  const query = `${SONG}&playerId=deezer:555555`;
+  const [live, warm] = await Promise.all([
+    lyrics(query),
+    fetch(`${base}/v1/warm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Song', artist: 'Someone', durationMs: 200_000, playerId: 'deezer:555555' }),
+    }),
+  ]);
+  assert.equal(live.headers.get('x-lyrics-isrc'), 'KRA302400097');
+  assert.equal(warm.status, 202);
+  for (let waited = 0; waited < 50 && !app.store.hasAsked(0, 'isrc:KRA302400097'); waited++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(deezerCalls, 1, 'Deezer was asked more than once for the same id');
+});
