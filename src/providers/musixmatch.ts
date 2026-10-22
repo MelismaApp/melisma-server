@@ -81,21 +81,79 @@ interface Credential {
   appId: string;
   /** Pasted by the owner, as opposed to minted here. */
   own?: boolean;
+  /** One of several, out of a pasted cookie. */
+  fromCookie?: boolean;
 }
 
 /**
- * A pasted token Musixmatch refused, set aside for a while in favour of an anonymous one, as the app
+ * The pasted tokens Musixmatch refused, set aside for a while in favour of an anonymous one, as the app
  * does. Refused means `401 renew` in the body: a bare token pasted from the musixmatch.com cookie
- * belongs to a web client and does not work under the Android client id it is paired with here. A
- * different token pasted since is tried at once.
+ * belongs to a web client and does not work under the Android client id it is paired with here, and
+ * not every token in a cookie is accepted either. A different paste is tried at once.
  */
 let refusedOwn: { token: string; at: number } | null = null;
 const REFUSED_OWN_RETRY_MS = 60 * 60 * 1000;
+/** The cookie client that last worked, tried first from then on. */
+let workingClient: string | null = null;
+/** How many pasted tokens one lookup may try: each costs a request against the pace. */
+const OWN_ATTEMPTS = 3;
 const PASTE_THE_COOKIE =
   'a bare token only works with the client it was issued for; paste the whole musixmatchUserToken cookie instead';
+const COOKIE_STALE =
+  'every token in the pasted cookie was refused; sign in to musixmatch.com again and paste a fresh musixmatchUserToken cookie';
 
-function tokenRefused(matched: { result: { ok: boolean }; value: Envelope<MatcherBody> | null }): boolean {
+type Matched = { value: Envelope<MatcherBody> | null; result: FetchResult };
+
+function tokenRefused(matched: Matched): boolean {
   return matched.result.ok && matched.value?.message?.header?.status_code === 401;
+}
+
+/** `401 renew`, `401 captcha`: the body's status with Musixmatch's one-word reason, when it gives one. */
+function bodyStatus(matched: Matched): string {
+  const header = matched.value?.message?.header;
+  return [header?.status_code ?? 'nothing', header?.hint].filter(Boolean).join(' ');
+}
+
+/**
+ * The matcher's answer, with the credential it took: the pasted tokens in turn, then a guest's.
+ *
+ * A cookie holds a token per client and not every one is accepted — on a real cookie the
+ * `mxm-pro-web` token was refused while `mxm-com` matched — so a refusal moves on to the next, and
+ * the client that worked goes first from then on. When every pasted token is refused they are set
+ * aside for an hour and a guest token is asked for instead.
+ */
+async function matchWithCredentials(
+  track: TrackQuery,
+  ctx: ProviderContext,
+  warn: (message: string) => void,
+): Promise<{ credential: Credential; matched: Matched } | null> {
+  const own = ownCredentials(ctx.config);
+  for (const credential of own.slice(0, OWN_ATTEMPTS)) {
+    const matched = await askMatcher(track, credential, ctx);
+    if (!tokenRefused(matched)) {
+      workingClient = credential.appId;
+      return { credential, matched };
+    }
+    warn(`musixmatch: the pasted token for ${credential.appId} was refused (${bodyStatus(matched)})`);
+  }
+  if (own.length > 0) {
+    refusedOwn = { token: own[0]!.token, at: Date.now() };
+    warn(`musixmatch: ${own[0]!.fromCookie ? COOKIE_STALE : PASTE_THE_COOKIE}. Asking as a guest meanwhile`);
+  }
+  const guest = await anonymousCredential(ctx);
+  if (!guest) return null;
+  return { credential: guest, matched: await askMatcher(track, guest, ctx) };
+}
+
+/** The pasted tokens worth trying now: none while set aside, the client that worked first. */
+function ownCredentials(config: Config): Credential[] {
+  const own = parseUserTokens(config.secrets.musixmatchUserToken);
+  if (own.length === 0) return [];
+  const setAside =
+    refusedOwn && refusedOwn.token === own[0]!.token && Date.now() - refusedOwn.at < REFUSED_OWN_RETRY_MS;
+  if (setAside) return [];
+  const preferred = own.filter((credential) => credential.appId === workingClient);
+  return [...preferred, ...own.filter((credential) => credential.appId !== workingClient)];
 }
 
 async function askMatcher(
@@ -154,18 +212,9 @@ export const musixmatch: Provider = {
   isConfigured: () => true,
 
   async fetch(track: TrackQuery, ctx: ProviderContext): Promise<ProviderAnswer | null> {
-    let credential = await resolveCredential(ctx);
-    if (!credential) return null;
-
-    let matched = await askMatcher(track, credential, ctx);
-    if (credential.own && tokenRefused(matched)) {
-      // Not an outage and not a miss: the pasted token is no good. Ask as a guest instead.
-      refusedOwn = { token: credential.token, at: Date.now() };
-      ctx.log('warn', `musixmatch: the pasted token was refused (401 renew); ${PASTE_THE_COOKIE}. Asking as a guest meanwhile`);
-      credential = await anonymousCredential(ctx);
-      if (!credential) return null;
-      matched = await askMatcher(track, credential, ctx);
-    }
+    const answer = await matchWithCredentials(track, ctx, (message) => ctx.log('warn', message));
+    if (!answer) return null;
+    const { credential, matched } = answer;
 
     if (matched.result.status === 403) ctx.unreachable(refused(ctx.config));
     else if (isUnavailable(matched.result)) ctx.unreachable(`matcher: ${matched.result.error}`);
@@ -178,7 +227,7 @@ export const musixmatch: Provider = {
       // "nothing for the track" is recorded as settled and never asked again. A bulk re-lookup would
       // quietly write that against every song in the library.
       if (hint && REFUSALS.has(hint)) {
-        ctx.unreachable(`matcher refused the token (${hint} in the body, HTTP 200)`);
+        ctx.unreachable(`matcher refused the token (${bodyStatus(matched)} in the body, HTTP 200)`);
         // And stop asking for a while. The status is the guest token being rate-limited, so the next
         // request would be refused too — and each one that is refused *while looking like an answer*
         // costs another track its record.
@@ -270,36 +319,32 @@ export const musixmatch: Provider = {
     const started = performance.now();
     let why: string | undefined;
     const quietly = { ...ctx, unreachable: (detail: string) => (why ??= detail) };
-    let credential = await resolveCredential(quietly);
-    if (!credential) {
+    // The same path a lookup takes, with each step told rather than hidden: the test is where a
+    // refused token gets noticed.
+    const notes: string[] = [];
+    const sample = { title: 'Bohemian Rhapsody', artist: 'Queen', album: '', durationMs: 0 };
+    const answer = await matchWithCredentials(sample, quietly, (message) => notes.push(message.replace(/^musixmatch: /, '')));
+    if (!answer) {
       return {
         ok: false,
         ms: Math.round(performance.now() - started),
-        detail: why ?? 'could not obtain a token — the anonymous mint is the usual thing to break',
+        detail: [...notes, why ?? 'could not obtain a token — the anonymous mint is the usual thing to break'].join('. '),
       };
     }
-    const sample = { title: 'Bohemian Rhapsody', artist: 'Queen', album: '', durationMs: 0 };
-    let matched = await askMatcher(sample, credential, ctx);
-    // The same fallback a lookup makes, told rather than hidden: the test is where this gets noticed.
-    let aside = '';
-    if (credential.own && tokenRefused(matched)) {
-      refusedOwn = { token: credential.token, at: Date.now() };
-      aside = `the pasted token was refused (401 renew): ${PASTE_THE_COOKIE}. As a guest instead: `;
-      credential = await anonymousCredential(quietly);
-      if (!credential) return { ok: false, ms: matched.result.ms, detail: aside + (why ?? 'no anonymous token either') };
-      matched = await askMatcher(sample, credential, ctx);
-    }
+    const { credential, matched } = answer;
     if (matched.result.status === 403) return { ok: false, ms: matched.result.ms, detail: refused(ctx.config) };
     const status = matched.value?.message?.header?.status_code;
     const name = matched.value?.message?.body?.track?.track_name;
+    const who = credential.own ? `the pasted token for ${credential.appId}` : 'a guest token';
     return {
       ok: status === 200 && Boolean(name),
       ms: matched.result.ms,
-      detail:
-        aside +
-        (status === 200 && name
-          ? `token works, matched "${name}"`
-          : `token obtained but matcher returned ${status ?? 'nothing'}`),
+      detail: [
+        ...notes,
+        status === 200 && name
+          ? `${who} works, matched "${name}"`
+          : `${who} was obtained but the matcher returned ${bodyStatus(matched)}`,
+      ].join('. '),
     };
   },
 
@@ -308,16 +353,6 @@ export const musixmatch: Provider = {
   reparse: (body, contentType) =>
     contentType.includes('json') ? parseRichSync(body) : parseLrc(body),
 };
-
-async function resolveCredential(ctx: ProviderContext): Promise<Credential | null> {
-  const own = parseUserToken(ctx.config.secrets.musixmatchUserToken);
-  if (own) {
-    const setAside =
-      refusedOwn && refusedOwn.token === own.token && Date.now() - refusedOwn.at < REFUSED_OWN_RETRY_MS;
-    if (!setAside) return { ...own, own: true };
-  }
-  return anonymousCredential(ctx);
-}
 
 /** The anonymous token, minted once and kept. See `guestToken`. */
 async function anonymousCredential(ctx: ProviderContext): Promise<Credential | null> {
@@ -363,8 +398,13 @@ async function anonymousCredential(ctx: ProviderContext): Promise<Credential | n
  * picking a client the endpoint accepts is this function's job rather than theirs.
  */
 export function parseUserToken(raw: string | undefined): Credential | null {
+  return parseUserTokens(raw)[0] ?? null;
+}
+
+/** Every usable token in the paste, in the order the clients are preferred. A bare token is one. */
+export function parseUserTokens(raw: string | undefined): Credential[] {
   const value = raw?.trim();
-  if (!value) return null;
+  if (!value) return [];
 
   // Decode before deciding what this is: a cookie copied out of a browser arrives
   // percent-encoded, and `%7B%22tokens%22…` contains neither a brace nor an equals sign.
@@ -385,19 +425,20 @@ export function parseUserToken(raw: string | undefined): Credential | null {
     try {
       tokens = (JSON.parse(jsonPart) as { tokens?: Record<string, unknown> }).tokens;
     } catch {
-      return null;
+      return [];
     }
-    if (!tokens) return null;
+    if (!tokens) return [];
+    const found: Credential[] = [];
     for (const appId of COOKIE_APP_IDS) {
       const token = tokens[appId];
-      if (typeof token === 'string' && isUsableToken(token)) return { token, appId };
+      if (typeof token === 'string' && isUsableToken(token)) found.push({ token, appId, own: true, fromCookie: true });
     }
-    return null;
+    return found;
   }
 
   // A bare token says nothing about its client, so it is paired with the one used for the
   // anonymous mint and allowed to fail. Pasting the cookie is better because it says.
-  return looksLikeToken(decoded) ? { token: decoded, appId: APP_ID } : null;
+  return looksLikeToken(decoded) ? [{ token: decoded, appId: APP_ID, own: true }] : [];
 }
 
 /**

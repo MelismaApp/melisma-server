@@ -225,10 +225,118 @@ test('a pasted token Musixmatch refuses is set aside for a guest one, and the te
     asked.length = 0;
     const report = await musixmatch.test!(ctx());
     assert.equal(report.ok, true);
-    assert.match(report.detail, /pasted token was refused/);
+    assert.match(report.detail, /pasted token for android-player-v1\.0 was refused \(401 renew\)/);
     assert.match(report.detail, /paste the whole musixmatchUserToken cookie/);
     assert.match(report.detail, /matched "Bohemian Rhapsody"/);
     assert.deepEqual(asked, [`matcher.track.get:${THIRD}`, `matcher.track.get:${GUEST}`]);
+  } finally {
+    settings.update({ 'throttle.musixmatchMs': null });
+    store.close();
+  }
+});
+
+/** A pasted musixmatch.com cookie, as the browser hands it over: one token per client, percent-encoded. */
+function cookie(tokens: Record<string, string>): string {
+  return encodeURIComponent(JSON.stringify({ tokens, version: 1 }));
+}
+
+/** A token-shaped string: 52 hex characters that are not one character repeated, which is a placeholder. */
+const tokenLike = (seed: string) => (seed + '0123456789abcdef'.repeat(4)).slice(0, 52);
+
+test("a cookie's refused client is passed over for one that works, which goes first from then on", async () => {
+  // What a real cookie did: mxm-pro-web refused, mxm-com matched. The server used to stop at the first.
+  const PROWEB = tokenLike('aa');
+  const COM = tokenLike('bb');
+  const asked: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    asked.push(`${url.searchParams.get('app_id')}:${url.searchParams.get('usertoken')}`);
+    return url.searchParams.get('usertoken') === COM
+      ? Response.json({ message: { header: { status_code: 200 }, body: { track: { track_id: 7, track_name: 'Bohemian Rhapsody', artist_name: 'Queen', track_length: 354 } } } })
+      : Response.json({ message: { header: { status_code: 401, hint: 'renew' }, body: [] } });
+  }) as typeof fetch;
+
+  const store = new Store(':memory:');
+  const settings = new Settings(store);
+  const quiet = () => ({ config: settings.read(), log: () => {}, unreachable: () => {}, learn: () => {} });
+  const track = { title: 'Bohemian Rhapsody', artist: 'Queen', album: '', durationMs: 354_000 };
+  try {
+    settings.update({
+      'throttle.musixmatchMs': '0',
+      'secret.musixmatchUserToken': cookie({ 'mxm-pro-web-v1.0': PROWEB, 'mxm-com-v1.0': COM }),
+    });
+
+    await musixmatch.fetch(track, quiet());
+    assert.deepEqual(asked, [`mxm-pro-web-v1.0:${PROWEB}`, `mxm-com-v1.0:${COM}`]);
+
+    // Remembered: the client that worked is tried first, and the refused one is not tried at all.
+    asked.length = 0;
+    await musixmatch.fetch(track, quiet());
+    assert.deepEqual(asked, [`mxm-com-v1.0:${COM}`]);
+
+    const report = await musixmatch.test!(quiet());
+    assert.equal(report.ok, true);
+    assert.match(report.detail, /pasted token for mxm-com-v1\.0 works, matched "Bohemian Rhapsody"/);
+  } finally {
+    settings.update({ 'throttle.musixmatchMs': null });
+    store.close();
+  }
+});
+
+test('a cookie whose every token is refused is set aside after three tries, and the test says why', async () => {
+  // None of these is the client the test above found working, so the cookie's own order holds.
+  const tokens = Object.fromEntries(
+    ['mxm-pro-web-v1.0', 'mxm-pro-android-v1.0', 'mxm-pro-ios-v1.0', 'mxm-account-v1.0', 'community-app-v1.0'].map((id, i) => [id, tokenLike(`c${i}`)]),
+  );
+  const GUEST = 'a1b2c3d4e5f6'.repeat(4) + '0123';
+  const asked: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    asked.push(url.pathname.endsWith('/token.get') ? 'mint' : `${url.searchParams.get('app_id')}`);
+    if (url.pathname.endsWith('/token.get')) return Response.json({ message: { header: { status_code: 200 }, body: { user_token: GUEST } } });
+    // Anything that is not one of the cookie's tokens is the guest's, whichever guest token is kept.
+    if (!Object.values(tokens).includes(url.searchParams.get('usertoken') ?? '')) {
+      return Response.json({ message: { header: { status_code: 200 }, body: { track: { track_id: 7, track_name: 'Bohemian Rhapsody', artist_name: 'Queen', track_length: 354 } } } });
+    }
+    return Response.json({ message: { header: { status_code: 401, hint: 'renew' }, body: [] } });
+  }) as typeof fetch;
+
+  const store = new Store(':memory:');
+  const settings = new Settings(store);
+  const quiet = () => ({ config: settings.read(), log: () => {}, unreachable: () => {}, learn: () => {} });
+  try {
+    settings.update({ 'throttle.musixmatchMs': '0', 'secret.musixmatchUserToken': cookie(tokens) });
+    const report = await musixmatch.test!(quiet());
+    // Three of the five, then the guest (minted here or kept from before): a lookup has a pace to keep.
+    assert.deepEqual(asked.filter((call) => call !== 'mint'), ['mxm-pro-web-v1.0', 'mxm-pro-android-v1.0', 'mxm-pro-ios-v1.0', 'android-player-v1.0']);
+    assert.equal(report.ok, true);
+    assert.match(report.detail, /every token in the pasted cookie was refused; sign in to musixmatch\.com again/);
+    assert.match(report.detail, /a guest token works/);
+
+    asked.length = 0;
+    await musixmatch.fetch({ title: 'Bohemian Rhapsody', artist: 'Queen', album: '', durationMs: 354_000 }, quiet());
+    assert.deepEqual(asked, ['android-player-v1.0'], 'set aside: straight to the kept guest token');
+  } finally {
+    settings.update({ 'throttle.musixmatchMs': null });
+    store.close();
+  }
+});
+
+test("a guest token Musixmatch will not serve from this address says so: 401 captcha", async () => {
+  // What Cloudflare's addresses get: the mint works and the matcher refuses the minted token.
+  const GUEST = 'c1d2e3f4a5b6'.repeat(4) + '4567';
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith('/token.get')) return Response.json({ message: { header: { status_code: 200 }, body: { user_token: GUEST } } });
+    return Response.json({ message: { header: { status_code: 401, hint: 'captcha' }, body: [] } });
+  }) as typeof fetch;
+  const store = new Store(':memory:');
+  const settings = new Settings(store);
+  try {
+    settings.update({ 'throttle.musixmatchMs': '0' });
+    const report = await musixmatch.test!({ config: settings.read(), log: () => {}, unreachable: () => {}, learn: () => {} });
+    assert.equal(report.ok, false);
+    assert.match(report.detail, /a guest token was obtained but the matcher returned 401 captcha/);
   } finally {
     settings.update({ 'throttle.musixmatchMs': null });
     store.close();
