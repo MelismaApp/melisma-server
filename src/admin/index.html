@@ -232,7 +232,10 @@
             <div class="title">Musixmatch user token</div>
             <div class="desc" style="margin-bottom: 10px">
               Optional. The server mints an anonymous one on demand; your own reaches more of
-              the catalogue.
+              the catalogue. Paste the whole <code>musixmatchUserToken</code> cookie from a signed-in
+              musixmatch.com session rather than a bare token: a token only works with the client it
+              was issued for, and the cookie says which. A token Musixmatch refuses is set aside for
+              an anonymous one, and <strong>Test</strong> says so.
             </div>
             <div class="inline">
               <input type="password" class="mono" id="secret-musixmatchUserToken" />

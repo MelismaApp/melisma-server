@@ -169,3 +169,68 @@ test('the relay is paced as Musixmatch is, with the same allowance per lookup', 
     store.close();
   }
 });
+
+test('a pasted token Musixmatch refuses is set aside for a guest one, and the test says so', async () => {
+  const PASTED = 'deadbeef'.repeat(6);
+  const PASTED_AGAIN = 'cafebabe'.repeat(6);
+  const THIRD = 'feedface'.repeat(6);
+  const GUEST = 'a1b2c3d4e5f6'.repeat(4) + '0123';
+  const asked: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    const token = url.searchParams.get('usertoken');
+    asked.push(`${url.pathname.split('/').pop()}:${token ?? ''}`);
+    if (url.pathname.endsWith('/token.get')) {
+      return Response.json({ message: { header: { status_code: 200 }, body: { user_token: GUEST } } });
+    }
+    if (token === GUEST) {
+      return Response.json({
+        message: { header: { status_code: 200 }, body: { track: { track_id: 7, track_name: 'Bohemian Rhapsody', artist_name: 'Queen', track_length: 354 } } },
+      });
+    }
+    return Response.json({ message: { header: { status_code: 401, hint: 'renew' }, body: [] } });
+  }) as typeof fetch;
+
+  const store = new Store(':memory:');
+  const settings = new Settings(store);
+  const warnings: string[] = [];
+  const ctx = () => ({
+    config: settings.read(),
+    log: (level: string, message: string) => { if (level === 'warn') warnings.push(message); },
+    unreachable: () => {},
+    learn: () => {},
+  });
+  const track = { title: 'Bohemian Rhapsody', artist: 'Queen', album: '', durationMs: 354_000 };
+  try {
+    settings.update({ 'throttle.musixmatchMs': '0', 'secret.musixmatchUserToken': PASTED });
+
+    // A lookup tries the pasted token, is refused, mints a guest token and asks again with it.
+    await musixmatch.fetch(track, ctx());
+    assert.deepEqual(asked, [`matcher.track.get:${PASTED}`, 'token.get:', `matcher.track.get:${GUEST}`]);
+    assert.ok(warnings.some((w) => /refused \(401 renew\)/.test(w)), 'a lookup logs why');
+
+    // The refusal is remembered: straight to the guest, whose token is kept.
+    asked.length = 0;
+    await musixmatch.fetch(track, ctx());
+    assert.deepEqual(asked, [`matcher.track.get:${GUEST}`]);
+
+    // A different token pasted since is tried at once, and set aside again when refused.
+    settings.update({ 'secret.musixmatchUserToken': PASTED_AGAIN });
+    asked.length = 0;
+    await musixmatch.fetch(track, ctx());
+    assert.deepEqual(asked, [`matcher.track.get:${PASTED_AGAIN}`, `matcher.track.get:${GUEST}`]);
+
+    // The test makes the same fallback, and says both halves.
+    settings.update({ 'secret.musixmatchUserToken': THIRD });
+    asked.length = 0;
+    const report = await musixmatch.test!(ctx());
+    assert.equal(report.ok, true);
+    assert.match(report.detail, /pasted token was refused/);
+    assert.match(report.detail, /paste the whole musixmatchUserToken cookie/);
+    assert.match(report.detail, /matched "Bohemian Rhapsody"/);
+    assert.deepEqual(asked, [`matcher.track.get:${THIRD}`, `matcher.track.get:${GUEST}`]);
+  } finally {
+    settings.update({ 'throttle.musixmatchMs': null });
+    store.close();
+  }
+});

@@ -15,7 +15,7 @@
  * collapsing to "not found": when this breaks, the useful question is *which* call broke.
  */
 
-import { backOff, isUnavailable, json, query, request } from '../http.ts';
+import { backOff, isUnavailable, json, query, request, type FetchResult } from '../http.ts';
 import { MATCH_THRESHOLD, cleanTitleOf, primaryArtistOf, score, type TrackQuery } from '../match.ts';
 import { parseRichSync } from '../format/musixmatch.ts';
 import { parseLrc } from '../format/lrc.ts';
@@ -79,6 +79,45 @@ function refused(config: Config): string {
 interface Credential {
   token: string;
   appId: string;
+  /** Pasted by the owner, as opposed to minted here. */
+  own?: boolean;
+}
+
+/**
+ * A pasted token Musixmatch refused, set aside for a while in favour of an anonymous one, as the app
+ * does. Refused means `401 renew` in the body: a bare token pasted from the musixmatch.com cookie
+ * belongs to a web client and does not work under the Android client id it is paired with here. A
+ * different token pasted since is tried at once.
+ */
+let refusedOwn: { token: string; at: number } | null = null;
+const REFUSED_OWN_RETRY_MS = 60 * 60 * 1000;
+const PASTE_THE_COOKIE =
+  'a bare token only works with the client it was issued for; paste the whole musixmatchUserToken cookie instead';
+
+function tokenRefused(matched: { result: { ok: boolean }; value: Envelope<MatcherBody> | null }): boolean {
+  return matched.result.ok && matched.value?.message?.header?.status_code === 401;
+}
+
+async function askMatcher(
+  track: TrackQuery,
+  credential: Credential,
+  ctx: ProviderContext,
+): Promise<{ value: Envelope<MatcherBody> | null; result: FetchResult }> {
+  return json<Envelope<MatcherBody>>(
+    `${apiOf(ctx.config)}/matcher.track.get?${query({
+      format: 'json',
+      app_id: credential.appId,
+      usertoken: credential.token,
+      q_track: cleanTitleOf(track),
+      q_artist: primaryArtistOf(track),
+      q_album: track.album,
+      q_duration: track.durationMs > 0 ? Math.round(track.durationMs / 1000) : undefined,
+      // Checked against the live service: an ISRC it knows wins over the names, one it does not
+      // falls back to them. The score below still has to pass either way.
+      track_isrc: track.isrc,
+    })}`,
+    { headers: clientHeaders(ctx.config) },
+  );
 }
 
 /** The anonymous token, kept for the process's lifetime — minting one per lookup is rude. */
@@ -115,24 +154,18 @@ export const musixmatch: Provider = {
   isConfigured: () => true,
 
   async fetch(track: TrackQuery, ctx: ProviderContext): Promise<ProviderAnswer | null> {
-    const credential = await resolveCredential(ctx);
+    let credential = await resolveCredential(ctx);
     if (!credential) return null;
 
-    const matched = await json<Envelope<MatcherBody>>(
-      `${apiOf(ctx.config)}/matcher.track.get?${query({
-        format: 'json',
-        app_id: credential.appId,
-        usertoken: credential.token,
-        q_track: cleanTitleOf(track),
-        q_artist: primaryArtistOf(track),
-        q_album: track.album,
-        q_duration: track.durationMs > 0 ? Math.round(track.durationMs / 1000) : undefined,
-        // Checked against the live service: an ISRC it knows wins over the names, one it does not
-        // falls back to them. The score below still has to pass either way.
-        track_isrc: track.isrc,
-      })}`,
-      { headers: clientHeaders(ctx.config) },
-    );
+    let matched = await askMatcher(track, credential, ctx);
+    if (credential.own && tokenRefused(matched)) {
+      // Not an outage and not a miss: the pasted token is no good. Ask as a guest instead.
+      refusedOwn = { token: credential.token, at: Date.now() };
+      ctx.log('warn', `musixmatch: the pasted token was refused (401 renew); ${PASTE_THE_COOKIE}. Asking as a guest meanwhile`);
+      credential = await anonymousCredential(ctx);
+      if (!credential) return null;
+      matched = await askMatcher(track, credential, ctx);
+    }
 
     if (matched.result.status === 403) ctx.unreachable(refused(ctx.config));
     else if (isUnavailable(matched.result)) ctx.unreachable(`matcher: ${matched.result.error}`);
@@ -149,7 +182,7 @@ export const musixmatch: Provider = {
         // And stop asking for a while. The status is the guest token being rate-limited, so the next
         // request would be refused too — and each one that is refused *while looking like an answer*
         // costs another track its record.
-        backOff(API, THROTTLED_BACKOFF_MS);
+        backOff(apiOf(ctx.config), THROTTLED_BACKOFF_MS);
         return null;
       }
 
@@ -236,7 +269,8 @@ export const musixmatch: Provider = {
   async test(ctx: ProviderContext) {
     const started = performance.now();
     let why: string | undefined;
-    const credential = await resolveCredential({ ...ctx, unreachable: (detail) => (why ??= detail) });
+    const quietly = { ...ctx, unreachable: (detail: string) => (why ??= detail) };
+    let credential = await resolveCredential(quietly);
     if (!credential) {
       return {
         ok: false,
@@ -244,16 +278,17 @@ export const musixmatch: Provider = {
         detail: why ?? 'could not obtain a token — the anonymous mint is the usual thing to break',
       };
     }
-    const matched = await json<Envelope<MatcherBody>>(
-      `${apiOf(ctx.config)}/matcher.track.get?${query({
-        format: 'json',
-        app_id: credential.appId,
-        usertoken: credential.token,
-        q_track: 'Bohemian Rhapsody',
-        q_artist: 'Queen',
-      })}`,
-      { headers: clientHeaders(ctx.config) },
-    );
+    const sample = { title: 'Bohemian Rhapsody', artist: 'Queen', album: '', durationMs: 0 };
+    let matched = await askMatcher(sample, credential, ctx);
+    // The same fallback a lookup makes, told rather than hidden: the test is where this gets noticed.
+    let aside = '';
+    if (credential.own && tokenRefused(matched)) {
+      refusedOwn = { token: credential.token, at: Date.now() };
+      aside = `the pasted token was refused (401 renew): ${PASTE_THE_COOKIE}. As a guest instead: `;
+      credential = await anonymousCredential(quietly);
+      if (!credential) return { ok: false, ms: matched.result.ms, detail: aside + (why ?? 'no anonymous token either') };
+      matched = await askMatcher(sample, credential, ctx);
+    }
     if (matched.result.status === 403) return { ok: false, ms: matched.result.ms, detail: refused(ctx.config) };
     const status = matched.value?.message?.header?.status_code;
     const name = matched.value?.message?.body?.track?.track_name;
@@ -261,9 +296,10 @@ export const musixmatch: Provider = {
       ok: status === 200 && Boolean(name),
       ms: matched.result.ms,
       detail:
-        status === 200 && name
+        aside +
+        (status === 200 && name
           ? `token works, matched "${name}"`
-          : `token obtained but matcher returned ${status ?? 'nothing'}`,
+          : `token obtained but matcher returned ${status ?? 'nothing'}`),
     };
   },
 
@@ -275,8 +311,16 @@ export const musixmatch: Provider = {
 
 async function resolveCredential(ctx: ProviderContext): Promise<Credential | null> {
   const own = parseUserToken(ctx.config.secrets.musixmatchUserToken);
-  if (own) return own;
+  if (own) {
+    const setAside =
+      refusedOwn && refusedOwn.token === own.token && Date.now() - refusedOwn.at < REFUSED_OWN_RETRY_MS;
+    if (!setAside) return { ...own, own: true };
+  }
+  return anonymousCredential(ctx);
+}
 
+/** The anonymous token, minted once and kept. See `guestToken`. */
+async function anonymousCredential(ctx: ProviderContext): Promise<Credential | null> {
   if (guestToken && Date.now() - guestToken.mintedAt < GUEST_TOKEN_TTL_MS) {
     return { token: guestToken.value, appId: APP_ID };
   }
