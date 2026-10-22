@@ -202,6 +202,13 @@ export class Settings {
     for (const name of SECRET_NAMES) {
       secrets[name] = value(`secret.${name}`, `BL_${screamingSnake(name)}`) ?? '';
     }
+    // Copied from a browser's request headers, these arrive with the header's own words on them,
+    // and Apple refuses `Bearer Bearer …` as an expired or wrong token.
+    secrets.appleBearerToken = secrets.appleBearerToken
+      .replace(/^Authorization:\s*/i, '')
+      .replace(/^Bearer\s+/i, '')
+      .trim();
+    secrets.appleMediaUserToken = secrets.appleMediaUserToken.replace(/^Media-User-Token:\s*/i, '').trim();
 
     return {
       apiKey: value('server.apiKey', 'BL_API_KEY') ?? '',
