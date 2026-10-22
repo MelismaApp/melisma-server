@@ -58,6 +58,12 @@ const COOKIE_APP_IDS = [
   'mxm-backoffice-v1.0',
 ] as const;
 
+/**
+ * A 403 is the API's load balancer turning away the address, whatever the token or client: measured
+ * from a cloud host, while the same requests from home were answered.
+ */
+const ADDRESS_REFUSED = "Musixmatch refuses this server's address (HTTP 403); a new token will not help";
+
 /** A token and the client id it was issued for. Neither works without the other. */
 interface Credential {
   token: string;
@@ -117,7 +123,8 @@ export const musixmatch: Provider = {
       { headers: clientHeaders() },
     );
 
-    if (isUnavailable(matched.result)) ctx.unreachable(`matcher: ${matched.result.error}`);
+    if (matched.result.status === 403) ctx.unreachable(ADDRESS_REFUSED);
+    else if (isUnavailable(matched.result)) ctx.unreachable(`matcher: ${matched.result.error}`);
     const found = matched.value?.message?.body?.track;
     if (!found?.track_id) {
       const hint = matched.value?.message?.header?.status_code;
@@ -217,12 +224,13 @@ export const musixmatch: Provider = {
 
   async test(ctx: ProviderContext) {
     const started = performance.now();
-    const credential = await resolveCredential(ctx);
+    let why: string | undefined;
+    const credential = await resolveCredential({ ...ctx, unreachable: (detail) => (why ??= detail) });
     if (!credential) {
       return {
         ok: false,
         ms: Math.round(performance.now() - started),
-        detail: 'could not obtain a token — the anonymous mint is the usual thing to break',
+        detail: why ?? 'could not obtain a token — the anonymous mint is the usual thing to break',
       };
     }
     const matched = await json<Envelope<MatcherBody>>(
@@ -235,6 +243,7 @@ export const musixmatch: Provider = {
       })}`,
       { headers: clientHeaders() },
     );
+    if (matched.result.status === 403) return { ok: false, ms: matched.result.ms, detail: ADDRESS_REFUSED };
     const status = matched.value?.message?.header?.status_code;
     const name = matched.value?.message?.body?.track?.track_name;
     return {
@@ -265,6 +274,11 @@ async function resolveCredential(ctx: ProviderContext): Promise<Credential | nul
     `${API}/token.get?${query({ format: 'json', app_id: APP_ID })}`,
     { headers: clientHeaders() },
   );
+
+  if (minted.result.status === 403) {
+    ctx.unreachable(ADDRESS_REFUSED);
+    return null;
+  }
 
   // The response is a 200 whose body carries the real status. `401 captcha` means the mint is
   // rate-limiting this address — a wait rather than a refusal, so it must not be reported as

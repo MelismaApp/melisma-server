@@ -45,3 +45,30 @@ test('the matcher is sent the ISRC, and still the names beside it', async () => 
   // The names go too: an ISRC Musixmatch does not have falls back to them.
   assert.equal(matcher.searchParams.get('q_track'), 'BOOMPALA');
 });
+
+test('a 403 is reported as the address being refused, not as a token problem', async () => {
+  globalThis.fetch = (async () =>
+    new Response('<html><head><title>403 Forbidden</title></head></html>', {
+      status: 403,
+      headers: { 'Content-Type': 'text/html' },
+    })) as typeof fetch;
+
+  const store = new Store(':memory:');
+  const settings = new Settings(store);
+  const refused = /refuses this server's address/;
+  try {
+    // No token of its own: the anonymous mint is what is turned away.
+    const anonymous = await musixmatch.test!({ config: settings.read(), log: () => {}, unreachable: () => {}, learn: () => {} });
+    assert.match(anonymous.detail, refused);
+
+    // A pasted token is turned away just the same, and a lookup says so too.
+    settings.update({ 'secret.musixmatchUserToken': '0123456789abcdef'.repeat(3) + 'abcdef' });
+    const ctx = { config: settings.read(), log: () => {}, unreachable: (detail: string) => reasons.push(detail), learn: () => {} };
+    const reasons: string[] = [];
+    assert.match((await musixmatch.test!(ctx)).detail, refused);
+    await musixmatch.fetch({ title: 'Lemon', artist: 'Kenshi Yonezu', album: '', durationMs: 255_000 }, ctx);
+    assert.match(reasons.join(' | '), refused);
+  } finally {
+    store.close();
+  }
+});
