@@ -18,7 +18,7 @@ before(async () => {
   // the cache, and a test that reaches the network is a test that fails on a train.
   app = createApp(':memory:');
   apiKey = app.settings.read().apiKey;
-  for (const id of ['apple', 'amll', 'netease', 'musixmatch', 'spotify', 'lrclib']) {
+  for (const id of ['apple', 'lrcred', 'amll', 'netease', 'musixmatch', 'spotify', 'lrclib']) {
     app.settings.update({ [`provider.${id}.enabled`]: '0' });
   }
 
@@ -481,7 +481,7 @@ test('the status route reports every source without leaking a credential', async
     };
 
     const byId = new Map(body.sources.map((source) => [source.id, source]));
-    assert.equal(byId.size, 6, 'every source should be reported, including ones that cannot run');
+    assert.equal(byId.size, 7, 'every source should be reported, including ones that cannot run');
     // Disabled in this suite's setup, and that is a different thing from missing a token.
     assert.match(byId.get('lrclib')!.detail, /off on the server/i);
     // Enabled but with only one of the two tokens Apple needs.
@@ -1265,7 +1265,7 @@ test('the source test reports every source, and asks about a real track', async 
   // Every source appears whether or not it could be asked. A source test that silently omits the
   // ones it skipped is how "why is Apple not answering" stays unanswered.
   const ids = body.sources.map((source: { id: string }) => source.id).sort();
-  assert.deepEqual(ids, ['amll', 'apple', 'lrclib', 'musixmatch', 'netease', 'spotify']);
+  assert.deepEqual(ids, ['amll', 'apple', 'lrclib', 'lrcred', 'musixmatch', 'netease', 'spotify']);
 
   // All disabled in this harness, so nothing reached the network and every answer says why.
   for (const source of body.sources) {

@@ -21,7 +21,7 @@ before(async () => {
   app = createApp(':memory:');
   adminKey = app.settings.read().apiKey;
   // Every source off, so a lookup answers from the cache or not at all, and never reaches the network.
-  for (const id of ['apple', 'amll', 'netease', 'musixmatch', 'spotify', 'lrclib']) {
+  for (const id of ['apple', 'lrcred', 'amll', 'netease', 'musixmatch', 'spotify', 'lrclib']) {
     app.settings.update({ [`provider.${id}.enabled`]: '0' });
   }
   // The deployed setting: nothing gets in without a key.

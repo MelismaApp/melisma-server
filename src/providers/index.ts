@@ -12,11 +12,12 @@ import type { Provider } from './types.ts';
 import { amll } from './amll.ts';
 import { apple } from './apple.ts';
 import { lrclib } from './lrclib.ts';
+import { lrcred } from './lrcred.ts';
 import { musixmatch } from './musixmatch.ts';
 import { netease } from './netease.ts';
 import { spotify } from './spotify.ts';
 
-export const PROVIDERS: Provider[] = [apple, amll, netease, musixmatch, spotify, lrclib];
+export const PROVIDERS: Provider[] = [apple, lrcred, amll, netease, musixmatch, spotify, lrclib];
 
 export function providerById(id: string): Provider | undefined {
   return PROVIDERS.find((provider) => provider.id === id);

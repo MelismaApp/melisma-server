@@ -361,7 +361,9 @@ licence changes what the sources' own terms allow. See [Sharing it](#sharing-it)
 
 The sources, none of them affiliated with this:
 [AMLL TTML Database](https://github.com/amll-dev/amll-ttml-db) (CC0, community-timed),
-[LRCLIB](https://lrclib.net), NetEase Cloud Music, Musixmatch, Spotify, Apple Music.
+[lrc.red](https://lrc.red) (Apple Music's lyrics by ISRC, no token; asks for a named User-Agent
+and a credit, both given), [LRCLIB](https://lrclib.net), NetEase Cloud Music, Musixmatch, Spotify,
+Apple Music.
 
 The Hokkien detector's tables (`src/hokkien/`) are built from 台華線頂對照典 by 鄭良偉 and 楊允言
 and English Wiktionary (CC BY-SA 4.0), iTaigi (CC0) and OpenCC (Apache-2.0); see

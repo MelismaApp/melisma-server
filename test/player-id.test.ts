@@ -18,7 +18,7 @@ let base: string;
 
 before(async () => {
   app = createApp(':memory:');
-  for (const id of ['apple', 'amll', 'netease', 'musixmatch', 'spotify', 'lrclib']) {
+  for (const id of ['apple', 'lrcred', 'amll', 'netease', 'musixmatch', 'spotify', 'lrclib']) {
     app.settings.update({ [`provider.${id}.enabled`]: '0' });
   }
   app.settings.update({ 'server.allowLocalNetwork': '1' });

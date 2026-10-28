@@ -137,10 +137,12 @@ export type SecretName = (typeof SECRET_NAMES)[number];
  * the only step. Priority is trust, not order of attempt: they are all asked at once.
  *
  * Apple leads because when it answers it answers with everything, and it is the source the
- * phone cannot reach on its own. That is the reason this server exists.
+ * phone cannot reach on its own. That is the reason this server exists. lrc.red serves the same
+ * file by ISRC without the token, so it sits right behind.
  */
 export const PROVIDER_DEFAULTS: Record<string, ProviderSetting> = {
   apple: { enabled: true, priority: 0 },
+  lrcred: { enabled: true, priority: 1 },
   amll: { enabled: true, priority: 1 },
   netease: { enabled: true, priority: 2 },
   musixmatch: { enabled: true, priority: 3 },

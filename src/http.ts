@@ -34,8 +34,10 @@ export interface FetchResult {
   error?: string;
 }
 
+// A name, a link and a way to get in touch: what the sources that state terms (lrc.red) ask for.
 const USER_AGENT =
-  'MelismaServer/0.1 (personal cache; https://github.com/MelismaApp/melisma-server)';
+  'MelismaServer/0.1 (personal cache; https://github.com/MelismaApp/melisma-server; ' +
+  'contact https://github.com/MelismaApp/melisma-server/issues)';
 
 /** Politeness per host: one request at a time, with a floor on the gap between them. */
 /** Named because the pace of this one is a setting, and two spellings of a host key is a silent bug. */
@@ -64,6 +66,7 @@ const DEFAULT_BURST = 1;
 
 const MIN_INTERVAL_MS: Record<string, number> = {
   'lrclib.net': 350,
+  'lrc.red': 350,
   'api.amll.dev': 350,
   'music.163.com': 250,
   // The desktop host is discontinued; the Android player's is what works. Keyed by the host that

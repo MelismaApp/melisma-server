@@ -103,7 +103,7 @@ let adminKey: string;
 before(async () => {
   app = createApp(':memory:');
   adminKey = app.settings.read().apiKey;
-  for (const id of ['apple', 'amll', 'netease', 'musixmatch', 'spotify', 'lrclib']) {
+  for (const id of ['apple', 'lrcred', 'amll', 'netease', 'musixmatch', 'spotify', 'lrclib']) {
     app.settings.update({ [`provider.${id}.enabled`]: '0' });
   }
   server = start(app, { host: '127.0.0.1', port: 0, quiet: true });
