@@ -83,6 +83,11 @@ export interface Provider {
    * nothing has changed.
    */
   usesIsrc?: boolean;
+  /**
+   * Whose file this source serves, when it is another's: lrc.red serves Apple's. Two answers from one
+   * origin are one piece of evidence in the merge, not two.
+   */
+  origin?: string;
   isConfigured(config: Config): boolean;
   fetch(query: TrackQuery, ctx: ProviderContext): Promise<ProviderAnswer | null>;
   test(ctx: ProviderContext): Promise<ProviderTest>;

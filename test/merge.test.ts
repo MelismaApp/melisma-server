@@ -413,3 +413,26 @@ test('every candidate is reported, winners and losers alike', () => {
   assert.equal(result.summaries[0].match, 0.91);
   assert.equal(result.summaries[1].rejected, 'no lines');
 });
+
+test("a source serving another's file is one vote with it, not two", () => {
+  // lrc.red serves Apple's file. The same three-line fragment from both must not outvote a whole song:
+  // counted twice it pulls the coverage median down to three, and the fragment takes the backbone.
+  const fragment = fourLines(timed).slice(0, 3);
+  const whole = Array.from({ length: 20 }, (_, index) =>
+    timed(`line ${index + 1}`, 1000 + index * 4000, 4000 + index * 4000),
+  );
+  const result = merge([
+    candidate('apple', fragment, { priority: 0 }),
+    candidate('lrcred', fragment, { priority: 1, origin: 'apple' }),
+    candidate('amll', whole, { priority: 2 }),
+  ]);
+  assert.equal(result.document?.provenance.timing, 'amll');
+  assert.equal(result.document?.lines.length, 20);
+  assert.match(result.summaries.find((s) => s.provider === 'lrcred')?.rejected ?? '', /same file as apple, counted once/);
+  // The more trusted copy is the one that stays, whichever came first.
+  const reversed = merge([
+    candidate('lrcred', fragment, { priority: 1, origin: 'apple' }),
+    candidate('apple', fragment, { priority: 0 }),
+  ]);
+  assert.equal(reversed.document?.provenance.timing, 'apple');
+});

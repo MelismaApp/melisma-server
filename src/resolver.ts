@@ -932,6 +932,7 @@ export class Resolver {
             doc: answer.doc,
             match: answer.match,
             priority: config.providers[provider.id]?.priority ?? 99,
+            origin: provider.origin,
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1043,6 +1044,7 @@ export class Resolver {
         // so it counts as a match; only the tie-break ordering loses any information.
         match: 1,
         priority: config.providers[baseId]?.priority ?? 99,
+        origin: providerById(baseId)?.origin,
       });
     }
 

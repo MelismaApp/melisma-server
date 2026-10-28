@@ -39,6 +39,7 @@ export const lrcred: Provider = {
   requires: [],
   wordLevel: true,
   usesIsrc: true,
+  origin: 'apple',
   isConfigured: () => true,
 
   async fetch(track: TrackQuery, ctx: ProviderContext): Promise<ProviderAnswer | null> {

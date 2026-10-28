@@ -178,3 +178,64 @@ test('a 404 is a settled miss; 429 and 5xx are the service being unavailable', a
     close();
   }
 });
+
+test("it declares Apple as its origin, and a re-merge counts the two archived copies once", async () => {
+  assert.equal(lrcred.origin, 'apple');
+  const { createApp } = await import('../src/server.ts');
+  const app = createApp(':memory:');
+  try {
+    const key = 'isrc:USUG11904206';
+    const whole =
+      '<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Word"><body><div>' +
+      Array.from({ length: 20 }, (_, i) => {
+        const start = (1 + i * 4).toFixed(3);
+        const end = (4 + i * 4).toFixed(3);
+        return `<p begin="${start}" end="${end}" itunes:key="L${i + 1}" ttm:agent="v1"><span begin="${start}" end="${end}">line ${i + 1}</span></p>`;
+      }).join('') +
+      '</div></body></tt>';
+    for (const [provider, body] of [['apple', TTML], ['lrcred', TTML], ['amll', whole]] as const) {
+      app.store.putRaw({ key, provider, body, contentType: 'application/ttml+xml', ok: true, note: '' });
+    }
+    const merged = app.resolver.remerge(key);
+    // AMLL's twenty lines as the backbone, with Apple's backing vocal borrowed onto them.
+    assert.equal(merged?.provenance.timing, 'amll');
+    assert.ok((merged?.lines.length ?? 0) >= 20, `${merged?.lines.length} lines`);
+    assert.equal(merged?.provenance.background, 'apple');
+    assert.match(merged?.candidates.find((c) => c.provider === 'lrcred')?.rejected ?? '', /same file as apple/);
+  } finally {
+    app.store.close();
+  }
+});
+
+test('a live lookup counts Apple and lrc.red once too', async () => {
+  const { createApp } = await import('../src/server.ts');
+  const { document, line } = await import('../src/model.ts');
+  const lines = (count: number) =>
+    Array.from({ length: count }, (_, i) => line({ text: `line ${i + 1}`, startMs: 1000 + i * 4000, endMs: 4000 + i * 4000 }));
+  const source = (id: string, count: number, origin?: string) => ({
+    id,
+    label: id,
+    description: 'test',
+    requires: [],
+    wordLevel: false,
+    origin,
+    isConfigured: () => true,
+    fetch: async () => ({ doc: document(lines(count)), match: 1, raw: { body: id, contentType: 'text/plain' } }),
+    test: async () => ({ ok: true, detail: 'stub' }),
+    reparse: () => null,
+  });
+  // Stood in for the real ones, so no token and no network is involved.
+  const original = [...PROVIDERS];
+  PROVIDERS.length = 0;
+  PROVIDERS.push(source('apple', 3), source('lrcred', 3, 'apple'), source('amll', 20));
+  const app = createApp(':memory:');
+  try {
+    const resolution = await app.resolver.resolve({ title: 'Song', artist: 'Someone', album: '', durationMs: 80_000 });
+    assert.equal(resolution.document?.provenance.timing, 'amll');
+    assert.match(resolution.document?.candidates.find((c) => c.provider === 'lrcred')?.rejected ?? '', /same file as apple/);
+  } finally {
+    PROVIDERS.length = 0;
+    PROVIDERS.push(...original);
+    app.store.close();
+  }
+});

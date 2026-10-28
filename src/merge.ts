@@ -49,6 +49,8 @@ export interface Candidate {
   match: number;
   /** The user's ordering. Lower is more trusted; breaks ties only. */
   priority: number;
+  /** Whose file this is, when the source serves another's. See `Provider.origin`. */
+  origin?: string;
   /**
    * Set when the other sources agree its timings belong to a different recording.
    *
@@ -99,6 +101,26 @@ export function merge(candidates: Candidate[], options: MergeOptions = {}): Merg
       usable.push(candidate);
     }
     summaries.push(summary);
+  }
+
+  // One origin, one vote. lrc.red serves Apple's file: counted twice it sets the coverage median and
+  // corroborates itself in the cross-check, and a three-line fragment from both outvotes a whole song
+  // from somebody else. The more trusted copy stays; the other is archived and shown, not merged.
+  const byOrigin = new Map<string, Candidate[]>();
+  for (const candidate of usable) {
+    const origin = candidate.origin ?? candidate.provider;
+    byOrigin.set(origin, [...(byOrigin.get(origin) ?? []), candidate]);
+  }
+  for (const same of byOrigin.values()) {
+    if (same.length < 2) continue;
+    const [kept, ...duplicates] = [...same].sort(
+      (a, b) => a.priority - b.priority || b.doc.lines.length - a.doc.lines.length,
+    );
+    for (const duplicate of duplicates) {
+      const summary = summaries.find((s) => s.provider === duplicate.provider);
+      if (summary) summary.rejected = `the same file as ${kept!.provider}, counted once`;
+      usable.splice(usable.indexOf(duplicate), 1);
+    }
   }
 
   if (usable.length === 0) return { document: null, summaries };
